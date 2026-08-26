@@ -1,0 +1,674 @@
+# Read ONE pull request with Claude and post the findings as one GitHub review:
+# the whole diff for a PR that fits a model context, and a sharded fan-out for one
+# that does not. Called by a consumer repository's own workflow; every script it
+# runs comes from THIS repository at the commit the caller pinned on its `uses:`
+# line, never from the repository under review.
+#
+# ── Trust model ───────────────────────────────────────────────────────────────
+#
+# The caller fires on `pull_request_target`, so these jobs hold the base
+# repository's secrets while a fork's pull request is what triggered them. Three
+# rules keep that safe, and every job below holds all three:
+#   1. The checkout is the caller's DEFAULT BRANCH, from the event payload GitHub
+#      writes — never the untrusted PR head, and never the author-chosen base.
+#      Nothing requires a PR to target the default branch, so a `base.ref`
+#      checkout would run branch A's rewritten machinery while PR B's own diff
+#      stays clean.
+#   2. The PR's changes are read only as DATA, through `gh pr diff`, and they pass
+#      the agent-sanitizer before the agent sees them.
+#   3. Least privilege per job. `review_shard`, which reads the untrusted diff and
+#      posts nothing, holds `contents: read` alone.
+# A successful prompt injection can post a PR comment; it cannot push code, merge,
+# or reach any other scope.
+name: Claude PR review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      reviewer-repository:
+        description: "owner/name of the repository that ships this reviewer. It is cloned at the sha below, so the reviewed repository cannot rewrite the code that reviews it."
+        required: true
+        type: string
+      reviewer-ref:
+        description: "Branch, tag or commit of reviewer-repository to run. LEAVE IT EMPTY: the workflow then runs the scripts from the very commit the caller pinned on its own `uses:` line, so there is one pin and it cannot drift."
+        required: false
+        default: ""
+        type: string
+      model:
+        description: "The model behind every verdict. One whole-diff read gates the merge, so this is not a place to economize."
+        required: false
+        default: "claude-opus-5"
+        type: string
+      review-prompt:
+        description: "Repo-relative path IN THE CALLING repository to the review instructions. Empty uses this reviewer's own prompts/claude-pr-review.md, which is generic; name your own to add the conventions a reviewer of your tree should hold it to."
+        required: false
+        default: ""
+        type: string
+      setup-command:
+        description: "Command run in the caller's base checkout before the model call — a dependency sync a later step needs (the log redactor's interpreter, for one). Empty runs nothing."
+        required: false
+        default: ""
+        type: string
+      elide-command:
+        description: "Command in the caller's base checkout that rewrites the RAW diff at $1 in place, dropping generated output no review can act on. Empty reviews the whole diff. The reviewer's budget is diff lines, so a repository whose diffs are mostly build artifacts should name one."
+        required: false
+        default: ""
+        type: string
+      post-review-command:
+        description: "Command in the caller's base checkout, run after the review lands, with GH_TOKEN/GH_REPO/PR/REPORT_SHA in the environment. The review posts with the workflow GITHUB_TOKEN, whose events fire no workflows, so a merge gate that reads the review must be re-evaluated here or it never sees it. Empty runs nothing."
+        required: false
+        default: ""
+        type: string
+      log-redactor:
+        description: "Repo-relative path in the CALLING repository to a redactor for the agent's execution log, called as `<python> <redactor> --in <log> --out <dir> --mode auto --hooks-dir <caller>/.claude/hooks --repo-root <caller>`. EMPTY PUBLISHES NO LOGS: an agent transcript carries whatever the diff exposed it to, so the absence of a redactor fails closed rather than uploading it raw."
+        required: false
+        default: ""
+        type: string
+      log-redactor-python:
+        description: "Interpreter that can import the redactor's engine, relative to the caller's checkout or absolute. Defaults to the system python3."
+        required: false
+        default: "python3"
+        type: string
+      max-diff-lines:
+        description: "The single-context cap. A diff line costs about 13.6 tokens, so 12000 lines is roughly 163k tokens against a 200k window. Above it the read shards."
+        required: false
+        default: 12000
+        type: number
+      shard-max-lines:
+        description: "Lines per shard. The legs run in parallel, so the review's wall clock is one leg's read; a smaller shard trades that for a finding likelier to fall across a boundary."
+        required: false
+        default: 4000
+        type: number
+      max-shardable-lines:
+        description: "The largest diff that is sharded at all. Above it the PR gets a human-review notice and no automated read."
+        required: false
+        default: 192000
+        type: number
+      review-timeout-seconds:
+        description: "Wall clock ONE credential attempt may spend on the read."
+        required: false
+        default: 1500
+        type: number
+    secrets:
+      rung_1:
+        description: "First and REQUIRED tier: a metered Anthropic API key, attempted before every subscription tier — this bills real credits on every run."
+        required: true
+      rung_2:
+        description: "Second-tier Claude Code OAuth token; empty skips the second attempt."
+        required: false
+      rung_3:
+        description: "Third-tier token; empty skips the third attempt."
+        required: false
+      rung_4:
+        description: "Fourth-tier token; empty skips the fourth attempt."
+        required: false
+      rung_5:
+        description: "Fifth-tier token; empty skips the fifth attempt."
+        required: false
+      rung_6:
+        description: "Sixth-tier token; empty skips the sixth attempt."
+        required: false
+      rung_7:
+        description: "Seventh-tier token; empty skips the seventh attempt."
+        required: false
+      rung_8:
+        description: "Eighth-tier token; empty skips the eighth attempt."
+        required: false
+
+permissions: {}
+
+jobs:
+  # Decide whether to review. EVERY PR is reviewed — no skip by title, author or
+  # draft state — so a bot-authored or machine-cut release PR gets a genuine read
+  # rather than an unread rubber-stamp. The script then decides `opened` (always —
+  # GitHub fires it once per PR) against `ready_for_review` and `synchronize`,
+  # which both repeat without limit and so review only when the PR's ONE
+  # whole-diff read is still owed, or when the [opus-review] head-commit opt-in
+  # buys another.
+  decide:
+    name: Decide whether to review
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Reads the reviews already on the PR, which is what tells the script
+      # whether the one whole-diff read is still owed.
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      # True only for the never-reviewed trigger, whose read can race a review
+      # that is still generating; the review job re-asks the question from inside
+      # the concurrency group.
+      recheck: ${{ steps.decide.outputs.recheck }}
+    steps:
+      # No caller checkout at all: this job runs the reviewer's own script and
+      # reads the PR through the API, so the repository under review is never on
+      # disk here.
+      - name: Check out the reviewer from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+        run: |
+          # Empty means neither the caller nor GitHub named a commit, and a clone
+          # would then run this repository's default branch — which is what
+          # pinning `uses:` is for. Refuse rather than run unpinned code beside
+          # the caller's secrets.
+          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          dest="${RUNNER_TEMP}/reviewer"
+          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # A ref may be a branch, a tag or a commit sha. `checkout --detach`
+          # takes all three; `clone --branch` refuses a sha, which is the form a
+          # caller pinning its `uses:` line has.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
+          # checkout must not be able to replace the code reviewing it.
+          echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - name: Decide whether to review
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
+
+  review:
+    name: Claude PR review
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    # Concurrency lives on the REVIEW job, not the workflow: a dropped event's
+    # skipped job may or may not displace a queued review, and a gate that strands
+    # silently could not tolerate either answer. cancel-in-progress is false so a
+    # started review always runs to completion — a push mid-review cannot throw
+    # the read away. Keyed by PR number, never static, so it strands no check.
+    concurrency:
+      group: claude-pr-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    # A timeout here strands the PR: no review posts, and `decide` re-runs a
+    # missed first pass only on a later `synchronize`. The budget therefore clears
+    # the whole-diff read's measured tail with room to spare: reads run 7.4 min
+    # median, 10.7 min p90, 14.0 min max.
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the caller's trusted default branch
+      pull-requests: write # post the review
+      statuses: write # post-review-command re-posts a merge gate's verdict
+      actions: read # the recheck lists in-flight runs of this workflow
+      checks: read # a caller's gate may read another reviewer's check run
+    outputs:
+      sharded: ${{ steps.prepare.outputs.sharded }}
+      shards: ${{ steps.prepare.outputs.shards }}
+    steps:
+      - name: Check out the calling repository's default (trusted) branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the reviewer from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+        run: |
+          # Empty means neither the caller nor GitHub named a commit, and a clone
+          # would then run this repository's default branch — which is what
+          # pinning `uses:` is for. Refuse rather than run unpinned code beside
+          # the caller's secrets.
+          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          dest="${RUNNER_TEMP}/reviewer"
+          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # A ref may be a branch, a tag or a commit sha. `checkout --detach`
+          # takes all three; `clone --branch` refuses a sha, which is the form a
+          # caller pinning its `uses:` line has.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
+          # checkout must not be able to replace the code reviewing it.
+          echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - name: Re-check that the PR still owes a review
+        # Runs INSIDE the concurrency group, so the earlier run's review job has
+        # finished: its review is submitted, still generating on the shard jobs
+        # (which the script spots through the runs API), or was never produced.
+        # Only decide's never-reviewed trigger can race that way, so only it asks.
+        id: recheck
+        if: needs.decide.outputs.recheck == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "${REVIEWER_DIR}/recheck-pr-review-owed.sh"
+
+      - name: Set up Node and the input sanitizer
+        if: steps.recheck.outputs.skip != 'true'
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+
+      - name: Install the reviewer's toolchain
+        if: steps.recheck.outputs.skip != 'true'
+        run: |
+          bash "${REVIEWER_DIR}/install-input-sanitizer.sh"
+          bash "${REVIEWER_DIR}/install-claude-cli.sh"
+
+      - name: Run the caller's setup command
+        # The caller's own dependency sync, in its trusted base checkout — what
+        # puts the log redactor's engine on the interpreter it names, for one.
+        if: steps.recheck.outputs.skip != 'true' && inputs.setup-command != ''
+        env:
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -c "$SETUP_COMMAND"
+
+      - name: Bail if a newer push already superseded this head
+        # The owed-review re-check runs before the setup steps, so a push landing
+        # inside that window still spends a paid read on a head nobody waits on.
+        # This asks the same question at the last step boundary before the model
+        # call. The [opus-review] synchronize opt-in alone is exempt: it has no
+        # guaranteed successor run, so bailing could strand the request.
+        id: fresh
+        if: >-
+          steps.recheck.outputs.skip != 'true' &&
+          (needs.decide.outputs.recheck == 'true' || github.event.action != 'synchronize')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash "${REVIEWER_DIR}/recheck-pr-head-current.sh"
+
+      - name: Fetch and sanitize the untrusted PR input
+        # Writes the sanitized files the agent reads, and ROUTES the review by
+        # size: a diff over max-diff-lines no longer fits one model context, so it
+        # is split per file and the shard matrix below reads the pieces. Only a
+        # diff too large even to shard sets unreviewable=true.
+        id: prepare
+        # The one gate that matters: every step below keys off this step's outputs
+        # or its conclusion, so a skipped prepare skips the whole read.
+        if: steps.recheck.outputs.skip != 'true' && steps.fresh.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          ELIDE_COMMAND: ${{ inputs.elide-command }}
+          MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
+          SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
+          MAX_SHARDABLE_LINES: ${{ inputs.max-shardable-lines }}
+        run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
+
+      - name: Post the oversized notice as a review plus a human-review thread
+        # A diff too large even to shard gets no automated read, so the notice
+        # posts as a COMMENT review plus one thread a HUMAN resolves after
+        # reviewing — the PR merges on that sign-off instead of staying blocked.
+        if: steps.prepare.outputs.unreviewable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash "${REVIEWER_DIR}/post-oversized-review.sh"
+
+      - name: Hand the sanitized input to the shard reviewers
+        # The shards live under runner.temp, which does not survive the job. The
+        # FULL diff.txt rides along: every shard's findings are line coordinates
+        # into it, and the synthesis job anchors them against it.
+        if: steps.prepare.outputs.sharded == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-review-input
+          path: ${{ runner.temp }}/pr-input
+          retention-days: 1
+
+      - name: Review the PR with Claude
+        id: claude_review
+        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        env:
+          # Rung 1 is the metered key: a review spends the caller's own funded key
+          # first and reaches a subscription token only once it errors. An empty
+          # rung is not a stop — the ladder drops it and reaches the rungs behind.
+          RUNG_1_TOKEN: ${{ secrets.rung_1 }}
+          RUNG_2_TOKEN: ${{ secrets.rung_2 }}
+          RUNG_3_TOKEN: ${{ secrets.rung_3 }}
+          RUNG_4_TOKEN: ${{ secrets.rung_4 }}
+          RUNG_5_TOKEN: ${{ secrets.rung_5 }}
+          RUNG_6_TOKEN: ${{ secrets.rung_6 }}
+          RUNG_7_TOKEN: ${{ secrets.rung_7 }}
+          RUNG_8_TOKEN: ${{ secrets.rung_8 }}
+          MODEL: ${{ inputs.model }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py"
+
+      - name: Fail loud if every credential attempt errored
+        # The ladder advances through the fallbacks on a proven error; if the LAST
+        # attempt still errored this classifies it — a zero-cost credential
+        # failure against a real run failure — instead of surfacing as the generic
+        # "no review.json".
+        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        env:
+          EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
+          CONTEXT: Claude PR review attempt
+        run: /usr/bin/python3 "${REVIEWER_DIR}/checks/claude-execution.py"
+
+      - name: Post the structured review
+        # Turns review.json into ONE PR review with inline comments and suggested
+        # edits, validating every anchor against the diff first.
+        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Carries total_cost_usd for the review's cost footer.
+          EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
+        run: bash "${REVIEWER_DIR}/post-pr-review.sh"
+
+      - name: Re-evaluate the caller's merge gate on this head
+        # The review posted with the workflow GITHUB_TOKEN, whose events fire no
+        # workflows, so a gate that reads the review never hears about it. This is
+        # the only step that posts a verdict on THIS run's head, which is why it
+        # runs whenever prepare succeeded and why it carries always(): an implicit
+        # success() would skip it exactly when an earlier step reddened the job.
+        # The stale-head bail is the one path that skips it — that verdict would
+        # name a head the PR no longer has.
+        if: >-
+          always() && inputs.post-review-command != '' &&
+          (steps.prepare.conclusion == 'success' || steps.recheck.outputs.skip == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          POST_REVIEW_COMMAND: ${{ inputs.post-review-command }}
+        run: bash -c "$POST_REVIEW_COMMAND"
+
+      - name: Stage the run's Claude logs, redacted
+        # always(): the log is most needed when the job just failed, and equally
+        # when it stayed GREEN on a wrong result, which has no failing step to
+        # hang an upload off. An absent log-redactor publishes NOTHING.
+        id: stage_logs
+        if: >-
+          always() && inputs.log-redactor != '' &&
+          steps.recheck.outputs.skip != 'true' && steps.fresh.outputs.stale != 'true'
+        timeout-minutes: 5
+        env:
+          LOGS_PATH: ${{ steps.claude_review.outputs.execution_file }}
+          LOGS_OUT: ${{ runner.temp }}/agent-logs-upload/pr-review
+          REDACTOR: ${{ github.workspace }}/${{ inputs.log-redactor }}
+          REPO_ROOT: ${{ github.workspace }}
+          HOOKS_DIR: ${{ github.workspace }}/.claude/hooks
+          PYTHON: ${{ inputs.log-redactor-python }}
+        run: |
+          mkdir -p "${LOGS_OUT}"
+          bash "${REVIEWER_DIR}/stage-agent-logs.sh"
+
+      - name: Publish the run's Claude logs
+        if: always() && steps.stage_logs.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-logs-pr-review
+          path: ${{ runner.temp }}/agent-logs-upload/pr-review
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Sharded fan-out — the path for a PR whose diff exceeds one model context, and
+  # which without it gets no automated read at all. Each leg reads ONE per-file
+  # shard; review_synthesis folds the per-shard verdicts into the one posted
+  # review. Each leg's shard is a slice of the ALREADY-sanitized diff, and this
+  # job holds contents:read ONLY — it can post nothing, so even a successful
+  # injection in a shard reaches no PR surface from here.
+  review_shard:
+    name: Claude PR review (shard ${{ matrix.shard }})
+    needs: review
+    if: needs.review.outputs.sharded == 'true'
+    runs-on: ubuntu-latest
+    # Matches the review job's 30, and for the same reason: this budget covers a
+    # whole-diff-sized read PLUS the redacting log upload after it, and an expiry
+    # here CANCELS the leg after its findings are already uploaded.
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the caller's trusted default branch; nothing may be posted
+    strategy:
+      # No fail-fast: one shard's credential exhaustion must not cancel the
+      # others. review_synthesis refuses to post unless EVERY shard produced a
+      # review, so a lost shard fails loud there rather than silently shrinking
+      # the coverage the review claims.
+      fail-fast: false
+      # Every leg draws on the SAME credential pool at the same moment, so one
+      # rate-limited leg costs the PR its whole review, and an unbounded matrix
+      # makes that likelier the larger the PR.
+      max-parallel: 6
+      matrix:
+        shard: ${{ fromJSON(needs.review.outputs.shards) }}
+    steps:
+      - name: Check out the calling repository's default (trusted) branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the reviewer from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+        run: |
+          # Empty means neither the caller nor GitHub named a commit, and a clone
+          # would then run this repository's default branch — which is what
+          # pinning `uses:` is for. Refuse rather than run unpinned code beside
+          # the caller's secrets.
+          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          dest="${RUNNER_TEMP}/reviewer"
+          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # A ref may be a branch, a tag or a commit sha. `checkout --detach`
+          # takes all three; `clone --branch` refuses a sha, which is the form a
+          # caller pinning its `uses:` line has.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
+          # checkout must not be able to replace the code reviewing it.
+          echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+
+      - name: Install the reviewer's toolchain
+        run: bash "${REVIEWER_DIR}/install-claude-cli.sh"
+
+      - name: Run the caller's setup command
+        if: inputs.setup-command != ''
+        env:
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -c "$SETUP_COMMAND"
+
+      - name: Fetch the sanitized input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-review-input
+          path: ${{ runner.temp }}/pr-input
+
+      - name: Narrow this leg's diff.txt to its shard
+        # The ladder reads diff.txt by that name, so hand it the shard under that
+        # name rather than teaching the shared reader about sharding.
+        env:
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          SHARD: ${{ matrix.shard }}
+        run: cp "${PR_INPUT_DIR}/shards/${SHARD}" "${PR_INPUT_DIR}/diff.txt"
+
+      - name: Review this shard with Claude
+        id: claude_review
+        env:
+          RUNG_1_TOKEN: ${{ secrets.rung_1 }}
+          RUNG_2_TOKEN: ${{ secrets.rung_2 }}
+          RUNG_3_TOKEN: ${{ secrets.rung_3 }}
+          RUNG_4_TOKEN: ${{ secrets.rung_4 }}
+          RUNG_5_TOKEN: ${{ secrets.rung_5 }}
+          RUNG_6_TOKEN: ${{ secrets.rung_6 }}
+          RUNG_7_TOKEN: ${{ secrets.rung_7 }}
+          RUNG_8_TOKEN: ${{ secrets.rung_8 }}
+          MODEL: ${{ inputs.model }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py"
+
+      - name: Fail loud if every credential attempt errored
+        env:
+          EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
+          CONTEXT: Claude PR review shard ${{ matrix.shard }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/checks/claude-execution.py"
+
+      - name: Record this shard's review cost
+        # The number only — the execution log stays on the runner and reaches an
+        # artifact solely through the redacting upload below.
+        env:
+          EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
+          SHARD_COST_FILE: ${{ runner.temp }}/pr-input/shard-cost.json
+        run: node "${REVIEWER_DIR}/record-shard-cost.mjs"
+
+      - name: Hand this shard's findings to the synthesis
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-review-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/pr-input/review.json
+            ${{ runner.temp }}/pr-input/shard-cost.json
+          retention-days: 1
+
+      - name: Stage this leg's Claude logs, redacted
+        id: stage_logs
+        if: always() && inputs.log-redactor != ''
+        timeout-minutes: 5
+        env:
+          LOGS_PATH: ${{ steps.claude_review.outputs.execution_file }}
+          LOGS_OUT: ${{ runner.temp }}/agent-logs-upload/pr-review
+          REDACTOR: ${{ github.workspace }}/${{ inputs.log-redactor }}
+          REPO_ROOT: ${{ github.workspace }}
+          HOOKS_DIR: ${{ github.workspace }}/.claude/hooks
+          PYTHON: ${{ inputs.log-redactor-python }}
+        run: |
+          mkdir -p "${LOGS_OUT}"
+          bash "${REVIEWER_DIR}/stage-agent-logs.sh"
+
+      - name: Publish this leg's Claude logs
+        # Keyed by the matrix value, or the legs collide and only one log survives.
+        if: always() && steps.stage_logs.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-logs-pr-review-${{ matrix.shard }}
+          path: ${{ runner.temp }}/agent-logs-upload/pr-review
+          if-no-files-found: ignore
+          retention-days: 14
+
+  review_synthesis:
+    name: Post the sharded PR review
+    needs: [review, review_shard]
+    # merge-shard-reviews.mjs enforces "never claim a complete read the shards did
+    # not deliver": it refuses to fold fewer shard reviews than the manifest
+    # names. Do not gate this on the shard JOBS' conclusion instead — that proxy
+    # also fires on a leg cancelled AFTER uploading its findings, which discards a
+    # COMPLETE read and latches the PR unreviewed. !cancelled() lets a cancelled
+    # LEG reach the real check below, where a shard that produced no review reds
+    # this job loudly.
+    if: "!cancelled() && needs.review.result == 'success' && needs.review.outputs.sharded == 'true'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Matches the review job: a started synthesis runs to completion, so the
+    # review it posts is never thrown away mid-write.
+    concurrency:
+      group: claude-pr-review-synthesis-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+      checks: read
+    steps:
+      - name: Check out the calling repository's default (trusted) branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the reviewer from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+        run: |
+          # Empty means neither the caller nor GitHub named a commit, and a clone
+          # would then run this repository's default branch — which is what
+          # pinning `uses:` is for. Refuse rather than run unpinned code beside
+          # the caller's secrets.
+          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          dest="${RUNNER_TEMP}/reviewer"
+          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # A ref may be a branch, a tag or a commit sha. `checkout --detach`
+          # takes all three; `clone --branch` refuses a sha, which is the form a
+          # caller pinning its `uses:` line has.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
+          # checkout must not be able to replace the code reviewing it.
+          echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+
+      - name: Install the input sanitizer
+        # post-pr-review.mjs sanitizes the findings it renders, so this job needs
+        # the package even though it runs no model.
+        run: bash "${REVIEWER_DIR}/install-input-sanitizer.sh"
+
+      - name: Fetch the sanitized input (the FULL diff, for anchoring)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-review-input
+          path: ${{ runner.temp }}/pr-input
+
+      - name: Fetch every shard's findings
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: pr-review-shard-*
+          path: ${{ runner.temp }}/shard-reviews
+
+      - name: Fold the shard reviews into one
+        env:
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          SHARD_REVIEW_DIR: ${{ runner.temp }}/shard-reviews
+        run: node "${REVIEWER_DIR}/merge-shard-reviews.mjs"
+
+      - name: Post the structured review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # No single execution log exists here: the cost is summed from what the
+          # shards recorded in their artifacts.
+          SHARD_COST_DIR: ${{ runner.temp }}/shard-reviews
+        run: bash "${REVIEWER_DIR}/post-pr-review.sh"
+
+      - name: Re-evaluate the caller's merge gate on this head
+        # Same reason as the review job's re-post, and always() for the same
+        # reason: an implicit success() would skip the head's only verdict post
+        # exactly when an earlier step reddened this job.
+        if: always() && inputs.post-review-command != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          POST_REVIEW_COMMAND: ${{ inputs.post-review-command }}
+        run: bash -c "$POST_REVIEW_COMMAND"
