@@ -723,7 +723,9 @@ def _caller_review_actions() -> list[str]:
     reusable reviewer on, read out of that job's own `if:` guard."""
     doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
     guard = doc["jobs"]["review"]["if"]
-    actions = json.loads(re.search(r"fromJSON\('(\[[^']*\])'\)", guard).group(1))
+    actions = json.loads(
+        re.search(r"fromJSON\('(?P<events>\[[^']*\])'\)", guard).group("events")
+    )
     assert actions, f"no event list in the caller's review guard: {guard}"
     return actions
 

@@ -193,7 +193,8 @@ _ci_retry_loop() {
   # An empty capture emits NOTHING (not a bare newline): a line-oriented consumer
   # must see zero rows for zero results, exactly as the unwrapped command
   # substitution behaves — a lone empty line reads as one bogus row.
-  # echo-fallback-ok: the left side is a test, so the printf is this line's
-  # then-branch; every failure already returned 1 from the loop above.
+  # The left side is a test, so the printf is this line's then-branch; every
+  # failure already returned 1 from the loop above.
+  # echo-fallback-ok: the printf is a then-branch, not a failure fallback
   [[ "$mode" != capture || -z "$out" ]] || printf '%s\n' "$out"
 }

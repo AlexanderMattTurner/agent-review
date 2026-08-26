@@ -61,8 +61,10 @@ def _run(
     with (
         mock.patch.object(sys, "argv", _argv(diff, out, max_lines, max_shards)),
         mock.patch.dict(os.environ, env, clear=True),
-        contextlib.redirect_stdout(out_buf),
-        contextlib.redirect_stderr(err_buf),
+        # contextlib's own redirects: scoped to this `with`, restored on exit,
+        # and the suite runs these cases in one thread.
+        contextlib.redirect_stdout(out_buf),  # allow-stdio-swap: restored on exit
+        contextlib.redirect_stderr(err_buf),  # allow-stdio-swap: restored on exit
     ):
         try:
             mod.main()
