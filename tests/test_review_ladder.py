@@ -30,10 +30,19 @@ LADDER = REPO_ROOT / ".github" / "reviewer" / "run-review-ladder.py"
 
 
 def _module():
+    """The ladder, loaded fresh.
+
+    `sys.path` is restored: the module resolves its siblings at import, and an
+    entry left behind makes every later test in this worker import `_ladder` and
+    friends from the reviewer directory instead of their own package.
+    """
     spec = importlib.util.spec_from_file_location("run_review_ladder", LADDER)
     module = importlib.util.module_from_spec(spec)
     sys.path.insert(0, str(LADDER.parent))
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(LADDER.parent))
     return module
 
 
@@ -61,12 +70,17 @@ def _walk(tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=()):
         return index in timed_out
 
     module.attempt = fake_attempt
+    # `module.time` IS the stdlib module, so assigning `module.time.sleep`
+    # patches every consumer in this worker for the rest of the session — a
+    # later test that waits on a real timeout then never waits at all.
+    real_sleep = module.time.sleep
     module.time.sleep = lambda *_: None
     old = dict(os.environ)
     os.environ.update(env)
     try:
         module.main()
     finally:
+        module.time.sleep = real_sleep
         os.environ.clear()
         os.environ.update(old)
     return attempts, module
@@ -140,12 +154,18 @@ def test_each_attempt_starts_with_no_review(tmp_path: Path) -> None:
         seen.append(review.exists())
         raise module.subprocess.TimeoutExpired(cmd="claude", timeout=1)
 
+    # `module.subprocess` IS the stdlib module, so this assignment replaces
+    # `subprocess.run` for every consumer in this worker. Restored below: left
+    # standing, every later test that runs a real command raises this
+    # TimeoutExpired instead.
+    real_run = module.subprocess.run
     module.subprocess.run = fake_run
     old = dict(os.environ)
     os.environ.update({"PR_INPUT_DIR": str(tmp_path), "PROMPT_FILE": "p.md", "MODEL": "m"})
     try:
         module.attempt(1, "token", True, tmp_path / "log.json", 1)
     finally:
+        module.subprocess.run = real_run
         os.environ.clear()
         os.environ.update(old)
     assert seen == [False], "the previous attempt's review.json outlived it"
