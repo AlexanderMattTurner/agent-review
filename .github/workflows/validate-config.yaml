@@ -36,6 +36,14 @@ jobs:
       # with no Python project runs nothing here instead of failing.
       # validate-config.sh above stays ungated — it needs only the .claude/ tree
       # the sync delivers.
+      # tests/test_post_pr_review_degraded.py runs the reviewer's node scripts,
+      # which import agent-sanitizer. It installs into .github/reviewer/node_modules,
+      # which is gitignored, so without this step those 11 tests die on
+      # ERR_MODULE_NOT_FOUND rather than on anything they assert.
+      - name: Install the reviewer's input sanitizer
+        if: hashFiles('.github/reviewer/install-input-sanitizer.sh') != ''
+        run: bash .github/reviewer/install-input-sanitizer.sh
+
       - name: Test Claude hooks
         if: hashFiles('pyproject.toml') != ''
         run: |
