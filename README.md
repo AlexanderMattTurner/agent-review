@@ -45,20 +45,20 @@ Pin a commit sha rather than `main` once this repository cuts its first release:
 
 Two secrets are what the reviewer costs; everything else is a knob:
 
-| Input                 | Default               | What it does                                                                                                                        |
-| --------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `reviewer-repository` | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                   |
-| `reviewer-ref`        | the caller's own pin  | Leave it unset.                                                                                                                     |
-| `model`               | `claude-opus-5`       | The model behind every verdict.                                                                                                     |
-| `review-prompt`       | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                      |
-| `setup-command`       | none                  | A dependency sync run in your base checkout before the model call.                                                                  |
-| `setup-cache-path`    | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                      |
-| `setup-cache-key`     | none                  | The cache key for `setup-cache-path`. Key it on the file holding the pin, so a bump refreshes the entry.                            |
-| `elide-command`       | none                  | A command that drops generated output from the raw diff. The reviewer's budget is diff lines, so name one if yours are build files. |
-| `post-review-command` | none                  | Run after the review lands, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set — how a merge gate hears about a review it must read.   |
-| `log-redactor`        | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.               |
-| `max-diff-lines`      | `12000`               | Above this the read splits per file.                                                                                                |
-| `max-shardable-lines` | `192000`              | Above this the pull request gets the human-review notice and no read.                                                               |
+| Input                   | Default               | What it does                                                                                                                         |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `reviewer-repository`   | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                    |
+| `reviewer-ref`          | the caller's own pin  | Leave it unset.                                                                                                                      |
+| `model`                 | `claude-opus-5`       | The model behind every verdict.                                                                                                      |
+| `review-prompt`         | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                       |
+| `setup-command`         | none                  | A dependency sync run in your base checkout before the model call.                                                                   |
+| `setup-cache-path`      | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                       |
+| `setup-cache-key-files` | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry. |
+| `elide-command`         | none                  | A command that drops generated output from the raw diff. The reviewer's budget is diff lines, so name one if yours are build files.  |
+| `post-review-command`   | none                  | Run after the review lands, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set — how a merge gate hears about a review it must read.    |
+| `log-redactor`          | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                |
+| `max-diff-lines`        | `12000`               | Above this the read splits per file.                                                                                                 |
+| `max-shardable-lines`   | `192000`              | Above this the pull request gets the human-review notice and no read.                                                                |
 
 ## Budget
 

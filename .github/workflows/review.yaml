@@ -59,8 +59,8 @@ on:
         required: false
         default: ""
         type: string
-      setup-cache-key:
-        description: "The `actions/cache` key for setup-cache-path. Key it on the file that carries the pin, so a version bump refreshes the entry instead of restoring the old binary. Empty caches nothing."
+      setup-cache-key-files:
+        description: "A `hashFiles` pattern naming the file that carries the pinned version, in the caller's checkout. This workflow hashes it into the cache key, so a version bump refreshes the entry instead of restoring the old binary. The caller cannot compute this itself: a called job's `with:` allows neither `hashFiles` nor `runner`. Empty caches nothing."
         required: false
         default: ""
         type: string
@@ -281,11 +281,11 @@ jobs:
         # A setup command that fetches a pinned toolchain pays that download once
         # per review job. The caller names what to keep and the key that expires
         # it; naming neither keeps the download.
-        if: steps.recheck.outputs.skip != 'true' && inputs.setup-command != '' && inputs.setup-cache-key != ''
+        if: steps.recheck.outputs.skip != 'true' && inputs.setup-command != '' && inputs.setup-cache-key-files != ''
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.setup-cache-path }}
-          key: ${{ inputs.setup-cache-key }}
+          key: ${{ runner.os }}-setup-${{ hashFiles(inputs.setup-cache-key-files) }}
 
       - name: Run the caller's setup command
         # The caller's own dependency sync, in its trusted base checkout — what
@@ -519,11 +519,11 @@ jobs:
         run: bash "${REVIEWER_DIR}/install-claude-cli.sh"
 
       - name: Restore the caller's setup cache
-        if: inputs.setup-command != '' && inputs.setup-cache-key != ''
+        if: inputs.setup-command != '' && inputs.setup-cache-key-files != ''
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.setup-cache-path }}
-          key: ${{ inputs.setup-cache-key }}
+          key: ${{ runner.os }}-setup-${{ hashFiles(inputs.setup-cache-key-files) }}
 
       - name: Run the caller's setup command
         if: inputs.setup-command != ''
