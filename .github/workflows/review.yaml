@@ -267,7 +267,7 @@ jobs:
 
       - name: Set up Node and the input sanitizer
         if: steps.recheck.outputs.skip != 'true'
-        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
@@ -511,7 +511,7 @@ jobs:
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
 
-      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
@@ -665,7 +665,7 @@ jobs:
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
 
-      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
