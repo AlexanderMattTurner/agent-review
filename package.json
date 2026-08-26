@@ -1,0 +1,73 @@
+{
+  "name": "my-project",
+  "version": "1.0.0",
+  "description": "Project with Claude Code automation",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexanderMattTurner/claude-automation-template.git"
+  },
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "postinstall": "git config core.hooksPath .hooks",
+    "dev": "echo 'ERROR: Configure dev script in package.json' && exit 1",
+    "build": "echo 'ERROR: Configure build script in package.json' && exit 1",
+    "start": "echo 'ERROR: Configure start script in package.json' && exit 1",
+    "test": "bash .github/scripts/install-input-sanitizer.sh && node --test \".github/scripts/**/*.test.mjs\" \"tests/**/*.test.mjs\"",
+    "lint": "echo 'ERROR: Configure lint script in package.json' && exit 1",
+    "lint:js": "eslint .",
+    "lint:md": "markdownlint-cli2 \"**/*.md\"",
+    "lint:md:fix": "markdownlint-cli2 --fix \"**/*.md\"",
+    "check": "echo 'ERROR: Configure check script in package.json' && exit 1",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "agent-control-plane-core": "0.2.2",
+    "semver": "^7.8.5"
+  },
+  "lint-staged": {
+    "*.{css,scss}": [
+      "prettier --write"
+    ],
+    "*.json": [
+      "prettier --write"
+    ],
+    "*.json.example": [
+      "prettier --write --parser json"
+    ],
+    "*.{js,mjs,jsx,ts,tsx}": [
+      "prettier --write"
+    ],
+    "*.{yaml,yml}": [
+      "prettier --write"
+    ],
+    "*.md": [
+      "markdownlint-cli2 --fix",
+      "prettier --write"
+    ],
+    ".claude/skills/*/SKILL.md": [
+      ".hooks/lint-skills.sh"
+    ],
+    "{*.sh,.hooks/*}": [
+      "shfmt -i 2 -w"
+    ],
+    "*.py": [
+      "ruff check --fix",
+      "ruff format"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.0.1",
+    "@commitlint/config-conventional": "^21.0.1",
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-plugin-regexp": "^2.10.0",
+    "globals": "^17.9.0",
+    "lint-staged": "^17.0.5",
+    "markdownlint": "^0.41.1",
+    "markdownlint-cli2": "^0.23.1",
+    "prettier": "^3.0.0",
+    "typescript": "6.0.3"
+  }
+}

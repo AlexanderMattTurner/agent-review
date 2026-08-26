@@ -1,0 +1,230 @@
+# Run with: `pre-commit run --all-files` (or install with `pre-commit install`).
+# CI runs this via `.github/workflows/pre-commit.yaml` regardless of whether
+# contributors have pre-commit installed locally. The existing `.hooks/pre-commit`
+# handles staged-file formatting via lint-staged on every commit; this config
+# adds wider hygiene checks (shellcheck, large-file detection, JSON/YAML
+# validity, etc.) that aren't covered there.
+
+# Pin the Python interpreter used by all Python-based hooks so local runs and
+# CI produce identical environments. Must match the python-version in
+# .github/workflows/pre-commit.yaml and the .python-version file.
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # A committed `.patch`/`.diff` is exempt from every hook that rewrites
+      # bytes. A unified diff's context line for a BLANK line is a lone space,
+      # so stripping it makes `git apply` answer `corrupt patch`; appending a
+      # newline or rewriting line endings breaks the same file the same way.
+      - id: trailing-whitespace
+        exclude: ^(pnpm-lock\.yaml|.*\.(patch|diff))$
+      - id: end-of-file-fixer
+        exclude: ^(pnpm-lock\.yaml|.*\.(patch|diff))$
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: ^.*\.(patch|diff)$
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        # Enable one optional check beyond the defaults: require [[ ]] over
+        # [ ] in bash/ksh.
+        # -P lists the directories a `source`/`.` line is resolved against, so a
+        # script that sources a sibling library is followed instead of reported
+        # SC1091 "not following".
+        args:
+          [-x, -P, ".claude/hooks:.github/scripts", -o, require-double-brackets]
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.12.0-2
+    hooks:
+      - id: shfmt
+        args: [-i, "2", -w]
+
+  # Lints workflow/action correctness and runs shellcheck on inline `run:`
+  # blocks that the standalone shellcheck hook can't see. Python-wrapped so it
+  # needs no Go toolchain in the Python-only pre-commit CI job.
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: v1.7.12.24
+    hooks:
+      - id: actionlint
+
+  # Catches markdown that does not render as written — malformed tables, broken
+  # link fragments, code spans that swallow their delimiters — plus the local
+  # `orphan-table-row` rule (.github/scripts/markdownlint-orphan-table-row.mjs),
+  # which reports a table row a blank line severed from its table: the parser
+  # never accepted it as a row, so no stock rule inspects it. Prettier owns
+  # whitespace/wrapping; every rule it touches is off in .markdownlint-cli2.jsonc
+  # so the two never rewrite each other.
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.1
+    hooks:
+      - id: markdownlint-cli2
+        args: [--fix]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Fail on an internal Markdown link that points at a missing repo-relative
+  # file (link rot from a moved or renamed target). `--offline` resolves only
+  # local file links and skips every http(s)/mailto link, so the check is
+  # deterministic and never flakes on a slow or unreachable external site.
+  - repo: https://github.com/lycheeverse/lychee
+    rev: lychee-v0.24.2
+    hooks:
+      - id: lychee
+        args: [--offline, --no-progress]
+        types: [markdown]
+
+  # Honesty + identity CI lints: catch a green check that hides a failed
+  # command (pipefail/|| true/2>/dev/null), a path-filtered required check that
+  # hangs forever, or a mutable base-image/download pin. Tier 2 adds the
+  # required-check-shape lints this template's workflows already follow
+  # (classified always() reporters, explicit concurrency, externalized run
+  # blocks). Extras adds check-claude-model (explicit --model on the
+  # claude-code-action steps this template ships) plus the unnamed-regex-group
+  # and global-stdio-swap Python lints. Tier aggregates over per-check ids so a
+  # check added upstream to a tier applies here with no config change.
+  - repo: https://github.com/alexander-turner/ci-truth-serum
+    rev: a5c3991e7b1eea7c8a65d9cd9573f3f65f520ee8 # ci-truth-serum v0.2.0
+    hooks:
+      - id: check-tier1
+      # check-path-gate-deps and check-failure-notifier-coverage are Tier 2
+      # members but are listed explicitly below (the notifier check needs
+      # --require-notifier, which the aggregate can't pass), so skip them here to
+      # avoid running each twice.
+      - id: check-tier2
+        args:
+          [
+            --skip,
+            check_path_gate_deps,
+            --skip,
+            check_failure_notifier_coverage,
+          ]
+      - id: check-extras
+      # A gated job whose decide filters omit a composite/script dependency fails
+      # open — the job skips exactly when that dependency changes and the reporter
+      # goes green.
+      - id: check-path-gate-deps
+      # The notifier's workflow_run list is a derived copy of the tree's
+      # push/schedule workflows; --require-notifier fails loud if this repo's
+      # ci-failure-notify.yaml is ever deleted or its list drifts.
+      - id: check-failure-notifier-coverage
+        args: [--require-notifier]
+
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor (GitHub Actions security audit)
+        entry: zizmor
+        language: python
+        additional_dependencies: ["zizmor==1.25.2"]
+        pass_filenames: false
+        # --offline: the `known-vulnerable-actions` audit queries
+        # api.github.com/advisories, which a sandboxed or repo-scoped session
+        # cannot reach — and zizmor aborts the WHOLE run on that error ("fatal:
+        # no audit was performed"), so one unreachable endpoint takes every
+        # other audit down with it and blocks the commit. Offline keeps the
+        # local run useful. The advisory audit still runs, with network, in
+        # .github/workflows/zizmor.yaml — a required check, so it is not lost.
+        args: ["--offline", ".github/"]
+        files: ^\.github/
+
+      # The template's JS propagates into consumers who point `eslint .` at their
+      # whole tree, so template-owned files that violate a common rule set break
+      # THEIR lint — and, where a release gates on it, their publish. Lint the
+      # propagated files here under that rule set (eslint.config.mjs) so the
+      # breakage lands on the template's own PR instead of downstream.
+      - id: eslint-propagated-js
+        name: eslint (files the template propagates)
+        entry: pnpm lint:js
+        language: system
+        pass_filenames: false
+        files: ^(\.claude/.*|\.github/scripts/.*|tests/.*|eslint\.config)\.(js|mjs|cjs)$
+
+      - id: validate-config
+        name: validate Claude hook configuration
+        entry: bash .github/scripts/validate-config.sh
+        language: system
+        pass_filenames: false
+        files: ^(\.claude/|\.hooks/|\.github/workflows/)
+
+      - id: lint-skills
+        name: lint Claude SKILL.md files
+        entry: bash .hooks/lint-skills.sh
+        language: system
+        files: ^\.claude/skills/.*\.md$
+
+      # Depth-based parent-walking silently breaks when a test file moves;
+      # tests must take REPO_ROOT from tests/_helpers.py (git rev-parse).
+      - id: check-test-repo-root
+        name: forbid Path(__file__) parent-walking for repo root in tests
+        entry: python3 .github/scripts/check-test-repo-root.py
+        language: system
+        files: ^tests/.*\.py$
+
+      - id: check-pipefail-sigpipe
+        # Under `set -o pipefail` a consumer that stops reading mid-stream
+        # (`head -N`, `grep -q`, `sed '5q'`) SIGPIPEs its still-writing producer,
+        # so the pipeline exits 141 and `set -e` aborts the script — on exactly
+        # the large inputs the cap exists for. Timing-dependent: it hides on a
+        # fast machine and bites on a slow CI runner.
+        name: no early-exiting pipe consumer under `set -o pipefail`
+        entry: python .github/scripts/check-pipefail-sigpipe.py
+        # language: python (not system) so the bash AST parser this lint needs
+        # is installed by pre-commit itself, on any machine and in CI — `python`
+        # resolves to that env's interpreter.
+        language: python
+        additional_dependencies:
+          ["tree-sitter==0.26.0", "tree-sitter-bash==0.25.1"]
+        files: '(\.(sh|bash)$|^\.hooks/[^/]+$)'
+
+      - id: check-hook-timeouts
+        # Every PreToolUse hook entry must declare an explicit timeout — a reaped
+        # PreToolUse hook is NON-blocking, so the guarded tool runs unchecked.
+        name: require an explicit timeout on every PreToolUse hook (else fail open)
+        entry: python3 .github/scripts/check-hook-timeouts.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-hook-stdin-guarded
+        # A readStdinJson() inside a hook's isMain block must be in a try (or route
+        # through runJudgeCli) — an unhandled stdin-parse rejection exits non-zero,
+        # which is non-blocking, so the guardrail is silently lost (fail open).
+        name: readStdinJson() in a hook isMain block must be try-guarded
+        entry: python3 .github/scripts/check-hook-stdin-guarded.py
+        language: system
+        files: '^\.claude/hooks/.*\.mjs$'
+        exclude: '\.test\.mjs$'
+
+      - id: check-proto-pollution
+        # Flags a plain object literal (`{}`) later written with a computed
+        # non-literal key (`x[k] = …`): an untrusted key like `__proto__` routes
+        # through the prototype chain — the field vanishes and Object.prototype
+        # can be poisoned. Real TS AST walk (typescript is a dev dep), so
+        # strings/comments never masquerade as writes; safe shapes
+        # (Object.create(null), Map, defineProperty) pass. Scans .claude/hooks +
+        # .github/scripts; per-line `// proto-pollution-ok: <reason>` opt-out.
+        name: no computed-key write to a plain object (prototype pollution)
+        entry: node .github/scripts/check-proto-pollution.mjs
+        language: system
+        pass_filenames: false
+        always_run: true
