@@ -25,10 +25,15 @@
 # Security: read under pull_request_target, so the untrusted head is never
 # checked out or executed, and matched only as fixed DATA strings (never eval).
 #
-# Env: GH_TOKEN, ACTION, REPO, HEAD_SHA, PR.
+# Env: GH_TOKEN, ACTION, REPO, HEAD_SHA, PR, LABEL, REVIEW_LABEL.
 set -euo pipefail
 
 KEYWORD="[opus-review]"
+# The label that asks for a review the caller's own `if:` would skip. A caller
+# that passes an empty one gets this default rather than a wildcard, because an
+# empty name matches the empty LABEL every other event carries.
+REVIEW_LABEL="${REVIEW_LABEL:-needs-auto-review}"
+LABEL="${LABEL:-}"
 REVIEWER="github-actions[bot]"                   # posts with GITHUB_TOKEN, so any review from this bot means the one whole-diff read is spent
 export REVIEWER_LOGIN_BARE="${REVIEWER%'[bot]'}" # bare, since GraphQL omits the REST `[bot]` suffix
 
@@ -51,6 +56,18 @@ emit() { # $1 run, $2 reason, $3 recheck (default false)
 case "$ACTION" in # `opened` is the ONLY unconditional arm — fires once per PR; the other two fire without limit
 opened)
   emit true "first review on opened"
+  exit 0
+  ;;
+labeled)
+  # The on-demand hatch, for a caller whose own `if:` skips some PRs (a low-risk
+  # title, a bot author). Such a PR reaches no other arm, so without this the
+  # label a caller's skip notice offers starts nothing. A human adds the label,
+  # so it buys one read per add and needs no head-commit bound.
+  if [[ "$LABEL" == "$REVIEW_LABEL" ]]; then
+    emit true "the $REVIEW_LABEL label asks for a review"
+  else
+    emit false "'$LABEL' is not the $REVIEW_LABEL opt-in label"
+  fi
   exit 0
   ;;
 ready_for_review | synchronize) ;;

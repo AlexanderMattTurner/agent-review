@@ -44,13 +44,18 @@ on:
         required: false
         default: ""
         type: string
+      review-label:
+        description: "The label that asks for a review on a pull request the CALLER's own `if:` skips — a low-risk title, a bot author. The caller must also list `labeled` in its `pull_request_target` types, or GitHub fires no run for the label."
+        required: false
+        default: "needs-auto-review"
+        type: string
       setup-command:
         description: "Command run in the caller's base checkout before the model call — a dependency sync a later step needs (the log redactor's interpreter, for one). Empty runs nothing."
         required: false
         default: ""
         type: string
       elide-command:
-        description: "Command in the caller's base checkout that rewrites the RAW diff at $1 in place, dropping generated output no review can act on. Empty reviews the whole diff. The reviewer's budget is diff lines, so a repository whose diffs are mostly build artifacts should name one."
+        description: "Command line in the caller's base checkout that rewrites the RAW diff IN PLACE, dropping generated output no review can act on. It runs as `bash -c \"<command>\" -- <diff>`, so the diff is `$1` and your own quoting survives. Empty reviews the whole diff. The reviewer's budget is diff lines, so a repository whose diffs are mostly build artifacts should name one."
         required: false
         default: ""
         type: string
@@ -147,7 +152,9 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+          # Both spellings: `github.job_workflow_sha` is the documented one, and
+          # `job.workflow_sha` is what the sibling resolver has been running on.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
@@ -172,6 +179,10 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
+          # The on-demand hatch. `labeled` reaches here only from a caller that
+          # lists it, and only this label answers true.
+          LABEL: ${{ github.event.label.name }}
+          REVIEW_LABEL: ${{ inputs.review-label }}
         run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
 
   review:
@@ -212,7 +223,9 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+          # Both spellings: `github.job_workflow_sha` is the documented one, and
+          # `job.workflow_sha` is what the sibling resolver has been running on.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
@@ -459,7 +472,9 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+          # Both spellings: `github.job_workflow_sha` is the documented one, and
+          # `job.workflow_sha` is what the sibling resolver has been running on.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
@@ -604,7 +619,9 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          REVIEWER_REF: ${{ inputs.reviewer-ref || job.workflow_sha }}
+          # Both spellings: `github.job_workflow_sha` is the documented one, and
+          # `job.workflow_sha` is what the sibling resolver has been running on.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
@@ -660,15 +677,27 @@ jobs:
           SHARD_COST_DIR: ${{ runner.temp }}/shard-reviews
         run: bash "${REVIEWER_DIR}/post-pr-review.sh"
 
-      - name: Re-evaluate the caller's merge gate on this head
+      - name: Re-evaluate the caller's merge gate on the LIVE head
         # Same reason as the review job's re-post, and always() for the same
-        # reason: an implicit success() would skip the head's only verdict post
-        # exactly when an earlier step reddened this job.
+        # reason: an implicit success() would skip the verdict post exactly when
+        # an earlier step reddened this job.
+        #
+        # The head is read LIVE, not taken from the event. A sharded review takes
+        # long enough for a push to land inside it, and that push's own run yields
+        # to this one (it sees the read in flight) — so the event's sha is a head
+        # nobody is waiting on, and a verdict posted there leaves the live head
+        # with no event able to clear it. The event's sha is the fallback for a
+        # read that fails, which is the behaviour a missing read would give anyway.
         if: always() && inputs.post-review-command != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           POST_REVIEW_COMMAND: ${{ inputs.post-review-command }}
-        run: bash -c "$POST_REVIEW_COMMAND"
+        run: |
+          live="$(gh pr view "$PR" --repo "$GH_REPO" --json headRefOid --jq .headRefOid || true)"
+          REPORT_SHA="${live:-$EVENT_HEAD_SHA}"
+          export REPORT_SHA
+          echo "posting the gate verdict on ${REPORT_SHA}"
+          bash -c "$POST_REVIEW_COMMAND"

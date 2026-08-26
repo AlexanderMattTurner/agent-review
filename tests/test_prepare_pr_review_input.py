@@ -38,7 +38,7 @@ BUNDLE_PATH = ".claude/hooks/gate-hooks.bundle.mjs"
 
 # A caller-supplied elider, in the shape ELIDE_COMMAND names: it rewrites the raw
 # diff at $1 in place, replacing every hunk of BUNDLE_PATH with one notice line.
-_ELIDER = f'''import sys
+_ELIDER = f"""import sys
 
 path = sys.argv[1]
 out, eliding, dropped = [], False, 0
@@ -56,7 +56,7 @@ for line in open(path, encoding="utf-8"):
 if eliding:
     out.append(f"  {{dropped}} lines of generated output elided\\n")
 open(path, "w", encoding="utf-8").writelines(out)
-'''
+"""
 
 
 # The message GitHub returns when a PR exceeds the diff media type's 300-file cap.
@@ -235,7 +235,10 @@ def _run(
     if elide:
         elider = tmp_path / "elide.py"
         elider.write_text(_ELIDER, encoding="utf-8")
-        extra_env["ELIDE_COMMAND"] = f"python3 {elider}"
+        # `$1`, the way the input's contract states it: the reviewer runs the
+        # command as `bash -c "<command>" -- <diff>`, so a caller's own quoting
+        # survives and a command naming the diff mid-argument still works.
+        extra_env["ELIDE_COMMAND"] = f'python3 {elider} "$1"' 
     if patch_pad_bytes:
         pad = tmp_path / "patch_pad"
         pad.write_text("x" * patch_pad_bytes, encoding="utf-8")

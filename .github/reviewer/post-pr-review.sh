@@ -50,7 +50,7 @@ degraded_review_already_posted() {
   local reviews
   reviews="$(retry_stdout gh api --paginate "repos/${GH_REPO}/pulls/${PR}/reviews" \
     --jq '.[] | select((.user.login // "" | sub("\\[bot\\]$"; "")) == env.REVIEWER_LOGIN_BARE)
-              | select(.body | contains(env.DEGRADED_REVIEW_MARKER)) | .id')"
+              | select((.body // "") | contains(env.DEGRADED_REVIEW_MARKER)) | .id')"
   [[ -n "${reviews%%$'\n'*}" ]]
 }
 

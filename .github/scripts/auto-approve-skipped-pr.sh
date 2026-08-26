@@ -9,7 +9,7 @@
 # job `if:`) has already decided this PR is in the skip set — the script just
 # posts the review via the shared retry-as-COMMENT helper
 # (lib-post-review-with-retry.sh), since an APPROVE can 422 here the same way it
-# does in post-pr-review.sh.
+# does in the reviewer's post-pr-review.sh.
 #
 # Requires: gh authenticated (GH_TOKEN), GH_REPO, PR.
 set -euo pipefail

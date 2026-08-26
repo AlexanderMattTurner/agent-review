@@ -78,13 +78,16 @@ fi
 # or one whose review job already failed. Counting one would emit skip=true and
 # leave this head with no whole-diff read at all, the permanently-unreviewed
 # latch this script exists to prevent.
+# INVARIANT: matched with contains/endswith, never a prefix. A reusable workflow's
+# jobs are named "<caller job> / <job name>" in the runs API, so an anchored match
+# finds no live shard, this run reviews anyway, and the PR buys a second paid read.
 _sharded_review_live() {
   local jobs_rc=0 live
   live="$(
     retry_stdout gh api "repos/$REPO/actions/runs/$1/jobs?per_page=100" 2>/dev/null |
       jq '[.jobs[]
             | select(.status != "completed")
-            | select(.name | startswith("Claude PR review (shard ") or . == "Post the sharded PR review")]
+            | select(.name | contains("Claude PR review (shard ") or endswith("Post the sharded PR review"))]
           | length'
   )" || jobs_rc=$?
   # A jobs list we could not read is not evidence of a review in flight, so it

@@ -150,6 +150,26 @@ def test_an_in_flight_earlier_run_counts_as_the_review(
     )
 
 
+# What GitHub actually names these jobs once a consumer calls the reviewer as a
+# reusable workflow: the calling job's id, then the job's own name.
+CALLED_SHARD_JOB = {"name": "review / Claude PR review (shard 2)", "status": "in_progress"}
+CALLED_SYNTHESIS_JOB = {"name": "review / Post the sharded PR review", "status": "queued"}
+
+
+@pytest.mark.parametrize("job", [CALLED_SHARD_JOB, CALLED_SYNTHESIS_JOB])
+def test_a_called_workflows_prefixed_job_still_counts_as_the_review(
+    tmp_path: Path, job: dict
+) -> None:
+    """Every consumer runs this reviewer through `uses:`, so the runs API reports
+    each job under the caller's job id. An anchored prefix match finds no live
+    shard, this run reviews anyway, and the PR pays for a second whole-diff read
+    of the head the earlier run is already reading."""
+    _, skip, _ = _run(
+        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=[job]
+    )
+    assert skip == "true"
+
+
 @pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "pending"])
 def test_every_pre_completion_run_status_is_a_candidate(
     tmp_path: Path, status: str
@@ -244,9 +264,7 @@ def _post_review_step(steps: list[dict]) -> dict:
     """The step that re-evaluates the caller's merge gate on this head. It runs
     the caller's own `post-review-command`, which is what a consumer points at
     its findings gate."""
-    return next(
-        s for s in steps if "POST_REVIEW_COMMAND" in (s.get("env") or {})
-    )
+    return next(s for s in steps if "POST_REVIEW_COMMAND" in (s.get("env") or {}))
 
 
 def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:

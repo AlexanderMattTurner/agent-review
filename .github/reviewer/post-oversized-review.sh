@@ -58,7 +58,7 @@ export REVIEWER_LOGIN_BARE="github-actions"
 # still-writing gh under pipefail).
 review_list="$(retry_stdout gh api --paginate "repos/${GH_REPO}/pulls/${PR}/reviews" \
   --jq '.[] | select((.user.login // "" | sub("\\[bot\\]$"; "")) == env.REVIEWER_LOGIN_BARE)
-            | select(.body | contains(env.OVERSIZED_REVIEW_MARKER)) | .id')"
+            | select((.body // "") | contains(env.OVERSIZED_REVIEW_MARKER)) | .id')"
 existing_review="${review_list%%$'\n'*}"
 if [[ -n "$existing_review" ]]; then
   echo "oversized notice review already posted (review ${existing_review}); not re-posting" >&2

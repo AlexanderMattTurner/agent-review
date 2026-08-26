@@ -121,6 +121,8 @@ def _run(
     expect_recheck: str | None = None,
     base_ref: str = "main",
     commits_fail: bool = False,
+    label: str = "",
+    review_label: str | None = None,
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Run the script with the fake gh on PATH; return (proc, run, argv).
     `expect_recheck` pins the emitted `recheck` — the flag that asks the review
@@ -160,10 +162,13 @@ def _run(
         "PR": "42",
         "BASE_REF": base_ref,
         "GITHUB_BASE_REF": base_ref,
+        "LABEL": label,
         # The shared reviews read retries; only the delay is test-tuned, so the
         # fail-safe test still exercises the real "ladder exhausted" path.
         "RETRY_BASE_DELAY": "0",
     }
+    if review_label is not None:
+        env["REVIEW_LABEL"] = review_label
     proc = subprocess.run(
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env
     )
@@ -294,6 +299,41 @@ def test_every_repeatable_subscribed_action_respects_the_spent_read(
         assert run == "false", f"{action} re-read a PR whose one read is spent"
 
 
+def test_the_opt_in_label_buys_a_read_the_callers_own_guard_would_skip(
+    tmp_path: Path,
+) -> None:
+    """A caller whose `if:` skips a PR class (a low-risk title, a bot author)
+    offers its authors a label instead. The label is the only path such a PR
+    has: it reaches no `opened` arm the caller filtered out, and `synchronize`
+    is filtered the same way. A review already on the PR does not spend it —
+    a human asked for this read."""
+    _, run, _ = _run(tmp_path, "labeled", label="needs-auto-review",
+                     review_state="COMMENTED")
+    assert run == "true"
+
+
+def test_an_unrelated_label_buys_nothing(tmp_path: Path) -> None:
+    """Every label edit fires the same event, so matching anything but the
+    opt-in name would spend a whole-diff read per label a maintainer adds."""
+    _, run, _ = _run(tmp_path, "labeled", label="documentation")
+    assert run == "false"
+
+
+def test_the_caller_names_which_label_opens_the_hatch(tmp_path: Path) -> None:
+    """The name is the caller's, because the skip notice that advertises it is
+    the caller's."""
+    _, run, _ = _run(tmp_path, "labeled", label="please-review",
+                     review_label="please-review")
+    assert run == "true"
+
+
+def test_an_empty_label_name_is_not_a_wildcard(tmp_path: Path) -> None:
+    """A caller that passes an empty `review-label` gets the default, never a
+    matcher that answers true for the empty LABEL every other event carries."""
+    _, run, _ = _run(tmp_path, "labeled", label="", review_label="")
+    assert run == "false"
+
+
 def test_synchronize_runs_on_keyword_in_subject(tmp_path: Path) -> None:
     proc, run, _ = _run(
         tmp_path,
@@ -308,9 +348,7 @@ def test_synchronize_runs_on_keyword_in_subject(tmp_path: Path) -> None:
 
 
 def test_synchronize_keyword_is_case_insensitive(tmp_path: Path) -> None:
-    _, run, _ = _run(
-        tmp_path, "synchronize", message="[OPUS-REVIEW] please relook"
-    )
+    _, run, _ = _run(tmp_path, "synchronize", message="[OPUS-REVIEW] please relook")
     assert run == "true"
 
 
@@ -406,9 +444,7 @@ def test_a_pr_based_on_a_feature_branch_is_still_reviewed(
     the base ref, so a base guard added later — a `branches:` filter's
     equivalent — turns this red instead of silently leaving a whole class of PR
     unreviewed."""
-    _, run, _ = _run(
-        tmp_path, action, base_ref="claude/ct-guest-app-name-resolution"
-    )
+    _, run, _ = _run(tmp_path, action, base_ref="claude/ct-guest-app-name-resolution")
     assert run == "true"
 
 

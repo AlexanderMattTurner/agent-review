@@ -90,11 +90,38 @@ fetch_whole_pr_diff() {
   ((diff_rc == 0)) && return 0
   ((diff_rc == 3)) || return "$diff_rc"
   echo "gh pr diff refused the >300-file diff; rebuilding it from the files API" >&2
-  retry_stdout gh api --paginate "repos/{owner}/{repo}/pulls/${PR}/files" |
-    python3 "$here/pr/files-to-diff.py" >"$out"
+  local files
+  files="$(retry_stdout gh api --paginate "repos/{owner}/{repo}/pulls/${PR}/files")"
+  # INVARIANT: the rebuilt diff is the WHOLE diff or no diff. The files endpoint
+  # stops at 3000 entries with no cursor past it, so a wider PR arrives silently
+  # short — and a partial diff sanitized and sharded reads as a complete review of
+  # a PR whose later files nobody looked at. Refusing routes it to the
+  # human-review notice instead, through the sharder's own over-budget code.
+  local fetched changed
+  # `--paginate` concatenates one ARRAY PER PAGE, so the count flattens them.
+  fetched="$(jq -s 'flatten | length' <<<"$files")"
+  changed="$(retry_stdout gh pr view "$PR" --json changedFiles --jq .changedFiles)"
+  if [[ -n "$changed" ]] && ((fetched < changed)); then
+    echo "the files API served ${fetched} of ${changed} changed files; a rebuilt diff would be partial" >&2
+    return 3
+  fi
+  python3 "$here/pr/files-to-diff.py" <<<"$files" >"$out"
 }
 
-fetch_whole_pr_diff "$raw_diff"
+# 3 is the rebuild's refusal to serve a partial diff. It is a verdict about this
+# PR's width, not a fault: the read is skipped and a human is asked, the same
+# ending an unshardable diff takes.
+fetch_rc=0
+fetch_whole_pr_diff "$raw_diff" || fetch_rc=$?
+if ((fetch_rc == 3)); then
+  emit_output "sharded=false"
+  emit_output "unreviewable=true"
+  printf '%s\n' \
+    "Automated review skipped: this PR changes more files than GitHub's own files API will serve, so no complete diff can be built for a review. A change this large should get a human review — please review it manually." \
+    >"${PR_INPUT_DIR}/oversized-notice.txt"
+  exit 0
+fi
+((fetch_rc == 0)) || exit "$fetch_rc"
 
 sanitize() { node "$here/sanitize-pr-input.mjs"; }
 
@@ -104,9 +131,10 @@ sanitize() { node "$here/sanitize-pr-input.mjs"; }
 # command in the CALLER's checkout; it reads the raw diff at $1 and rewrites it
 # in place. An empty ELIDE_COMMAND elides nothing, which reviews the whole diff.
 if [[ -n "${ELIDE_COMMAND:-}" ]]; then
-  # Word-split on purpose: the caller writes a command LINE ("python3 x.py --diff").
-  # shellcheck disable=SC2086
-  ${ELIDE_COMMAND} "$raw_diff"
+  # Run as a command LINE with the diff as `$1`, never word-split: splitting drops
+  # the caller's own quoting, and appending the path silently ignores a command that
+  # names `$1` in the middle of its arguments.
+  bash -c "$ELIDE_COMMAND" -- "$raw_diff"
 fi
 
 sanitize <"$raw_diff" >"${PR_INPUT_DIR}/diff.txt" 2>"${PR_INPUT_DIR}/diff.report.txt"
@@ -158,8 +186,20 @@ if ((diff_lines <= MAX_DIFF_LINES)); then
   exit 0
 fi
 
-# Over the single-context cap. Shard, and only give up when even the sharded
-# fan-out would be unbounded.
+# Over the single-context cap. The ceiling is checked HERE, on the line count: a
+# diff dominated by one file splits into one shard however large it is, so the
+# shard cap below would admit a million-line file as a single reviewable slice.
+if ((diff_lines > MAX_SHARDABLE_LINES)); then
+  emit_output "sharded=false"
+  emit_output "unreviewable=true"
+  printf '%s\n' \
+    "Automated review skipped: this PR's diff is ${diff_lines} lines, over the ${MAX_SHARDABLE_LINES}-line ceiling for an automated read. A change this large should get a human review — please review it manually." \
+    >"${PR_INPUT_DIR}/oversized-notice.txt"
+  echo "diff ${diff_lines} lines exceeds MAX_SHARDABLE_LINES=${MAX_SHARDABLE_LINES}; asking for a human review" >&2
+  exit 0
+fi
+
+# Shard, and give up when even the sharded fan-out would be unbounded.
 shard_rc=0
 python3 "$here/shard-pr-diff.py" \
   --diff "${PR_INPUT_DIR}/diff.txt" \

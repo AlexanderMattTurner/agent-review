@@ -317,10 +317,10 @@ class _LocalGitHub:
 class _IssueCommentStore:
     """The four issue-comment endpoints, for every fake a sticky poster drives.
 
-      GET   /api/v3/repos/{o}/{r}/issues/{n}/comments   (find the marked comment)
-      GET   /api/v3/repos/{o}/{r}/issues/comments/{id}  (read its current body)
-      PATCH /api/v3/repos/{o}/{r}/issues/comments/{id}  (rewrite it in place)
-      POST  /api/v3/repos/{o}/{r}/issues/{n}/comments   (first run only)
+    GET   /api/v3/repos/{o}/{r}/issues/{n}/comments   (find the marked comment)
+    GET   /api/v3/repos/{o}/{r}/issues/comments/{id}  (read its current body)
+    PATCH /api/v3/repos/{o}/{r}/issues/comments/{id}  (rewrite it in place)
+    POST  /api/v3/repos/{o}/{r}/issues/{n}/comments   (first run only)
     """
 
     def _init_comments(self) -> None:

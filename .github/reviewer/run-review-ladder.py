@@ -53,11 +53,14 @@ from lib_credential_ladder import (  # noqa: E402  # pylint: disable=wrong-impor
 OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 METERED_ENV = "ANTHROPIC_API_KEY"
 
-# The agent ANALYZES: it reads the sanitized input and the trusted base checkout, and
-# writes its findings to one file. No Bash, so a prompt injection in the diff reaches
-# no shell. `--setting-sources user` keeps the reviewed repository's own `.claude`
-# settings — which the PR may edit — out of the review.
-TOOL_GRANT = "Read(./**),Read(/{d}/**),Edit(/{d}/review.json)"
+# The agent ANALYZES: it reads the sanitized input, the trusted base checkout and its
+# own instructions, and writes its findings to ONE file. `Write` as well as `Edit`,
+# because review.json does not exist yet on the first attempt. No Bash, so a prompt
+# injection in the diff reaches no shell. `--setting-sources user` keeps the reviewed
+# repository's own `.claude` settings — which the PR may edit — out of the review.
+TOOL_GRANT = (
+    "Read(./**),Read(/{d}/**),Read(/{r}/**),Write(/{d}/review.json),Edit(/{d}/review.json)"
+)
 
 
 def prompt_for(pr_input_dir: str, prompt_file: str, pr: str, repo: str) -> str:
@@ -106,8 +109,16 @@ def outcome_of(log: Path) -> RungOutcome:
     )
 
 
-def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> None:
-    """Spend ONE credential on the read, writing the execution log to `log`."""
+# What a killed attempt reports. `zero_cost` false, because a run the wall clock cut
+# short may already have billed a whole read, and a free retry on that evidence
+# re-spends it. `wall_clock_only` stops the ladder: a fresh credential faces the same
+# wall, so the next rung would buy another bill and no new information.
+TIMED_OUT = RungOutcome(errored=True, zero_cost=False, wall_clock_only=True)
+
+
+def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> bool:
+    """Spend ONE credential on the read, writing the execution log to `log`. True when
+    the wall clock killed it, which is not evidence the attempt was free."""
     env = dict(os.environ)
     # The rung's own credential and nothing else: every other rung's token is
     # dropped, so the CLI cannot authenticate with a credential this attempt is not
@@ -118,6 +129,13 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> N
     env.pop(METERED_ENV, None)
     env[METERED_ENV if metered else OAUTH_ENV] = token
     pr_input_dir = os.environ["PR_INPUT_DIR"]
+    # The agent's own instructions live here when the caller names no prompt of its
+    # own, and the checkout grant does not reach them: this tree sits outside the
+    # workspace on purpose.
+    reviewer_dir = str(Path(__file__).resolve().parent)
+    # Never a previous attempt's verdict: a rung that errors after writing a partial
+    # review would otherwise leave it for a later rung to publish as its own.
+    Path(pr_input_dir, "review.json").unlink(missing_ok=True)
     command = [
         "claude",
         "-p",
@@ -134,9 +152,11 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> N
         "--setting-sources",
         "user",
         "--allowedTools",
-        TOOL_GRANT.format(d=pr_input_dir),
+        TOOL_GRANT.format(d=pr_input_dir, r=reviewer_dir),
         "--add-dir",
         pr_input_dir,
+        "--add-dir",
+        reviewer_dir,
         "--output-format",
         "json",
     ]
@@ -146,9 +166,11 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> N
             subprocess.run(command, stdout=out, timeout=timeout, check=False, env=env)
         except subprocess.TimeoutExpired:
             print(f"::warning::rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}", flush=True)
+            return True
         except FileNotFoundError:
             print("::error::no `claude` on PATH — the CLI install step did not run", file=sys.stderr)
             sys.exit(1)
+    return False
 
 
 def main() -> None:
@@ -163,27 +185,40 @@ def main() -> None:
         # caller did not choose.
         sys.exit("::error::rung 1's secret is empty — the reviewer has no credential to spend first")
 
+    # CONFIGURED rungs only, in ladder order. An unset rung is skipped rather than
+    # fatal — that is the contract the workflow's own input descriptions state — so a
+    # repository holding rungs 1, 2 and 5 walks those three. Rung 1 is always first.
+    walk = [s for s in slots if tokens[s.index]]
     rungs: list[Rung] = [
-        Rung(name=f"rung_{s.index}", token_env=s.env_var, configured=bool(tokens[s.index]))
-        for s in slots
+        Rung(name=f"rung_{s.index}", token_env=s.env_var, configured=True) for s in walk
     ]
+    # The free same-credential retry: rung 2 alone may re-spend rung 1's token, and
+    # only on a proven zero-cost error. It is a rung of the WALK with rung 1's
+    # credential, so it authenticates the way rung 1 does.
+    free_retry = len(walk) == 1 or walk[1].index != 2
+    if free_retry:
+        retry = slots[1]
+        rungs.insert(1, Rung(name=f"rung_{retry.index}", token_env=slots[0].env_var, configured=False))
+        walk.insert(1, retry)
+
     outcomes: dict[str, RungOutcome] = {}
     newest_log = ""
-    for position, slot in enumerate(slots):
-        token = tokens[slot.index]
-        if not token:
-            # The free same-credential retry, which `advances` reaches only for rung
-            # 2 and only on a proven zero-cost error. Every later unset rung ends the
-            # walk there, so this arm never runs for one.
-            token = tokens[1]
+    for position, slot in enumerate(walk):
+        reused = not tokens[slot.index]
+        token = tokens[1] if reused else tokens[slot.index]
+        # A reused token authenticates through its OWN rung's variable, never the
+        # slot's: rung 1 is metered, so handing its key to rung 2's OAuth variable
+        # would make the free retry an authentication failure rather than a retry.
+        metered = slots[0].metered if reused else slot.metered
+        if reused:
             time.sleep(FREE_RETRY_BACKOFF_SECONDS)
         elif slot.backoff_seconds is not None:
             time.sleep(slot.wait_seconds)
         log = runner_temp / f"review-attempt-{slot.index}.json"
-        attempt(slot.index, token, slot.metered, log, timeout)
+        timed_out = attempt(slot.index, token, metered, log, timeout)
         if log.is_file() and log.stat().st_size:
             newest_log = str(log)
-        outcome = outcome_of(log)
+        outcome = TIMED_OUT if timed_out else outcome_of(log)
         outcomes[rungs[position].name] = outcome
         following = rungs[position + 1] if position + 1 < len(rungs) else None
         if following is None or not advances(position, outcome, following.configured):
