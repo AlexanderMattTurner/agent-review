@@ -12,6 +12,8 @@ import pytest
 from tests._helpers import REPO_ROOT
 
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
+# The vendored first-pass reviewer, which the reusable review.yaml runs.
+REVIEWER = REPO_ROOT / ".github" / "reviewer"
 
 # (script, required env vars, vars to scrub from inherited environment)
 CASES = [
@@ -29,9 +31,8 @@ CASES = [
     ("cancel-pr-runs.sh", ["REPO", "HEAD_REF", "HEAD_SHA", "GH_TOKEN"]),
     # label-merge-conflicts.sh requires GH_TOKEN and REPO
     ("label-merge-conflicts.sh", ["GH_TOKEN", "REPO"]),
-    # PR-review suite (claude-pr-review.yaml and friends)
-    ("prepare-pr-review-input.sh", ["PR", "PR_INPUT_DIR"]),
-    ("post-pr-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
+    # PR-review suite. The first-pass reviewer's own scripts moved to
+    # .github/reviewer/, where the reusable review.yaml runs them.
     ("auto-approve-skipped-pr.sh", ["PR", "GH_REPO"]),
     # The resolve credential is no longer an input: it is picked from the
     # GH_TOKEN_* ladder, so PR_INPUT_DIR is the only var this script demands.
@@ -42,6 +43,14 @@ CASES = [
     ("post-merge-delta-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
     ("remerge-diff-report.py", ["BASE_SHA", "HEAD_SHA"]),
     ("precommit-range-base.sh", ["GITHUB_REPOSITORY", "GITHUB_BASE_REF", "GH_TOKEN"]),
+]
+
+# The same smoke test over .github/reviewer/, whose scripts a consumer's
+# reusable-workflow call runs with an environment this repository never builds.
+REVIEWER_CASES = [
+    ("prepare-pr-review-input.sh", ["PR", "PR_INPUT_DIR"]),
+    ("post-pr-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
+    ("post-oversized-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
 ]
 
 
@@ -76,3 +85,12 @@ def test_script_exits_when_required_var_missing(
     tmp_path: Path, script: str, required_vars: list[str]
 ) -> None:
     _assert_refuses_without_env(SCRIPTS / script, script, required_vars, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "script, required_vars", REVIEWER_CASES, ids=[c[0] for c in REVIEWER_CASES]
+)
+def test_reviewer_script_exits_when_required_var_missing(
+    tmp_path: Path, script: str, required_vars: list[str]
+) -> None:
+    _assert_refuses_without_env(REVIEWER / script, script, required_vars, tmp_path)

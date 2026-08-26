@@ -14,6 +14,8 @@ the prose from the release's commits.
 
 ### Added
 
+- `review.yaml`, the PR reviewer as a REUSABLE workflow other repositories call by `uses:`. It carries the whole first-pass reviewer — the one-read-per-PR budget, the per-file split for a diff that outgrows one model context, the input sanitizer, and the credential ladder — and runs its own scripts from `.github/reviewer/` at the commit the caller pinned. This repository's own `claude-review.yaml` is now a caller of it, so a change to the reviewer reviews the pull request that makes it. Configure it through the inputs the README lists; `elide-command`, `post-review-command` and `log-redactor` are how a consumer keeps its own repository-specific pieces.
+
 - `Automated review posted`, a **required** check that makes auto-merge wait for
   the automated reviewer. The cheap checks finish in about ninety seconds while
   an LLM review takes minutes, so a PR gated only on the cheap checks merged

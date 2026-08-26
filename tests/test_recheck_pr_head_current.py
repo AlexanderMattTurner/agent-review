@@ -1,0 +1,144 @@
+"""Behavioral tests for .github/reviewer/recheck-pr-head-current.sh — the review
+job's last freshness look before the paid model read. Fail direction: an
+unanswerable query emits stale=false, because losing a possibly-unreviewed PR's
+only read is worse than one duplicate."""
+
+import subprocess
+from pathlib import Path
+
+from tests._fake_github import FakePrStatus
+from tests._helpers import REPO_ROOT, workflow_jobs
+
+SCRIPT = REPO_ROOT / ".github" / "reviewer" / "recheck-pr-head-current.sh"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
+
+EVENT_HEAD = "aaaa111122223333aaaa111122223333aaaa1111"
+MOVED_HEAD = "bbbb111122223333bbbb111122223333bbbb1111"
+
+
+def _run(
+    tmp_path: Path,
+    *,
+    live_sha: str = "",
+    fail: bool = False,
+    env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess, str]:
+    """Drive the REAL script with a `gh` stub answering the head read with
+    `live_sha` (or dying, when fail is set). The stub refuses any argv that is
+    not the expected single-field head read, so a typo'd command or jq path
+    cannot silently read as "empty head" and pass every test through the
+    fail-open arm. It stands in only for the two answers a real GitHub cannot be
+    driven to give — an exhausted retry ladder, and a successful read of nothing.
+    `test_the_head_read_runs_over_graphql` drives the real gh. Returns (proc, stale)."""
+    guard = (
+        'case "$*" in *"pr view 42"*"--json headRefOid"*"--jq .headRefOid"*) ;; '
+        "*) exit 9 ;; esac\n"
+    )
+    if env is None:
+        gh = tmp_path / "gh"
+        body = guard + (
+            "exit 7\n" if fail else f'printf "%s\\n" "{live_sha}"\n' if live_sha else ""
+        )
+        gh.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+        gh.chmod(0o755)
+        env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "GH_TOKEN": "fake"}
+    out_file = tmp_path / "github_output"
+    out_file.write_text("", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **env,
+            "GITHUB_OUTPUT": str(out_file),
+            "REPO": "owner/repo",
+            "PR": "42",
+            "EVENT_HEAD_SHA": EVENT_HEAD,
+            # Only the delay is test-tuned, so the fail case still exercises the
+            # real "ladder exhausted" path.
+            "RETRY_BASE_DELAY": "0",
+        },
+    )
+    stales = [
+        ln.split("=", 1)[1]
+        for ln in out_file.read_text(encoding="utf-8").splitlines()
+        if ln.startswith("stale=")
+    ]
+    assert len(stales) == 1, f"expected exactly one stale= line, got {stales}"
+    return proc, stales[0]
+
+
+def test_unmoved_head_lets_the_read_proceed(tmp_path: Path) -> None:
+    proc, stale = _run(tmp_path, live_sha=EVENT_HEAD)
+    assert proc.returncode == 0, proc.stderr
+    assert stale == "false"
+
+
+def test_moved_head_yields_the_read_to_the_queued_run(tmp_path: Path) -> None:
+    proc, stale = _run(tmp_path, live_sha=MOVED_HEAD)
+    assert proc.returncode == 0, proc.stderr
+    assert stale == "true"
+
+
+def test_unreadable_live_head_fails_toward_reviewing(tmp_path: Path) -> None:
+    """The exhausted retry ladder emits stale=false — never bail on a guess."""
+    proc, stale = _run(tmp_path, fail=True)
+    assert proc.returncode == 0, proc.stderr
+    assert stale == "false"
+
+
+def test_empty_live_head_fails_toward_reviewing(tmp_path: Path) -> None:
+    """A read that succeeds but yields nothing is not evidence the head moved."""
+    proc, stale = _run(tmp_path, live_sha="")
+    assert proc.returncode == 0, proc.stderr
+    assert stale == "false"
+
+
+def test_the_head_read_runs_over_graphql(tmp_path: Path) -> None:
+    """Real gh against a localhost GitHub, which is the only thing that can say
+    which budget the read spends: gh resolves `pr view` over GraphQL, budgeted
+    apart from the REST requests a push already exhausts. Both directions run
+    here, so the answer is pinned as well as the route."""
+    with FakePrStatus(tmp_path, pr=42) as server:
+        server.head_sha = EVENT_HEAD
+        proc, stale = _run(tmp_path, env=server.env)
+        assert stale == "false", proc.stderr
+        server.head_sha = MOVED_HEAD
+        proc, stale = _run(tmp_path, env=server.env)
+        rest = [path for path in server.paths("GET") if "/pulls" in path]
+        served = server.operations
+    assert stale == "true", proc.stderr
+    assert rest == [], rest
+    assert served == ["PullRequestByNumber", "PullRequestByNumber"], served
+
+
+def test_the_stale_bail_gates_the_read_but_not_the_gate_re_post() -> None:
+    """Wiring: stale=true must turn off the paid read (prepare — every model-path
+    step below keys off its outputs or conclusion) and the log staging, while the
+    merge-gate re-post deliberately carries NO stale clause: it skips with
+    prepare, because the verdict it would post is for a head the PR no longer
+    has, and the queued run for the live head posts its own. The step ids are
+    load-bearing strings — a rename or dropped clause makes every gate read an
+    empty output and fail silently open, so this is what pins them."""
+    steps = workflow_jobs(WORKFLOW)["review"]["steps"]
+    fresh = next(s for s in steps if s.get("id") == "fresh")
+    cond = str(fresh["if"])
+    assert "steps.recheck.outputs.skip != 'true'" in cond
+    assert (
+        "(needs.decide.outputs.recheck == 'true' || github.event.action != 'synchronize')"
+        in cond
+    ), "the bail must cover the first-review events; only the opt-in is exempt"
+    assert fresh["env"]["EVENT_HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    gated = {
+        s.get("id") or str(s.get("uses", "")).rsplit("/", 1)[-1]
+        for s in steps
+        if "steps.fresh.outputs.stale != 'true'" in str(s.get("if", ""))
+    }
+    assert {"prepare", "stage_logs"} <= gated, gated
+    # The caller's merge-gate re-post, which runs the caller's own
+    # `post-review-command` — what a consumer points at its findings gate.
+    gate = next(s for s in steps if "POST_REVIEW_COMMAND" in (s.get("env") or {}))
+    assert "steps.fresh" not in str(gate.get("if", "")), (
+        "the gate re-post skips via prepare on the stale path — an explicit "
+        "stale clause here would be a second copy of that decision"
+    )

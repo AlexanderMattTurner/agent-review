@@ -1,6 +1,6 @@
 {
-  "comment": "SSOT for the review-finding severity model. `gating` lists the severities whose findings escalate the posted review to REQUEST_CHANGES, which is what holds the merge until the author addresses or the reviewer clears them; `icons` maps every severity to the emoji its posted finding leads with. Consumers: post-pr-review.mjs (renders findings, decides the review event). Editing this file changes review behavior with no code change.",
-  "gating": ["blocking", "warning", "nit"],
+  "comment": "SSOT for the review-finding severity model. `gating` lists the severities whose findings the reviewer anchors to a line even when it cannot find one, so a caller's merge gate can hold the merge on the thread; `icons` maps every severity to the emoji its posted finding leads with. A non-gating finding that cannot be anchored spills into the review body instead. Consumer: .github/reviewer/post-pr-review.mjs (renders findings, stamps the hidden `<!-- severity: ... -->` marker). Editing this file changes review behavior with no code change.",
+  "gating": ["blocking", "warning"],
   "icons": {
     "blocking": "🔴",
     "warning": "🟡",

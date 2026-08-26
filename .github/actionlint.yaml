@@ -1,0 +1,9 @@
+# actionlint 1.7.12's `github` context model has no `job_workflow_sha`, but the
+# property is real: GitHub sets it on a REUSABLE workflow to the commit that
+# workflow was called at. review.yaml clones its own reviewer tree at exactly
+# that commit, so `github.workflow_sha` — which actionlint does know — is the
+# wrong value here: inside a called workflow it names the CALLER's file.
+paths:
+  .github/workflows/review.yaml:
+    ignore:
+      - 'property "job_workflow_sha" is not defined in object type'

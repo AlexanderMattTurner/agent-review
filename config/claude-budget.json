@@ -1,0 +1,4 @@
+{
+  "comment": "SSOT for the Max 20x weekly API-equivalent allowance the reviewer's cost footnote divides by. One consumer reads it: .github/reviewer/lib-review-cost.mjs (the per-PR footnote's 'how many PRs fit a Max 20x plan' line, where MAX20X_WEEKLY_USD still overrides at runtime). The value is an ESTIMATE of the plan's weekly API-equivalent ceiling, not a billed figure — Anthropic publishes the plan's limits in usage terms, not dollars, so treat every percentage derived from it as an estimate too.",
+  "max20x_weekly_usd": 2000
+}

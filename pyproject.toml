@@ -10,6 +10,10 @@ requires-python = ">=3.10"
 dev = [
     "pytest>=7,<10",
     "pyyaml>=6,<7",
+    # The GraphQL parser tests/_fake_github.py routes a query on: gh names its
+    # own operations, and the reviews read is decided by the `after:` cursor the
+    # query binds, which only a parse can answer.
+    "graphql-core>=3.2,<4",
     "tree-sitter==0.26.0",
     "tree-sitter-bash==0.25.1",
 ]

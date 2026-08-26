@@ -5,8 +5,12 @@ without manipulating `sys.path` or relying on the conftest plugin loader.
 """
 
 import os
+import re
 import shutil
 import subprocess
+import types
+from importlib import util as importlib_util
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 
@@ -121,3 +125,41 @@ def copy_script_to(script_name: str, dest_dir: Path) -> Path:
             dest.chmod(0o755)
             return dest
     raise FileNotFoundError(f"Could not find {script_name} in any known location")
+
+
+def load_script_module(name: str, path: Path) -> types.ModuleType:
+    """Import the script at PATH under module NAME so its functions can be driven
+    in-process, whatever its filename — a hyphenated `.github/reviewer/*.py` is
+    not a legal import name. Naming the loader explicitly (rather than deriving
+    one from the path) is what makes the spec unconditional, so the caller gets a
+    module or an exception, never a silently half-built one."""
+    loader = SourceFileLoader(name, str(path))
+    spec = importlib_util.spec_from_loader(loader.name, loader)
+    # A SourceFileLoader always yields a spec; None means the import machinery
+    # refused this path, and executing nothing would hand back an empty module
+    # whose missing attributes surface much later as a confusing AttributeError.
+    if spec is None:
+        raise ImportError(f"no module spec for {path}")
+    module = importlib_util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def load_script(rel: str) -> types.ModuleType:
+    """Import the script at REPO_ROOT/<rel> in-process (see load_script_module),
+    under a module name derived from the filename: suffix dropped, every
+    non-identifier character mapped to `_` (`pr/files-to-diff.py` -> files_to_diff)."""
+    path = REPO_ROOT / rel
+    return load_script_module(re.sub(r"\W", "_", path.stem), path)
+
+
+def workflow_jobs(workflow_path: Path) -> dict:
+    """The `jobs:` mapping of a workflow file, via the real YAML parser."""
+    import yaml
+
+    return yaml.safe_load(workflow_path.read_text(encoding="utf-8"))["jobs"]
+
+
+def current_path() -> str:
+    """The live PATH, so a hermetic test env can still resolve git/bash."""
+    return os.environ.get("PATH", "/usr/bin:/bin")
