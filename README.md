@@ -32,11 +32,11 @@ jobs:
     uses: AlexanderMattTurner/agent-review/.github/workflows/review.yaml@main
     with:
       reviewer-repository: AlexanderMattTurner/agent-review
-      # Pass the same sha the `uses:` line above names. The workflow falls back
-      # to `github.job_workflow_sha`, which is EMPTY in the expression context,
-      # and it then refuses to clone rather than run unpinned code. Move both
-      # shas in the same edit.
-      reviewer-ref: <the sha the uses: line pins>
+      # Name the SAME ref the `uses:` line above names, and change both
+      # together. The workflow falls back to `github.job_workflow_sha`, which is
+      # EMPTY in the expression context, so it refuses to clone rather than run
+      # unpinned code.
+      reviewer-ref: main
       review-prompt: .github/prompts/claude-pr-review.md
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
@@ -44,7 +44,7 @@ jobs:
       # repository for a block a consumer can copy verbatim.
 ```
 
-Pin a commit sha rather than `main` once this repository cuts its first release: a branch ref runs whatever landed on it since you last read it. `rung_1` is required and is a metered Anthropic API key: every run spends it first and reaches a subscription token only once it errors. Rungs 2 to 8 are Claude Code OAuth tokens, and an empty rung is skipped rather than fatal.
+Pin a commit sha rather than `main` once this repository cuts its first release: a branch ref runs whatever landed on it since you last read it. Two lines carry that ref, `uses:` and `reviewer-ref:`, and they must name the same one. `rung_1` is required and is a metered Anthropic API key: every run spends it first and reaches a subscription token only once it errors. Rungs 2 to 8 are Claude Code OAuth tokens, and an empty rung is skipped rather than fatal.
 
 Two secrets are what the reviewer costs; everything else is a knob:
 
