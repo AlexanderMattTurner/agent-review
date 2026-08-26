@@ -55,7 +55,7 @@ on:
         default: ""
         type: string
       elide-command:
-        description: "Command line in the caller's base checkout that rewrites the RAW diff IN PLACE, dropping generated output no review can act on. It runs as `bash -c \"<command>\" -- <diff>`, so the diff is `$1` and your own quoting survives. Empty reviews the whole diff. The reviewer's budget is diff lines, so a repository whose diffs are mostly build artifacts should name one."
+        description: 'Command line in the caller''s base checkout that rewrites the RAW diff IN PLACE, dropping generated output no review can act on. It runs as `bash -c "<command>" -- <diff>`, so the diff is `$1` and your own quoting survives. Empty reviews the whole diff. The reviewer''s budget is diff lines, so a repository whose diffs are mostly build artifacts should name one.'
         required: false
         default: ""
         type: string
@@ -152,15 +152,15 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          # Both spellings: `github.job_workflow_sha` is the documented one, and
-          # `job.workflow_sha` is what the sibling resolver has been running on.
-          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
+          # `github.job_workflow_sha` is the commit THIS reusable workflow was
+          # called at, which is the code the clone below must match.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -223,15 +223,15 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          # Both spellings: `github.job_workflow_sha` is the documented one, and
-          # `job.workflow_sha` is what the sibling resolver has been running on.
-          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
+          # `github.job_workflow_sha` is the commit THIS reusable workflow was
+          # called at, which is the code the clone below must match.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -472,15 +472,15 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          # Both spellings: `github.job_workflow_sha` is the documented one, and
-          # `job.workflow_sha` is what the sibling resolver has been running on.
-          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
+          # `github.job_workflow_sha` is the commit THIS reusable workflow was
+          # called at, which is the code the clone below must match.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -619,15 +619,15 @@ jobs:
       - name: Check out the reviewer from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          # Both spellings: `github.job_workflow_sha` is the documented one, and
-          # `job.workflow_sha` is what the sibling resolver has been running on.
-          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha || job.workflow_sha }}
+          # `github.job_workflow_sha` is the commit THIS reusable workflow was
+          # called at, which is the code the clone below must match.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and job.workflow_sha is unset}"
+          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
