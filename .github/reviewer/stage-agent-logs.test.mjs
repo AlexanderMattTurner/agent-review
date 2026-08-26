@@ -143,6 +143,7 @@ function writeVenvPython(fx) {
   const venvBin = join(fx.root, ".venv", "bin");
   mkdirSync(venvBin, { recursive: true });
   const venvPython = join(venvBin, "python3");
+  // eslint-disable-next-line no-template-curly-in-string -- shell syntax the stub carries, not a JS template literal typed with the wrong quotes
   writeFileSync(venvPython, PYTHON_STUB.replace("${STUB_NO_ENGINE:-}", ""));
   chmodSync(venvPython, 0o755);
 }

@@ -30,15 +30,13 @@ import { pathToFileURL } from "node:url";
  * @returns {boolean}
  */
 export function isMain(importMetaUrl) {
-  /* eslint-disable no-restricted-syntax -- argv[1] is Node's own entry-point
-   * slot (set by Node to the invoked script's path, never a user-supplied
-   * value a caller could shift); this function is the one sanctioned reader
-   * on the scripts side. */
+  /* argv[1] is Node's own entry-point slot: Node sets it to the invoked
+   * script's path, never a user-supplied value a caller could shift. This
+   * function is the one sanctioned reader of it. */
   return (
     Boolean(process.argv[1]) &&
     importMetaUrl === pathToFileURL(process.argv[1]).href
   );
-  /* eslint-enable no-restricted-syntax */
 }
 
 /**

@@ -114,15 +114,15 @@ for (let i = 0; i < diffLines.length; i++) {
   if (raw.startsWith("--- ")) continue;
   if (raw.startsWith("+++ ")) {
     const target = raw.slice(4);
-    const m = target.match(/^b\/(.*)$/);
-    path = m ? m[1] : target;
+    const m = target.match(/^b\/(?<path>.*)$/);
+    path = m ? m.groups.path : target;
     continue;
   }
   if (raw.startsWith("@@")) {
-    const m = raw.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const m = raw.match(/@@ -(?<old>\d+)(?:,\d+)? \+(?<new>\d+)(?:,\d+)? @@/);
     if (m) {
-      oldLine = Number.parseInt(m[1], 10);
-      newLine = Number.parseInt(m[2], 10);
+      oldLine = Number.parseInt(m.groups.old, 10);
+      newLine = Number.parseInt(m.groups.new, 10);
     }
     continue;
   }
@@ -277,11 +277,7 @@ for (const f of findings) {
         path: synthetic.path,
         line: synthetic.line,
         side: "RIGHT",
-        body:
-          `${icon(sev)} ${detail}\n\n` +
-          `<sub>PR-wide finding at ${where}: it names no line in this diff, ` +
-          `so it is anchored here to open a resolvable thread.</sub>` +
-          severityMarker(sev),
+        body: `${icon(sev)} ${detail}\n\n<sub>PR-wide finding at ${where}: it names no line in this diff, so it is anchored here to open a resolvable thread.</sub>${severityMarker(sev)}`,
       });
     } else {
       spill.push(`- ${icon(sev)} ${where}: ${detail}`);
