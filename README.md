@@ -33,9 +33,9 @@ jobs:
     with:
       reviewer-repository: AlexanderMattTurner/agent-review
       # Pass the same sha the `uses:` line above names. The workflow falls back
-      # to `github.job_workflow_sha`, which GitHub leaves EMPTY on a call from
-      # another repository, and it then refuses to clone rather than run
-      # unpinned code. Move both shas in the same edit.
+      # to `github.job_workflow_sha`, which is EMPTY in the expression context,
+      # and it then refuses to clone rather than run unpinned code. Move both
+      # shas in the same edit.
       reviewer-ref: <the sha the uses: line pins>
       review-prompt: .github/prompts/claude-pr-review.md
     secrets:
@@ -51,7 +51,7 @@ Two secrets are what the reviewer costs; everything else is a knob:
 | Input                   | Default               | What it does                                                                                                                         |
 | ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `reviewer-repository`   | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                    |
-| `reviewer-ref`          | the caller's own pin  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins; only a caller inside this repository may omit it.   |
+| `reviewer-ref`          | required in practice  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins. An empty value stops the run at the clone step.     |
 | `model`                 | `claude-opus-5`       | The model behind every verdict.                                                                                                      |
 | `review-prompt`         | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                       |
 | `setup-command`         | none                  | A dependency sync run in your base checkout before the model call.                                                                   |
