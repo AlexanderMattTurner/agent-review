@@ -62,8 +62,10 @@ jobs:
     uses: ./.github/workflows/review.yaml
     with:
       reviewer-repository: AlexanderMattTurner/agent-review
-      # Leave `reviewer-ref` unset. The workflow reads the sha the `uses:` line
-      # names back out of `job.workflow_sha`, so the pin is written once.
+      # Leave `reviewer-ref` unset. This call is LOCAL, so GitHub sets
+      # `github.job_workflow_sha` and the workflow reads the pin back out of it.
+      # A caller in another repository gets an empty value there and must pass
+      # the sha itself; the input's own description says so.
       review-prompt: .github/prompts/claude-pr-review.md
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}

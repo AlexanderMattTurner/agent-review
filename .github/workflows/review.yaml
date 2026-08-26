@@ -30,7 +30,7 @@ on:
         required: true
         type: string
       reviewer-ref:
-        description: "Branch, tag or commit of reviewer-repository to run. LEAVE IT EMPTY: the workflow then runs the scripts from the very commit the caller pinned on its own `uses:` line, so there is one pin and it cannot drift."
+        description: "Branch, tag or commit of reviewer-repository to run. A caller in ANOTHER repository must pass the same sha its `uses:` line pins: the fallback below reads `github.job_workflow_sha`, which GitHub leaves empty on a cross-repository call. A caller in THIS repository may leave it empty, because a local `uses: ./…` call sets that value."
         required: false
         default: ""
         type: string
@@ -163,14 +163,17 @@ jobs:
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
           # `github.job_workflow_sha` is the commit THIS reusable workflow was
-          # called at, which is the code the clone below must match.
+          # called at, which is the code the clone below must match. GitHub sets
+          # it on a LOCAL `uses: ./…` call and leaves it EMPTY on a call from
+          # another repository, so a caller in another repository must pass
+          # `reviewer-ref` itself.
           REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
+          : "${REVIEWER_REF:?pass reviewer-ref — the sha your uses: line pins. github.job_workflow_sha is empty on a call from another repository}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -234,14 +237,17 @@ jobs:
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
           # `github.job_workflow_sha` is the commit THIS reusable workflow was
-          # called at, which is the code the clone below must match.
+          # called at, which is the code the clone below must match. GitHub sets
+          # it on a LOCAL `uses: ./…` call and leaves it EMPTY on a call from
+          # another repository, so a caller in another repository must pass
+          # `reviewer-ref` itself.
           REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
+          : "${REVIEWER_REF:?pass reviewer-ref — the sha your uses: line pins. github.job_workflow_sha is empty on a call from another repository}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -493,14 +499,17 @@ jobs:
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
           # `github.job_workflow_sha` is the commit THIS reusable workflow was
-          # called at, which is the code the clone below must match.
+          # called at, which is the code the clone below must match. GitHub sets
+          # it on a LOCAL `uses: ./…` call and leaves it EMPTY on a call from
+          # another repository, so a caller in another repository must pass
+          # `reviewer-ref` itself.
           REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
+          : "${REVIEWER_REF:?pass reviewer-ref — the sha your uses: line pins. github.job_workflow_sha is empty on a call from another repository}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
@@ -647,14 +656,17 @@ jobs:
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
           # `github.job_workflow_sha` is the commit THIS reusable workflow was
-          # called at, which is the code the clone below must match.
+          # called at, which is the code the clone below must match. GitHub sets
+          # it on a LOCAL `uses: ./…` call and leaves it EMPTY on a call from
+          # another repository, so a caller in another repository must pass
+          # `reviewer-ref` itself.
           REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
         run: |
           # Empty means neither the caller nor GitHub named a commit, and a clone
           # would then run this repository's default branch — which is what
           # pinning `uses:` is for. Refuse rather than run unpinned code beside
           # the caller's secrets.
-          : "${REVIEWER_REF:?reviewer-ref is empty and github.job_workflow_sha is unset}"
+          : "${REVIEWER_REF:?pass reviewer-ref — the sha your uses: line pins. github.job_workflow_sha is empty on a call from another repository}"
           dest="${RUNNER_TEMP}/reviewer"
           git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
