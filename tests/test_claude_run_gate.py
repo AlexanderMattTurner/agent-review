@@ -28,7 +28,9 @@ GATE_SCRIPT_REL = "../../scripts/check-claude-execution.sh"
 REVIEW_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
 LADDER = "run-review-ladder.py"
 REVIEWER_GATE = "checks/claude-execution.py"
-REVIEWER_GATE_SCRIPT = REPO_ROOT / ".github" / "reviewer" / "checks" / "claude-execution.py"
+REVIEWER_GATE_SCRIPT = (
+    REPO_ROOT / ".github" / "reviewer" / "checks" / "claude-execution.py"
+)
 
 
 def _load(path):
@@ -170,7 +172,11 @@ def _steps_running(job, needle):
 
 def _model_jobs():
     """Every job in review.yaml that calls the model, as (name, job)."""
-    return [(name, job) for name, job in _review_jobs().items() if _steps_running(job, LADDER)]
+    return [
+        (name, job)
+        for name, job in _review_jobs().items()
+        if _steps_running(job, LADDER)
+    ]
 
 
 def test_the_reviewer_gate_script_exists() -> None:
@@ -246,6 +252,8 @@ def test_every_rung_reaches_the_model_step() -> None:
         forwarded = {
             rung
             for rung in declared
-            if any(f"secrets.{rung} " in f"{value} " for value in map(str, env.values()))
+            if any(
+                f"secrets.{rung} " in f"{value} " for value in map(str, env.values())
+            )
         }
         assert forwarded == declared, f"{name} drops rung(s): {declared - forwarded}"

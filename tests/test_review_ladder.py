@@ -161,7 +161,9 @@ def test_each_attempt_starts_with_no_review(tmp_path: Path) -> None:
     real_run = module.subprocess.run
     module.subprocess.run = fake_run
     old = dict(os.environ)
-    os.environ.update({"PR_INPUT_DIR": str(tmp_path), "PROMPT_FILE": "p.md", "MODEL": "m"})
+    os.environ.update(
+        {"PR_INPUT_DIR": str(tmp_path), "PROMPT_FILE": "p.md", "MODEL": "m"}
+    )
     try:
         module.attempt(1, "token", True, tmp_path / "log.json", 1)
     finally:

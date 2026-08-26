@@ -238,7 +238,7 @@ def _run(
         # `$1`, the way the input's contract states it: the reviewer runs the
         # command as `bash -c "<command>" -- <diff>`, so a caller's own quoting
         # survives and a command naming the diff mid-argument still works.
-        extra_env["ELIDE_COMMAND"] = f'python3 {elider} "$1"' 
+        extra_env["ELIDE_COMMAND"] = f'python3 {elider} "$1"'
     if patch_pad_bytes:
         pad = tmp_path / "patch_pad"
         pad.write_text("x" * patch_pad_bytes, encoding="utf-8")

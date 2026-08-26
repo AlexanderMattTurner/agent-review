@@ -307,8 +307,9 @@ def test_the_opt_in_label_buys_a_read_the_callers_own_guard_would_skip(
     has: it reaches no `opened` arm the caller filtered out, and `synchronize`
     is filtered the same way. A review already on the PR does not spend it —
     a human asked for this read."""
-    _, run, _ = _run(tmp_path, "labeled", label="needs-auto-review",
-                     review_state="COMMENTED")
+    _, run, _ = _run(
+        tmp_path, "labeled", label="needs-auto-review", review_state="COMMENTED"
+    )
     assert run == "true"
 
 
@@ -322,8 +323,9 @@ def test_an_unrelated_label_buys_nothing(tmp_path: Path) -> None:
 def test_the_caller_names_which_label_opens_the_hatch(tmp_path: Path) -> None:
     """The name is the caller's, because the skip notice that advertises it is
     the caller's."""
-    _, run, _ = _run(tmp_path, "labeled", label="please-review",
-                     review_label="please-review")
+    _, run, _ = _run(
+        tmp_path, "labeled", label="please-review", review_label="please-review"
+    )
     assert run == "true"
 
 

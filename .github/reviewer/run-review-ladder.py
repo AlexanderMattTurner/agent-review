@@ -58,9 +58,7 @@ METERED_ENV = "ANTHROPIC_API_KEY"
 # because review.json does not exist yet on the first attempt. No Bash, so a prompt
 # injection in the diff reaches no shell. `--setting-sources user` keeps the reviewed
 # repository's own `.claude` settings — which the PR may edit — out of the review.
-TOOL_GRANT = (
-    "Read(./**),Read(/{d}/**),Read(/{r}/**),Write(/{d}/review.json),Edit(/{d}/review.json)"
-)
+TOOL_GRANT = "Read(./**),Read(/{d}/**),Read(/{r}/**),Write(/{d}/review.json),Edit(/{d}/review.json)"
 
 
 def prompt_for(pr_input_dir: str, prompt_file: str, pr: str, repo: str) -> str:
@@ -97,7 +95,9 @@ def outcome_of(log: Path) -> RungOutcome:
     except (OSError, json.JSONDecodeError):
         return RungOutcome(errored=True, zero_cost=True)
     if isinstance(events, list):
-        results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"]
+        results = [
+            e for e in events if isinstance(e, dict) and e.get("type") == "result"
+        ]
         result = results[-1] if results else None
     else:
         result = events if isinstance(events, dict) else None
@@ -165,10 +165,16 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
         try:
             subprocess.run(command, stdout=out, timeout=timeout, check=False, env=env)
         except subprocess.TimeoutExpired:
-            print(f"::warning::rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}", flush=True)
+            print(
+                f"::warning::rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}",
+                flush=True,
+            )
             return True
         except FileNotFoundError:
-            print("::error::no `claude` on PATH — the CLI install step did not run", file=sys.stderr)
+            print(
+                "::error::no `claude` on PATH — the CLI install step did not run",
+                file=sys.stderr,
+            )
             sys.exit(1)
     return False
 
@@ -183,7 +189,9 @@ def main() -> None:
         # would silently start on a subscription token, so a run whose first rung is
         # unset is a wiring fault and says so rather than re-billing an account the
         # caller did not choose.
-        sys.exit("::error::rung 1's secret is empty — the reviewer has no credential to spend first")
+        sys.exit(
+            "::error::rung 1's secret is empty — the reviewer has no credential to spend first"
+        )
 
     # CONFIGURED rungs only, in ladder order. An unset rung is skipped rather than
     # fatal — that is the contract the workflow's own input descriptions state — so a
@@ -198,7 +206,12 @@ def main() -> None:
     free_retry = len(walk) == 1 or walk[1].index != 2
     if free_retry:
         retry = slots[1]
-        rungs.insert(1, Rung(name=f"rung_{retry.index}", token_env=slots[0].env_var, configured=False))
+        rungs.insert(
+            1,
+            Rung(
+                name=f"rung_{retry.index}", token_env=slots[0].env_var, configured=False
+            ),
+        )
         walk.insert(1, retry)
 
     outcomes: dict[str, RungOutcome] = {}
@@ -225,7 +238,9 @@ def main() -> None:
             break
 
     verdict = evaluate(rungs, outcomes)
-    print(f"ladder ran {list(verdict.ran)}; winner {verdict.winner or 'none'}", flush=True)
+    print(
+        f"ladder ran {list(verdict.ran)}; winner {verdict.winner or 'none'}", flush=True
+    )
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
         handle.write(f"execution_file={newest_log}\n")
 

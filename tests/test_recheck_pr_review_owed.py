@@ -152,8 +152,14 @@ def test_an_in_flight_earlier_run_counts_as_the_review(
 
 # What GitHub actually names these jobs once a consumer calls the reviewer as a
 # reusable workflow: the calling job's id, then the job's own name.
-CALLED_SHARD_JOB = {"name": "review / Claude PR review (shard 2)", "status": "in_progress"}
-CALLED_SYNTHESIS_JOB = {"name": "review / Post the sharded PR review", "status": "queued"}
+CALLED_SHARD_JOB = {
+    "name": "review / Claude PR review (shard 2)",
+    "status": "in_progress",
+}
+CALLED_SYNTHESIS_JOB = {
+    "name": "review / Post the sharded PR review",
+    "status": "queued",
+}
 
 
 @pytest.mark.parametrize("job", [CALLED_SHARD_JOB, CALLED_SYNTHESIS_JOB])

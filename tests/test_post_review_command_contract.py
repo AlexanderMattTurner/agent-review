@@ -42,7 +42,9 @@ def test_both_jobs_that_post_a_review_re_evaluate_the_gate() -> None:
 
 @pytest.mark.parametrize("job", ["review", "review_synthesis"])
 @pytest.mark.parametrize("name", REQUIRED)
-def test_the_gate_command_is_handed_the_environment_it_reads(job: str, name: str) -> None:
+def test_the_gate_command_is_handed_the_environment_it_reads(
+    job: str, name: str
+) -> None:
     step = _gate_steps()[job]
     assert name in step["env"], f"{job} runs the caller's gate without {name}"
 
