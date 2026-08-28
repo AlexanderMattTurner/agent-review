@@ -15,12 +15,12 @@ name: Review gate
 # code is checked out or executed here. The job reads review state through the
 # API and posts a status.
 
-# WHICH BRANCH'S COPY OF THIS FILE RUNS differs per trigger, and it decides what
-# the gate can do before it is merged. `pull_request_target` runs only the BASE
-# branch's copy, so this leg is silent until the file is on the default branch.
-# `pull_request_review` runs the copy on the branch the event's ref names — the
-# PR head, for a same-repo PR — so that leg fires immediately. Observed on #457:
-# three `pull_request_review` runs and zero `pull_request_target` runs.
+# WHICH BRANCH'S COPY OF THIS FILE RUNS is the same for both triggers: GitHub
+# reads `pull_request_target` and `pull_request_review` from the BASE branch, so
+# neither leg exists until this file is on the default branch, and neither ever
+# runs a pull request's own edit of it. The checkout below then pins
+# `github.event.repository.default_branch` explicitly, which is what makes the
+# script this job runs trusted.
 on: # zizmor: ignore[dangerous-triggers] — no PR code executes: an API-only script off a default-branch checkout; see the SECURITY header
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize]

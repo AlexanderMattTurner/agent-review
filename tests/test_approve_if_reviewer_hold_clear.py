@@ -2,9 +2,10 @@
 lifted without a human, so its refusals matter more than its successes.
 
 The `gh` stub here RUNS the script's own `--jq` filters over canned GraphQL
-responses rather than returning pre-filtered output. That is deliberate: the
-safety property — never dismiss a review this bot did not write — lives entirely
-inside one of those filters, and a stub that ignored `--jq` would report it
+responses rather than returning pre-filtered output. That is deliberate: both
+safety properties — never dismiss a review this bot did not write, and never
+count the pull request author's own Resolve click as a clearing signal — live
+entirely inside those filters, and a stub that ignored `--jq` would report them
 working while testing nothing.
 """
 
@@ -25,11 +26,20 @@ REPO_ROOT = Path(
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "approve-if-reviewer-hold-clear.sh"
 
 BOT = "github-actions"
+AUTHOR = "pr-author"
+OTHER = "a-human"
 
 
-def thread(author: str = BOT, resolved: bool = True) -> dict:
+def thread(
+    author: str = BOT, resolved: bool = True, resolved_by: str | None = OTHER
+) -> dict:
+    """One review thread. `resolved_by` is the login GitHub records on Resolve;
+    it is null on an unresolved thread, and on a resolved one whose resolver the
+    token cannot see."""
+    by = {"login": resolved_by} if resolved and resolved_by else None
     return {
         "isResolved": resolved,
+        "resolvedBy": by,
         "comments": {"nodes": [{"author": {"login": author}}]},
     }
 
@@ -72,6 +82,7 @@ def run(
     *,
     threads: list[dict],
     reviews: list[dict],
+    pr_author: str = AUTHOR,
     approve_error: str | None = None,
     dismiss_error: str | None = None,
     rungs: dict[str, str] | None = None,
@@ -89,6 +100,7 @@ def run(
     (tmp_path / "threads.json").write_text(threads_json)
     (tmp_path / "reviews.json").write_text(reviews_json)
     (tmp_path / "quotas.json").write_text(json.dumps(quotas))
+    (tmp_path / "pr.json").write_text(json.dumps({"user": {"login": pr_author}}))
     log = tmp_path / "gh-calls.txt"
 
     def arm(err: str | None) -> str:
@@ -125,6 +137,20 @@ left="$(jq -r --arg t "${{GH_TOKEN:-}}" '.[$t] // 0' "{tmp_path}/quotas.json")"
 if [[ "$left" -le 0 ]]; then
   echo "gh: API rate limit already exceeded for user ID 3458070." >&2
   exit 1
+fi
+# The PR read the script uses to learn who may NOT clear the hold. REST spells a
+# bot author `x[bot]` where GraphQL spells it `x`, so the fixture is served
+# verbatim and the script's own filter reads it.
+if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+  filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --jq) filter="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq -r "$filter" "{tmp_path}/pr.json"
+  exit 0
 fi
 if [[ "$1" == "api" && "$2" == "graphql" ]]; then
   query=""; filter=""
@@ -337,3 +363,72 @@ def test_a_reviewer_not_holding_dismisses_nothing(tmp_path: Path, state: str):
     assert res.returncode == 0
     assert not dismissed(calls)
     assert "no live hold to clear" in res.stderr
+
+
+def test_the_pr_author_resolving_alone_clears_nothing(tmp_path: Path):
+    """THE author-exclusion case. GitHub lets a pull request's author resolve the
+    conversations on their own pull request, so an author who clicks Resolve on
+    every reviewer thread — changing no code — would otherwise clear the gate
+    that constrains them."""
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=AUTHOR), thread(resolved_by=AUTHOR)],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "pr review" not in calls, "the author's own clicks must mint no approval"
+    assert "names a resolver other than its author" in res.stderr
+
+
+def test_one_thread_resolved_by_somebody_else_still_clears(tmp_path: Path):
+    # The author may resolve threads too; the hold clears as long as one
+    # resolution came from a party the hold does not constrain.
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=AUTHOR), thread(resolved_by=OTHER)],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert dismissed(calls)
+
+
+def test_the_two_api_spellings_of_one_login_are_one_author(tmp_path: Path):
+    # REST returns the author as `x[bot]`, GraphQL returns the resolver as `x`,
+    # and GitHub logins are case-insensitive. A comparison that missed either
+    # would read the author's own resolution as somebody else's and clear.
+    res, calls = run(
+        tmp_path,
+        pr_author="Renovate[bot]",
+        threads=[thread(resolved_by="renovate")],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "names a resolver other than its author" in res.stderr
+
+
+def test_a_resolved_thread_with_no_recorded_resolver_clears_nothing(tmp_path: Path):
+    # `resolvedBy` is null when the token cannot attribute the resolution. An
+    # unattributable click cannot be shown to come from anyone but the author.
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=None)],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "names a resolver other than its author" in res.stderr
+
+
+def test_an_unreadable_pr_author_fails_loudly(tmp_path: Path):
+    # With no author to exclude, every resolution would look like somebody
+    # else's. That is the fail-open this exclusion exists to prevent.
+    res, calls = run(tmp_path, pr_author="", **CLEARED)
+    assert res.returncode == 1
+    assert not dismissed(calls)
+    assert "could not read the author" in res.stderr
