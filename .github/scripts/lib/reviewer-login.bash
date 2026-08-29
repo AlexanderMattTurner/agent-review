@@ -28,15 +28,29 @@
 [[ -n "${_REVIEWER_LOGIN_SOURCED:-}" ]] && return 0
 _REVIEWER_LOGIN_SOURCED=1
 
+# login_bare_jq <jq-path> — a jq expression reducing the login at <jq-path> to
+# the one spelling both dialects agree on: the REST `[bot]` suffix is stripped,
+# and case is folded because a GitHub login is unique case-insensitively. Every
+# login comparison in these scripts is built from this, so no call site can
+# normalize one side of a comparison and not the other.
+#
+# `// ""` covers a null login (a deleted account, an unresolved thread's
+# `resolvedBy`, or a GraphQL node the token cannot see): it becomes the empty
+# string, which never equals a real login, so an unattributable review is never
+# credited to the reviewer. It does NOT make an unattributable RESOLUTION safe:
+# "" does not equal the author either, so a `!=` comparison against the author
+# PASSES for a null `resolvedBy`. The caller's separate `.resolvedBy != null`
+# conjunct is the check that blocks that one; neither is redundant.
+login_bare_jq() {
+  local login_path="${1:?login_bare_jq: a jq path to the login is required}"
+  printf '%s' "(((${login_path}) // \"\") | ascii_downcase | sub(\"\\\\[bot\\\\]\$\"; \"\"))"
+}
+
 # reviewer_login_select <jq-path> — a jq `select(…)` that keeps only the elements
 # whose login at <jq-path> is the reviewer's, in either dialect's spelling.
-#
-# `// ""` covers a null author (a deleted account, or a GraphQL node the token
-# cannot see): it becomes the empty string, which never equals a bare login, so
-# an unattributable review is never credited to the reviewer.
 reviewer_login_select() {
   local login_path="${1:?reviewer_login_select: a jq path to the login is required}"
-  printf '%s' "select(((${login_path}) // \"\" | sub(\"\\\\[bot\\\\]\$\"; \"\")) == env.REVIEWER_LOGIN_BARE)"
+  printf '%s' "select($(login_bare_jq "$login_path") == $(login_bare_jq env.REVIEWER_LOGIN_BARE))"
 }
 
 # reviewer_login_init — set and export REVIEWER_LOGIN / REVIEWER_LOGIN_BARE from
