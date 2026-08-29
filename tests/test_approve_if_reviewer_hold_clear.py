@@ -5,8 +5,9 @@ The `gh` stub here RUNS the script's own `--jq` filters over canned GraphQL
 responses rather than returning pre-filtered output. That is deliberate: both
 safety properties — never dismiss a review this bot did not write, and never
 count the pull request author's own Resolve click as a clearing signal — live
-entirely inside those filters, and a stub that ignored `--jq` would report them
-working while testing nothing.
+entirely inside those filters — as does the scoping that keeps an earlier hold
+cycle's resolution from vouching for the current one — and a stub that ignored
+`--jq` would report them working while testing nothing.
 """
 
 import json
@@ -30,23 +31,36 @@ AUTHOR = "pr-author"
 OTHER = "a-human"
 
 
+CYCLE_1 = "2026-01-01T00:00:00Z"
+CYCLE_2 = "2026-02-01T00:00:00Z"
+
+
 def thread(
-    author: str = BOT, resolved: bool = True, resolved_by: str | None = OTHER
+    author: str = BOT,
+    resolved: bool = True,
+    resolved_by: str | None = OTHER,
+    opened_by_review_at: str = CYCLE_1,
 ) -> dict:
     """One review thread. `resolved_by` is the login GitHub records on Resolve;
     it is null on an unresolved thread, and on a resolved one whose resolver the
-    token cannot see."""
+    token cannot see. `opened_by_review_at` is the `submittedAt` of the review
+    that opened the thread, which is what ties the thread to one hold cycle."""
     by = {"login": resolved_by} if resolved and resolved_by else None
     return {
         "isResolved": resolved,
         "resolvedBy": by,
-        "comments": {"nodes": [{"author": {"login": author}}]},
+        "comments": {
+            "nodes": [
+                {
+                    "author": {"login": author},
+                    "pullRequestReview": {"submittedAt": opened_by_review_at},
+                }
+            ]
+        },
     }
 
 
-def review(
-    state: str, author: str = BOT, at: str = "2026-01-01T00:00:00Z", rid: int = 1
-) -> dict:
+def review(state: str, author: str = BOT, at: str = CYCLE_1, rid: int = 1) -> dict:
     return {
         "databaseId": rid,
         "author": {"login": author},
@@ -311,7 +325,7 @@ def test_the_newest_bot_changes_requested_is_the_one_dismissed(tmp_path: Path):
     # the blocking review is routinely NOT the reviewer's latest review.
     res, calls = run(
         tmp_path,
-        threads=[thread(resolved=True)],
+        threads=[thread(resolved=True, opened_by_review_at="2026-01-04T00:00:00Z")],
         reviews=[
             review("CHANGES_REQUESTED", at="2026-01-01T00:00:00Z", rid=11),
             review("CHANGES_REQUESTED", at="2026-01-03T00:00:00Z", rid=33),
@@ -432,3 +446,64 @@ def test_an_unreadable_pr_author_fails_loudly(tmp_path: Path):
     assert res.returncode == 1
     assert not dismissed(calls)
     assert "could not read the author" in res.stderr
+
+
+def test_an_earlier_cycles_non_author_resolution_cannot_clear_a_later_hold(
+    tmp_path: Path,
+):
+    """Threads outlive the review that opened them. A human resolved one thread
+    in cycle 1; the reviewer then held again and the author resolved every
+    cycle-2 thread alone. Counting cycle 1's resolution would clear a hold no
+    second party ever read."""
+    res, calls = run(
+        tmp_path,
+        threads=[
+            thread(resolved_by=OTHER, opened_by_review_at=CYCLE_1),
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_2),
+        ],
+        reviews=[
+            review("CHANGES_REQUESTED", at=CYCLE_1, rid=1),
+            review("CHANGES_REQUESTED", at=CYCLE_2, rid=2),
+        ],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "pr review" not in calls, "a stale resolution must mint no approval"
+    assert "names a resolver other than its author" in res.stderr
+
+
+def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Path):
+    # The reviewer held again in a review body alone. Cycle 1's threads are all
+    # resolved, one by a human, but none of them answers the new finding.
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=OTHER, opened_by_review_at=CYCLE_1)],
+        reviews=[
+            review("CHANGES_REQUESTED", at=CYCLE_1, rid=1),
+            review("CHANGES_REQUESTED", at=CYCLE_2, rid=2),
+        ],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "opened no thread" in res.stderr
+
+
+def test_the_current_holds_own_thread_still_clears(tmp_path: Path):
+    # Non-vacuity for the two refusals above: the same two-cycle shape clears as
+    # soon as the resolution a human made belongs to the LATEST hold.
+    res, calls = run(
+        tmp_path,
+        threads=[
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_1),
+            thread(resolved_by=OTHER, opened_by_review_at=CYCLE_2),
+        ],
+        reviews=[
+            review("CHANGES_REQUESTED", at=CYCLE_1, rid=1),
+            review("CHANGES_REQUESTED", at=CYCLE_2, rid=2),
+        ],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert dismissed(calls)

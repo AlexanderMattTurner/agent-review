@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
-# Approve the PR when the automated reviewer's hold is fully cleared by somebody
-# other than the pull request's own author. This is the single source of truth
-# for "the reviewer requested changes (or commented), every one of its threads is
-# resolved, and somebody the hold does not constrain resolved at least one, so
-# post the APPROVE that supersedes the hold and satisfies a review-required
-# ruleset."
+# Approve the PR when the automated reviewer's hold is fully cleared. This is the
+# single source of truth for "the reviewer requested changes (or commented),
+# every one of its threads is resolved, and somebody other than the pull
+# request's author resolved one of THIS hold's threads, so post the APPROVE that
+# supersedes the hold and satisfies a review-required ruleset."
 #
 # It is state-based and idempotent: it reads the CURRENT thread and review state
-# through the API and decides from that alone. Every resolver except the author
-# counts, so a thread that somebody else resolved — a human clicking Resolve, an
-# agent, a prior run's race — cannot strand the hold. A periodic sweep of open
-# PRs (claude-reviewer-hold-clear.yaml) runs it, so a resolution that fires no
+# through the API and decides from that alone. A periodic sweep of open PRs
+# (claude-reviewer-hold-clear.yaml) runs it, so a resolution that fires no
 # workflow event is caught too.
 #
-# The AUTHOR exclusion is the safety property: GitHub lets a pull request's
-# author resolve conversations on their own pull request, so counting those
-# clicks would let the party this gate constrains open it, with no code changed.
-#
-# Approves ONLY when the reviewer's LATEST review is a live hold or comment —
-# CHANGES_REQUESTED or COMMENTED (any other latest state means nothing to clear:
-# APPROVED already through, DISMISSED, or "" the reviewer never reviewed this PR —
-# so an unrelated thread-resolved event mints no approval; this allowlist is
-# stricter than "!= APPROVED" on purpose) — AND all three thread conditions hold:
-# the reviewer opened at least one thread (root comment authored by
-# REVIEWER_LOGIN), none is still unresolved, and one was resolved by a login
-# other than the author's. A hold whose concern lived only in the review body
-# opens no thread, so it clears on the reviewer's own re-review instead.
+# Approves ONLY when the reviewer's LATEST review is a live hold — CHANGES_REQUESTED
+# or COMMENTED; any other latest state means nothing to clear, so an unrelated
+# thread-resolved event mints no approval — AND all three thread conditions hold:
+# no reviewer thread is unresolved, that latest hold opened at least one thread,
+# and somebody other than the author resolved one of those. A hold whose concern
+# lived only in the review body opens no thread, so it clears on the reviewer's
+# own re-review instead.
 #
 # Env: the GH_TOKEN_* ladder rungs (see lib/github-token-ladder.bash), GH_REPO
 # (owner/name), PR; REVIEWER_LOGIN optional.
@@ -75,63 +66,10 @@ fi
 export PR_AUTHOR
 resolver_is_not_author="$(login_bare_jq .resolvedBy.login) != $(login_bare_jq env.PR_AUTHOR)"
 
-# Count the reviewer's threads three ways. Paginated: a PR can accrue >100
-# threads, and an unpaginated first:100 would miss a thread on a later page. The
-# per-page --jq emits one {total, unresolved, cleared_by_other} object; the
-# trailing reduce sums them.
-# shellcheck disable=SC2016 # GraphQL query + jq program are literal, not shell
-remaining_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100, after: $endCursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes { isResolved resolvedBy { login } comments(first: 1) { nodes { author { login } } } }
-      }
-    }
-  }
-}'
-# A thread hold is "demonstrably cleared" only when the reviewer opened at least
-# one thread, none remains unresolved, AND somebody other than the author
-# resolved one of them. A CHANGES_REQUESTED / COMMENTED review that opened ZERO
-# threads carries no THREAD resolution signal; it is cleared only
-# by the BODY signal below (the model judged the review's summary finding
-# addressed), never on thread state alone — auto-clearing a thread-less hold on
-# "unresolved == 0" (trivially true with no threads) would merge the reviewer's
-# concern unaddressed.
-# shellcheck disable=SC2016 # jq program is literal, not shell ($p is a jq var)
-counts="$(gh api graphql --paginate \
-  -f query="$remaining_query" -f owner="$owner" -f name="$name" -F pr="$PR" \
-  --jq "[.data.repository.pullRequest.reviewThreads.nodes[]
-         | ${REVIEWER_MATCH_THREAD_ROOT}]
-        | {total: length,
-           unresolved: (map(select(.isResolved == false)) | length),
-           cleared_by_other: (map(select(.isResolved == true
-                                         and .resolvedBy != null
-                                         and ${resolver_is_not_author})) | length)}" |
-  jq -s 'reduce .[] as $p ({total: 0, unresolved: 0, cleared_by_other: 0};
-           {total: (.total + $p.total), unresolved: (.unresolved + $p.unresolved),
-            cleared_by_other: (.cleared_by_other + $p.cleared_by_other)})')"
-unresolved="$(jq -r '.unresolved' <<<"$counts")"
-total="$(jq -r '.total' <<<"$counts")"
-cleared_by_other="$(jq -r '.cleared_by_other' <<<"$counts")"
-
-if [[ "${unresolved:-0}" -ne 0 ]]; then
-  echo "${unresolved} reviewer thread(s) still open; not approving" >&2
-  exit 0
-fi
-
-# INVARIANT — an approval needs a RESOLVED thread to rest on. A hold whose
-# concern lived only in the review body opens no thread, so nothing here can
-# clear it: the reviewer's own re-check on the next push supersedes that verdict.
-if [[ "${total:-0}" -eq 0 ]]; then
-  echo "reviewer opened no thread, so no resolution signal exists; a thread-less hold clears on the reviewer's own re-review" >&2
-  exit 0
-fi
-
-# What is the reviewer's latest review state? Paginated (a long-lived PR can
-# accrue >100 reviews, and an unpaginated first:100 returns the OLDEST 100 and
-# would pick a stale state): the per-page --jq emits the reviewer's reviews as
-# NDJSON and the slurp picks the globally latest by submittedAt.
+# What is the reviewer's latest review, and when did it land? Paginated (a
+# long-lived PR can accrue >100 reviews, and an unpaginated first:100 returns the
+# OLDEST 100 and would pick a stale state): the per-page --jq emits the reviewer's
+# reviews as NDJSON and the slurp picks the globally latest by submittedAt.
 # shellcheck disable=SC2016 # GraphQL query + jq program are literal, not shell
 reviews_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -143,29 +81,98 @@ reviews_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: Str
     }
   }
 }'
-latest_state="$(gh api graphql --paginate \
+latest_review="$(gh api graphql --paginate \
   -f query="$reviews_query" -f owner="$owner" -f name="$name" -F pr="$PR" \
   --jq ".data.repository.pullRequest.reviews.nodes[]
         | ${REVIEWER_MATCH_AUTHOR}
         | {state, submittedAt}" |
-  jq -rs 'if length == 0 then "" else (sort_by(.submittedAt) | last | .state) end')"
+  jq -cs 'if length == 0 then {state: "", submittedAt: ""}
+          else (sort_by(.submittedAt) | last) end')"
+latest_state="$(jq -r '.state' <<<"$latest_review")"
 
 if [[ "$latest_state" != "CHANGES_REQUESTED" && "$latest_state" != "COMMENTED" ]]; then
   echo "reviewer's latest review is '${latest_state:-<none>}' — no live hold to clear; nothing to do" >&2
   exit 0
 fi
 
-# INVARIANT — this refusal is what stops a pull request's author from clearing
-# the reviewer's hold on their own. GitHub lets the author resolve any
-# conversation on their pull request, so a hold whose every resolution is the
-# author's own — or is attributed to nobody — carries no signal that anybody
-# else read the finding.
-if [[ "${cleared_by_other:-0}" -eq 0 ]]; then
-  echo "no resolved reviewer thread on PR #${PR} names a resolver other than its author (${PR_AUTHOR}); the hold stays until somebody else resolves one or the reviewer re-reviews" >&2
+# HOLD_SINCE scopes every thread count below to the hold this run may clear. jq
+# reads it from the environment, so it is exported rather than shell-local.
+HOLD_SINCE="$(jq -r '.submittedAt // ""' <<<"$latest_review")"
+export HOLD_SINCE
+if [[ -z "$HOLD_SINCE" || "$HOLD_SINCE" == "null" ]]; then
+  echo "the reviewer's ${latest_state} review carries no submittedAt, so no thread can be scoped to it; the hold stays in place." >&2
+  exit 1
+fi
+
+# Count the reviewer's threads three ways. Paginated: a PR can accrue >100
+# threads, and an unpaginated first:100 would miss a thread on a later page. The
+# per-page --jq emits one {unresolved, in_hold, cleared_by_other} object; the
+# trailing reduce sums them.
+# shellcheck disable=SC2016 # GraphQL query + jq program are literal, not shell
+remaining_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          resolvedBy { login }
+          comments(first: 1) { nodes { author { login } pullRequestReview { submittedAt } } }
+        }
+      }
+    }
+  }
+}'
+# A thread belongs to the current hold when the review that opened its root
+# comment is that hold or newer. The root comment's own createdAt cannot answer
+# this: a comment drafted into a pending review is created BEFORE that review is
+# submitted, so it can predate the very hold it belongs to.
+thread_in_hold='((.comments.nodes[0].pullRequestReview.submittedAt // "") >= env.HOLD_SINCE)'
+
+# `unresolved` spans the whole PR — a thread left open in any cycle blocks. The
+# other two are scoped to this hold, so an earlier cycle cannot vouch for it.
+# shellcheck disable=SC2016 # jq program is literal, not shell ($p is a jq var)
+counts="$(gh api graphql --paginate \
+  -f query="$remaining_query" -f owner="$owner" -f name="$name" -F pr="$PR" \
+  --jq "[.data.repository.pullRequest.reviewThreads.nodes[]
+         | ${REVIEWER_MATCH_THREAD_ROOT}]
+        | {unresolved: (map(select(.isResolved == false)) | length),
+           in_hold: (map(select(${thread_in_hold})) | length),
+           cleared_by_other: (map(select(${thread_in_hold}
+                                         and .isResolved == true
+                                         and .resolvedBy != null
+                                         and ${resolver_is_not_author})) | length)}" |
+  jq -s 'reduce .[] as $p ({unresolved: 0, in_hold: 0, cleared_by_other: 0};
+           {unresolved: (.unresolved + $p.unresolved), in_hold: (.in_hold + $p.in_hold),
+            cleared_by_other: (.cleared_by_other + $p.cleared_by_other)})')"
+unresolved="$(jq -r '.unresolved' <<<"$counts")"
+in_hold="$(jq -r '.in_hold' <<<"$counts")"
+cleared_by_other="$(jq -r '.cleared_by_other' <<<"$counts")"
+
+if [[ "${unresolved:-0}" -ne 0 ]]; then
+  echo "${unresolved} reviewer thread(s) still open; not approving" >&2
   exit 0
 fi
 
-cleared_by="every review conversation from the automated reviewer has been resolved, at least one of them by somebody other than the pull request's author"
+# INVARIANT — an approval needs a resolved thread FROM THIS HOLD to rest on. A
+# hold whose concern lived only in the review body opens no thread, so nothing
+# here can clear it: the reviewer's own re-check on the next push supersedes it.
+if [[ "${in_hold:-0}" -eq 0 ]]; then
+  echo "the reviewer's latest hold (${latest_state} at ${HOLD_SINCE}) opened no thread, so no resolution signal exists; a thread-less hold clears on the reviewer's own re-review" >&2
+  exit 0
+fi
+
+# INVARIANT — this refusal is what stops a pull request's author from clearing
+# the reviewer's hold alone. GitHub lets the author resolve any conversation on
+# their pull request, so the hold clears only on a resolution by somebody else,
+# of a thread THIS hold opened: a resolution attributed to nobody, or one from an
+# earlier review cycle, vouches for nothing the latest hold raised.
+if [[ "${cleared_by_other:-0}" -eq 0 ]]; then
+  echo "no thread from the reviewer's latest hold on PR #${PR} names a resolver other than its author (${PR_AUTHOR}); the hold stays until somebody else resolves one or the reviewer re-reviews" >&2
+  exit 0
+fi
+
+cleared_by="every review conversation from the automated reviewer has been resolved, and somebody other than the pull request's author resolved one that its latest hold opened"
 
 # Dismiss the REVIEWER'S OWN stale CHANGES_REQUESTED. Reached only when the hold
 # is already proven clear above and the approval was structurally refused, so it
