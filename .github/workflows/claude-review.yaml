@@ -62,8 +62,11 @@ jobs:
     uses: ./.github/workflows/review.yaml
     with:
       reviewer-repository: AlexanderMattTurner/agent-review
-      # Leave `reviewer-ref` unset. The workflow reads the sha the `uses:` line
-      # names back out of `job.workflow_sha`, so the pin is written once.
+      # This call is local, so the commit to run is this workflow file's own.
+      # `pull_request_target` runs the file from the base branch, and
+      # `github.sha` names that commit. Do not drop this: the called workflow's
+      # `github.job_workflow_sha` fallback is empty and it would refuse to clone.
+      reviewer-ref: ${{ github.sha }}
       review-prompt: .github/prompts/claude-pr-review.md
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}

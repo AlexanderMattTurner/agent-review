@@ -70,6 +70,8 @@ the prose from the release's commits.
 
 ### Fixed
 
+- The automated reviewer's hold no longer clears when the pull request's own author resolved every one of the reviewer's conversations. GitHub lets an author resolve conversations on their own pull request, so `approve-if-reviewer-hold-clear.sh` could post its clearing approval, or dismiss the reviewer's `CHANGES_REQUESTED`, for an author who changed no code. It now reads each thread's `resolvedBy` login and requires one resolution from a login other than the author's, on a thread the reviewer's LATEST hold opened. Scoping to that hold is what stops one non-author resolution in an early review cycle from clearing every later hold on the same pull request.
+
 - Template-sync no longer introduces `auto-version.yaml` into a repo that does
   not already have it (new `OPT_IN_PATHS` mechanism). A consumer with its own
   release workflow used to end up with two publishers on the default branch;
