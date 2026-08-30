@@ -19,3 +19,30 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  # Dependabot only scans `.github/workflows` under the `/` entry above — a
+  # composite action's own `uses:` pins (in `.github/actions/*/action.yaml`)
+  # need one entry per directory or they drift silently until a pin-comment
+  # check catches the mismatch (issue: setup-base-env's setup-node/setup-uv
+  # sat two majors behind the workflow-level pins).
+  - package-ecosystem: "github-actions"
+    directory: "/.github/actions/setup-base-env"
+    schedule:
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "github-actions"
+    directory: "/.github/actions/claude-run"
+    schedule:
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
