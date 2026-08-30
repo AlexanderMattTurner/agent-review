@@ -19,3 +19,20 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  # Dependabot's `/` entry only scans `.github/workflows`; a composite action's
+  # own `uses:` pins live in `.github/actions/*/action.yaml` and drift silently
+  # without their own entry (setup-base-env's setup-node and setup-uv sat two
+  # majors behind the workflow-level pins). The glob covers every action
+  # directory, including ones added later.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/.github/actions/*"
+    schedule:
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
