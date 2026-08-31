@@ -47,15 +47,20 @@ on: # zizmor: ignore[dangerous-triggers] — no PR code executes: API-only scrip
   pull_request_review_comment:
     types: [created]
 
-# Queue, never cancel. `github.event_name` is `pull_request_target` here, so the
-# house expression evaluates false and a superseded run finishes instead of
-# dying mid-step. That matters even for a shadow leg: the called job posts a
-# commit status, and a cancel between reading the state and POSTing leaves the
-# head carrying a stale parity verdict, which is exactly the noise a comparison
-# must not generate.
+# Queue, never cancel, and keyed PER HEAD — the same key the called job uses.
+# Never cancel because the called job posts a commit status, and a cancel
+# between reading the state and POSTing leaves the head carrying a stale parity
+# verdict, which is exactly the noise a comparison must not generate.
+#
+# Per head because webhook delivery is unordered and this OUTER group is
+# evaluated before the called workflow's own. Under a per-branch key, a
+# late-delivered event for an old head joins the same group as a queued run for
+# the CURRENT head and displaces it, and the new head then gets no parity
+# verdict at all — the inner per-head group cannot undo a cancellation that
+# already happened out here.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
 
 permissions: {}
 
