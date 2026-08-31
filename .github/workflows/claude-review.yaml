@@ -213,6 +213,36 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/review-gate.sh
 
+  # Approving the pull request and posting the gate verdict is only half the
+  # landing: it still sits open until a person presses merge. An automated
+  # `chore(release)` pull request waited that way with every required check
+  # green. Arming is NOT merging — GitHub holds the pull request until every
+  # required check passes, and a red one keeps holding it.
+  #
+  # A separate job, not a step above: enabling auto-merge needs `contents:
+  # write`, and that job checks out repository content under
+  # pull_request_target. This one checks out nothing and runs one `gh` call.
+  arm_auto_merge:
+    name: Arm auto-merge on the skipped class
+    needs: auto_approve_skipped
+    # not-required-check: arms a landing, and reports no verdict about the code.
+    # First-look only, matching the approve step: a later `synchronize` must not
+    # re-arm a pull request whose auto-merge a person turned off on purpose.
+    if: >-
+      github.event.action == 'opened' ||
+      github.event.action == 'ready_for_review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # enablePullRequestAutoMerge records the pending merge
+      pull-requests: write # set the auto-merge flag on the pull request
+    steps:
+      - name: Arm auto-merge so this class lands once its checks are green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
+
   # ────────────────────────────────────────────────────────────────────────────
   # Claude merge-delta review (Sonnet) — from claude-merge-delta-review.yaml
   #
