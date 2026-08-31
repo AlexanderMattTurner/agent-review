@@ -119,7 +119,22 @@ jobs:
       # review-gate.yaml never hears about it and the gate would keep the head's
       # pre-review red until the next push. HEAD_SHA is the gate's own name for
       # the sha this contract calls REPORT_SHA.
-      post-review-command: HEAD_SHA="$REPORT_SHA" bash .github/scripts/review-gate.sh
+      #
+      # The PARITY leg needs the same re-post for the same reason, and this is
+      # the transition that comparison most wants: the exported predicate's
+      # first named divergence is about whether a review exists at all. Its own
+      # workflow cannot hear this event either. It is a SHADOW, so its exit
+      # status is reported and never propagated — branching on the code rather
+      # than `|| true`, which would swallow a real failure of the live gate on
+      # the first line too.
+      post-review-command: |
+        HEAD_SHA="$REPORT_SHA" bash .github/scripts/review-gate.sh
+        GATE_CONTEXT="Review findings resolved (parity)" \
+          SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
+          UNREVIEWED_STATE=failure \
+          bash .github/reviewer/review-findings-gate.sh
+        rc=$?
+        [ "$rc" -eq 0 ] || echo "::warning::parity gate exited ${rc}; its shadow context is stale for this head"
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
