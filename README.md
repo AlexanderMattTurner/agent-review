@@ -10,6 +10,8 @@ The read runs in three shapes, and the size of the diff picks the shape:
 2. **A larger diff is split per file.** Parallel agents read the files at the same time. The workflow folds their findings into one review before it posts. Splitting the work this way is called sharding.
 3. **A diff too large even to split gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
 
+Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff under both line limits that still needs more shards than the limit allows, because a shard never splits a file.
+
 You call it from your own repository by `uses:`, pinned to a commit with the release version in a trailing comment.
 
 ## Call it
@@ -49,7 +51,7 @@ jobs:
 
 Three parts of that block need a word of explanation before you copy it.
 
-**The event, `pull_request_target`.** GitHub can start a workflow on a pull request in two ways. The ordinary one runs the code sitting on the pull request's branch. `pull_request_target` instead runs the code on the BASE branch — the branch the pull request wants to merge into. The reviewer needs secrets, and the pull request may come from a stranger, so the pull request's own code must never execute. This event is how that holds.
+**The event, `pull_request_target`.** GitHub can start a workflow on a pull request in two ways. The ordinary `pull_request` event runs the code sitting on the pull request's branch, and a fork's pull request gets no secrets there. `pull_request_target` instead takes the workflow file from the BASE branch and gives it the base repository's secrets. The reviewer needs those secrets. The pull request may come from a stranger, so the pull request's own code must never execute. The event alone does not hold that line: a step could still check the head out. What holds it is the checkout, and this reviewer checks out your DEFAULT branch, never the author-chosen base. Nothing stops a pull request from targeting a branch whose machinery was rewritten.
 
 **The `permissions:` block, which is a ceiling.** A called workflow may request only what the calling job already holds. The block above is therefore the maximum, and the jobs inside narrow themselves from it. Granting less than this list does not merely limit the run. It ends the run with the status `startup_failure` before any job starts, and you get no red check to read.
 
@@ -69,7 +71,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `setup-cache-path`      | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                          |
 | `setup-cache-key-files` | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry.    |
 | `elide-command`         | none                  | A command that drops generated files from the raw diff before the reviewer reads it. The reviewer's budget is diff lines, so a generated file spends budget on code nobody wrote. Name one if your diffs are mostly build files. |
-| `post-review-command`   | none                  | Run after the review lands, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set. A required check that must read the review learns from this command that the review has landed. |
+| `post-review-command`   | none                  | Run after the review step, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set. It asks a required check to re-evaluate its gate. It also runs when the review failed, so the check reports a missing review rather than assuming one landed. |
 | `log-redactor`          | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                   |
 | `max-diff-lines`        | `12000`               | Above this many diff lines the read splits per file.                                                                                    |
 | `max-shardable-lines`   | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                   |
