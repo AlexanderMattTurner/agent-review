@@ -1,0 +1,223 @@
+# Post the automated review's merge verdict as a COMMIT STATUS on a pull
+# request's head. Called by a consumer repository's own workflow; the predicate
+# and every script it runs come from THIS repository at the commit the caller
+# pinned on its `uses:` line, never from the repository under review.
+#
+# WHAT IT DECIDES, in one sentence: red until the reviewer has read the pull
+# request (or owes it no read), red while any unresolved reviewer-rooted thread
+# still carries a gating finding, green otherwise. review-findings-gate.sh
+# carries the full model.
+#
+# ── Trust model ───────────────────────────────────────────────────────────────
+#
+# The caller fires on `pull_request_target`, so this job holds the base
+# repository's secrets while a fork's pull request is what triggered them. Two
+# rules keep that safe:
+#   1. No PR-authored code is ever checked out or executed. The gate scripts come
+#      from this repository's pinned clone, and the consumer's severity SSOT is
+#      read from the caller's DEFAULT BRANCH — from the event payload GitHub
+#      writes, never the untrusted head and never the author-chosen base.
+#   2. The pull request is read only through the API, as data.
+# Least privilege: contents:read to fetch the config, statuses:write to post the
+# verdict, pull-requests:write to read the threads and free the re-check label.
+#
+# ── Why the merge-queue leg stays in the consumer ─────────────────────────────
+#
+# A called job's check run is named `<caller job id> / <called job name>`, so a
+# reusable workflow cannot report under a bare context like
+# "Review findings resolved". The consumer therefore keeps its merge_group leg as
+# a local job carrying that exact name, and this workflow posts its statuses under
+# the same name through `status-context`. That consumer file must NEVER gain a
+# PR-event trigger: the required check's job sitting in a workflow that also fires
+# on pull request events would be reported `skipped` on every such run, and GitHub
+# counts a `skipped` check run as satisfying a required check — so a stray label
+# or review comment would overwrite a red gate with a passing skipped instance.
+name: Review-findings gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      reviewer-repository:
+        description: "owner/name of the repository that ships this gate. It is cloned at the sha below, so the gated repository cannot rewrite the code that gates it."
+        required: true
+        type: string
+      reviewer-ref:
+        description: "Branch, tag or commit of reviewer-repository to run. PASS IT — the same sha the caller pins on its `uses:` line. The fallback reads `github.job_workflow_sha`, which is empty in the expression context, so an unset input stops the run at the clone step."
+        required: false
+        default: ""
+        type: string
+      status-context:
+        description: "The commit-status context this verdict is posted under. It MUST equal the `name:` of the consumer's merge_group gate job, because that name is what the ruleset registers as the required check."
+        required: false
+        default: "Review findings resolved"
+        type: string
+      severity-config:
+        description: "Repo-relative path IN THE CALLING repository to the severity SSOT — the file whose `gating` list says which findings hold a merge, and whose `icons` map gives each one's leading icon. Read from the caller's default branch."
+        required: false
+        default: "config/review-severities.json"
+        type: string
+      unreviewed-state:
+        description: "The status state posted while the reviewer has not read the pull request yet: `pending` says waiting in the merge box, `failure` is louder because a pending status does not appear in `gh pr checks` at all. Both block a required context."
+        required: false
+        default: "pending"
+        type: string
+      recheck-label:
+        description: "The label a human or agent adds to re-evaluate the gate. Thread resolution fires no workflow event and `workflow_dispatch` 403s for agent-session tokens, so this label is the manual hatch. This workflow removes it after acting, so re-adding it fires again. The caller must list `labeled` in its `pull_request_target` types."
+        required: false
+        default: "recheck-review-gate"
+        type: string
+      review-label:
+        description: "The label that takes a pull request back OUT of the set the reviewer skips. Matches the reusable review workflow's own `review-label`."
+        required: false
+        default: "needs-auto-review"
+        type: string
+      review-skip-types:
+        description: 'JSON array of the Conventional-Commit title types the reviewer skips, so the gate waives its wait for exactly them. Widen or narrow it to match the consumer''s own review workflow.'
+        required: false
+        default: '["chore", "style", "release"]'
+        type: string
+
+permissions: {}
+
+jobs:
+  evaluate:
+    name: Post the review-findings verdict on the PR head
+    # No job-level `if:`. This job posts a required check, so every run that can
+    # occupy the per-head concurrency slot must post a verdict itself — a
+    # conditionally-skipped run could displace a queued evaluation and then post
+    # nothing, leaving the head's check stale or missing forever. The predicate
+    # is stateless and idempotent, so the extra evaluations this buys (a draft
+    # push, an unrelated label add) are each one short job posting the verdict
+    # that already stands.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Serialized per pull request HEAD — the sha is in the key because webhook
+    # delivery is unordered: with a PR-only key, a late-delivered event carrying
+    # a stale head could displace the queued evaluation for the current head and
+    # then post its verdict on the stale sha, leaving the live head with no
+    # check. Per-head groups make displacement possible only among runs that
+    # would post to the SAME sha. NEVER cancelling the running evaluation:
+    # GitHub cancels mid-step, so a `true` here can kill a run between reading
+    # the state and POSTing the verdict — that verdict is lost and the head
+    # keeps a stale one. With `false`, only the QUEUED run is ever cancelled,
+    # and only by a newer same-head run that itself executes unconditionally and
+    # posts a fresher verdict.
+    concurrency:
+      group: review-findings-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # sparse-checkout the caller's severity SSOT
+      statuses: write # post the verdict on the head
+      # A label on a PULL REQUEST is checked against the pull-requests
+      # permission, not issues. Under `issues: write` alone the DELETE below
+      # 403s and the label stays; while it sits there re-adding it fires no
+      # `labeled` event, which makes the re-check hatch one-shot for the whole
+      # life of the pull request.
+      pull-requests: write # read the threads, remove the command label
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      RECHECK_LABEL: ${{ inputs.recheck-label }}
+    steps:
+      - name: Remove the re-check command label
+        # UNCONDITIONAL remove-if-present, and the FIRST step, because a
+        # `labeled` run displaced while QUEUED executes zero steps — no ordering
+        # or `always()` can make the displaced run itself free the label. What
+        # can is the run that displaced it: the per-head group key means any
+        # survivor evaluates the SAME head the label was asking about, so every
+        # evaluation of a head consumes a pending re-check request for it.
+        # Running first also frees the label before a failed evaluation, keeping
+        # the retry path. On the common runs where no label sits on the pull
+        # request the DELETE 404s, which the case below treats as the harmless
+        # no-op it is; any OTHER failure leaves the label stuck, and while it
+        # sits there re-adding it fires no `labeled` event, so a non-404 failure
+        # is warned about, never swallowed.
+        run: |
+          if ! out="$(gh api -X DELETE "repos/${GH_REPO}/issues/${PR}/labels/${RECHECK_LABEL}" 2>&1)"; then
+            # gh renders the status as "(HTTP 404)"; the body text varies by
+            # endpoint, so match the code.
+            case "$out" in
+              *"(HTTP 404)"*) ;;
+              *) echo "::warning::${RECHECK_LABEL} label removal failed — remove it manually so re-adding it can fire again: ${out}" ;;
+            esac
+          fi
+
+      - name: Check out the gate from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          # Every caller must pass `reviewer-ref`. The fallback reads
+          # `github.job_workflow_sha`, which is EMPTY in the expression context
+          # on a local call and on a cross-repository call alike. It stays here
+          # only so a caller that does set it keeps working.
+          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
+        run: |
+          # Empty means neither the caller nor GitHub named a commit, and a
+          # clone would then run this repository's default branch — which is
+          # what pinning `uses:` is for. Refuse rather than run unpinned code
+          # beside the caller's secrets.
+          : "${REVIEWER_REF:?pass reviewer-ref — the commit this gate must run. github.job_workflow_sha is empty in the expression context}"
+          dest="${RUNNER_TEMP}/reviewer"
+          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # A ref may be a branch, a tag or a commit sha. `checkout --detach`
+          # takes all three; `clone --branch` refuses a sha, which is the form a
+          # caller pinning its `uses:` line has.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          # Outside GITHUB_WORKSPACE on purpose: the gated repository's checkout
+          # must not be able to replace the code gating it.
+          echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - name: Check out the caller's severity SSOT (default branch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Explicit default-branch ref — never the event's sha; see the trust
+          # model above. This pin keeps PR-authored content out of this job, and
+          # it matters here: the severity config decides which findings gate, so
+          # a head-ref checkout would let an author empty `gating` and green
+          # their own pull request.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: ${{ inputs.severity-config }}
+          sparse-checkout-cone-mode: false
+
+      - name: Evaluate the gate and post the verdict on the head
+        id: evaluate
+        # The whole point of the job: without this step the workflow removes a
+        # label and posts nothing, so the required context is never reported on
+        # a new head and the pull request blocks forever on a check that will
+        # never arrive. REPORT_SHA is what routes the verdict to the head's
+        # status context; without it the script only exits 0/1.
+        env:
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          GATE_CONTEXT: ${{ inputs.status-context }}
+          SEVERITY_CONFIG: ${{ github.workspace }}/${{ inputs.severity-config }}
+          UNREVIEWED_STATE: ${{ inputs.unreviewed-state }}
+          REVIEW_LABEL: ${{ inputs.review-label }}
+          REVIEW_SKIP_TYPES: ${{ inputs.review-skip-types }}
+          # A status description is capped at 140 characters, so this is where a
+          # reader gets the finding list a red verdict names.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "${REVIEWER_DIR}/review-findings-gate.sh"
+
+      - name: Report red when the evaluation posted no verdict
+        # The step above posts the required check only if it reaches its POST,
+        # so an evaluation that dies first — an exhausted API retry ladder, a jq
+        # failure on the severity config, a lost runner — leaves the head with
+        # NO status under a REQUIRED context. GitHub renders that as
+        # "Expected — Waiting for status to be reported" and blocks the merge on
+        # a check nothing will ever send: thread resolution fires no workflow
+        # event, so the gate is not re-derived until the next push or a re-check
+        # label. Reporting red says the same thing in a form the merge box can
+        # act on. LIMIT: a failure in either checkout above takes this arm's
+        # script with it, so that one still strands the check — it reds the run
+        # loudly in Actions, unlike the silent strand this closes.
+        if: always() && steps.evaluate.outcome != 'success'
+        env:
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          GATE_CONTEXT: ${{ inputs.status-context }}
+          SEVERITY_CONFIG: ${{ github.workspace }}/${{ inputs.severity-config }}
+          GATE_UNREPORTED: "1"
+          # Points at the run that failed, which is where the reason this arm
+          # fired at all is legible.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "${REVIEWER_DIR}/review-findings-gate.sh"
