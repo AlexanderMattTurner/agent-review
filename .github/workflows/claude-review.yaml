@@ -51,16 +51,18 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   review:
     # The exact complement of the `auto_approve_skipped` job below, so every pull
-    # request is reviewed or approved and never neither. The two gates move
-    # together. A title is author-written, so the skip needs the trust half too:
-    # an untrusted pull request is never skipped, and gets the real read instead
-    # of an approval it cannot earn. `labeled` is the on-demand hatch that starts
-    # the read the approval offers — the reviewer's `decide` job checks the name.
+    # request is reviewed or approved and never neither. Every clause of that
+    # job's predicate appears negated here, DRAFT INCLUDED: the approver refuses a
+    # draft, so a draft in the skip class stays on the review path rather than
+    # matching neither job. A title is author-written, so the skip needs the trust
+    # half too — an untrusted pull request gets the real read instead of an
+    # approval it cannot earn. `labeled` is the on-demand hatch.
     if: >-
       github.event.action == 'labeled' ||
       (
         contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
         !(
+          github.event.pull_request.draft == false &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           (
             github.event.pull_request.user.type == 'Bot' ||
