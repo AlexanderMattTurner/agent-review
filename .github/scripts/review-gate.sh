@@ -52,11 +52,14 @@
 # Can't-verify is RED, never green: an API failure propagates through `set -e`,
 # because a gate that fails open lets a PR merge past a review nobody read.
 #
-# NOTHING CLEARS A RESOLVED THREAD BY ITSELF. GitHub fires no workflow event when
-# a review thread is resolved, so a pull request whose author resolves every
-# finding without pushing would sit red with no event able to re-run this script.
-# The twice-hourly sweep (claude-reviewer-hold-clear.yaml) re-posts this verdict
-# for every open pull request, which is the path that clears such a head.
+# TWO STATE CHANGES FIRE NO EVENT THIS SCRIPT COULD RUN ON, so each has its own
+# caller. The reviewer's own review posts with the workflow GITHUB_TOKEN, whose
+# events start no workflow run, so the reviewer re-posts this verdict itself as
+# claude-review.yaml's `post-review-command`. And GitHub fires nothing at all when
+# a thread is RESOLVED, so a pull request whose author resolves every finding
+# without pushing would sit red forever; the twice-hourly sweep
+# (claude-reviewer-hold-clear.yaml) re-posts the verdict for every open pull
+# request, which is what clears that head.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, HEAD_SHA, RUN_URL; REVIEWER_LOGIN
 # optional.

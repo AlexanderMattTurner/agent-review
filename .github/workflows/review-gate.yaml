@@ -29,16 +29,12 @@ name: Review gate
 on: # zizmor: ignore[dangerous-triggers] — no PR code executes: an API-only script off a default-branch checkout; see the SECURITY header
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize]
-  # The reviewer submitting (or dismissing) a review is what flips the predicate.
+  # A HUMAN submitting or dismissing a review flips the predicate. The reviewer's
+  # own review cannot arrive this way: it posts with the workflow GITHUB_TOKEN,
+  # whose events start no workflow run, so the reviewer re-posts this verdict
+  # itself through claude-review.yaml's `post-review-command`.
   pull_request_review:
     types: [submitted, dismissed]
-  # A new review comment changes the thread set, including the reviewer's own
-  # findings where it posts them one at a time after GitHub rejects the batch —
-  # threads that appear AFTER the `submitted` event this gate would otherwise
-  # answer on. A burst fires one run each; they all publish the same stateless
-  # verdict, and the per-head concurrency group runs them one at a time.
-  pull_request_review_comment:
-    types: [created]
 
 permissions: {}
 

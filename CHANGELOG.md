@@ -26,10 +26,12 @@ the prose from the release's commits.
   exists, and none of the reviewer's threads is both unresolved and gating.
   Gating means the thread's root carries a `blocking` or `warning` severity —
   `config/review-severities.json` is the SSOT the reviewer stamps from — so a
-  🔵 nit never holds a merge. Resolving a thread fires no workflow event, so the
-  twice-hourly sweep in `claude-reviewer-hold-clear.yaml` re-posts the verdict
-  for every open PR: that is what clears a PR whose author resolved the findings
-  without pushing. The context name is registered by a never-firing job in
+  🔵 nit never holds a merge. Two state changes reach the gate through a caller
+  rather than an event: the reviewer re-posts the verdict itself
+  (`post-review-command`), because a review posted with the workflow
+  `GITHUB_TOKEN` starts no workflow run; and the twice-hourly sweep in
+  `claude-reviewer-hold-clear.yaml` re-posts it for every open PR, which is what
+  clears a PR whose author resolved the findings without pushing. The context name is registered by a never-firing job in
   `review-gate-context.yaml`, because a job sharing the name would report its own
   green check run under the same context and satisfy the gate while the status
   was still red.

@@ -68,6 +68,13 @@ jobs:
       # `github.job_workflow_sha` fallback is empty and it would refuse to clone.
       reviewer-ref: ${{ github.sha }}
       review-prompt: .github/prompts/claude-pr-review.md
+      # Re-post the `Automated review posted` verdict once the review (and its
+      # finding threads) exist. Nothing else would: the review posts with the
+      # workflow GITHUB_TOKEN, whose events start no workflow run, so
+      # review-gate.yaml never hears about it and the gate would keep the head's
+      # pre-review red until the next push. HEAD_SHA is the gate's own name for
+      # the sha this contract calls REPORT_SHA.
+      post-review-command: HEAD_SHA="$REPORT_SHA" bash .github/scripts/review-gate.sh
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
