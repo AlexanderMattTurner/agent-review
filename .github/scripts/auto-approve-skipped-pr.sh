@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Post an approving review on a PR the Claude reviewer deliberately SKIPS
-# (low-risk chore/style by title, a machine-cut `release:` PR, or a
-# bot-authored PR). Under a
-# review-required ruleset the Claude review IS the approval for the PRs it reads
-# (looks_good -> APPROVE); a class it never reads would otherwise carry no
-# approving review and could never auto-merge. This supplies that approval so the
-# ruleset lets it through. The caller (claude-pr-review.yaml's auto-approve-skipped
-# job `if:`) has already decided this PR is in the skip set — the script just
-# posts the review via the shared retry-as-COMMENT helper
-# (lib-post-review-with-retry.sh), since an APPROVE can 422 here the same way it
-# does in the reviewer's post-pr-review.sh.
+# Post an approving review on a PR the Claude reviewer deliberately SKIPS — a
+# low-risk chore/style title, a machine-cut `release:` PR, or a bot author.
+#
+# A review-required ruleset needs an approving review, and the `Automated review
+# posted` gate needs a review by the reviewer with a body. A skipped PR gets
+# neither, so it strands on both. This review supplies both at once, because it
+# posts with GITHUB_TOKEN and so carries the reviewer identity review-gate.sh
+# counts. The caller (claude-review.yaml's `auto_approve_skipped` job `if:`) has
+# already decided this PR is in the skip set, and that job re-runs
+# review-gate.sh afterwards to post the cleared verdict on the head.
+#
+# The post goes through the shared retry-as-COMMENT helper
+# (lib-post-review-with-retry.sh), because an APPROVE can 422 here the same way
+# it does in the reviewer's post-pr-review.sh.
 #
 # Requires: gh authenticated (GH_TOKEN), GH_REPO, PR.
 set -euo pipefail
