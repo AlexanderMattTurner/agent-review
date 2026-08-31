@@ -28,6 +28,14 @@ name: Review-findings gate (parity)
 #     carries no body precisely so it cannot. Settling that fork is what this
 #     comparison is for.
 #
+# A THIRD source of disagreement is NOT a difference in the predicate, and a
+# reader has to rule it out first: the two legs fire on different events.
+# review-gate.yaml carries neither `labeled` nor `pull_request_review_comment`,
+# so a new review comment or a re-check label re-evaluates only this leg. Both
+# predicates read current state, so the posted statuses can then differ purely
+# because one is stale. Check which event last refreshed each context before
+# reading a divergence as real.
+#
 # The skip set is left EMPTY, because this repository's reviewer reads every
 # pull request — see review.yaml's decide job. Nothing is waived, so the two
 # legs are compared on the same population.
@@ -61,10 +69,20 @@ jobs:
     uses: ./.github/workflows/review-findings-gate.yaml
     with:
       reviewer-repository: ${{ github.repository }}
-      # A caller in this repository passes its own `github.sha`, which under
-      # pull_request_target is the base branch — trusted, and the same commit
-      # this workflow file itself was read from.
-      reviewer-ref: ${{ github.sha }}
+      # The DEFAULT BRANCH, not `github.sha`. Under pull_request_target those
+      # are the same commit, but this workflow also fires on the two review
+      # events, where GITHUB_REF is the pull request MERGE ref
+      # (`refs/pull/N/merge`) and `github.sha` is that merge commit — see
+      # review-gate.yaml's header. The export clones with `git clone`, which
+      # fetches `refs/heads/*` and `refs/tags/*` only, so the merge commit is
+      # absent and `checkout --detach` dies with "reference is not a tree".
+      # That reds the job before REVIEWER_DIR is set, which by the export's own
+      # documented limit also disables its always() reporting arm — the parity
+      # context strands at "Expected" and nothing is compared. It would have
+      # failed on exactly the dismissed-review case this leg exists to watch,
+      # because a dismissal only ever arrives as a pull_request_review event.
+      # A branch name resolves under every trigger and stays trusted.
+      reviewer-ref: ${{ github.event.repository.default_branch }}
       # NOT "Automated review posted": that context is required, and this leg
       # must never be able to satisfy or contradict it.
       status-context: Review findings resolved (parity)
