@@ -1,23 +1,28 @@
 name: Claude reviewer-hold sweeper
 
-# Periodically re-check every open PR's automated-reviewer hold and post the
-# APPROVE that supersedes a stale CHANGES_REQUESTED once all of the reviewer's
-# threads are resolved. This is the safety net for the resolve-WITHOUT-a-push case:
+# Periodically re-derive both pieces of automated-reviewer state on every open PR:
+# the APPROVE that supersedes a stale CHANGES_REQUESTED once all of the reviewer's
+# threads are resolved, and the `Automated review posted` merge gate, which stays
+# RED while one of those threads is unresolved. This is the safety net for the
+# resolve-WITHOUT-a-push case:
 # GitHub has no workflow trigger that fires when a review thread is resolved
 # (`pull_request_review_thread` is a webhook event but NOT a valid workflow `on:`
 # event — GitHub rejects it at compile time), so a thread resolved manually with no
 # follow-up push emits nothing for the push-time approve step in
-# claude-review.yaml to react to. A cron sweep re-runs the
-# state-based approve for all open PRs, so no resolution path can strand the hold.
-# The approve itself is state-based and idempotent (approve-if-reviewer-hold-
-# clear.sh reads current thread + review state), so a sweep never double-approves.
+# claude-review.yaml to react to, and no event for review-gate.yaml to re-post its
+# verdict on. A cron sweep re-runs both state-based evaluations for all open PRs, so
+# no resolution path can strand the hold or leave a handled PR red. Each is
+# idempotent — approve-if-reviewer-hold-clear.sh and review-gate.sh both read the
+# current thread and review state — so a sweep never double-approves, and never
+# publishes a verdict the live state does not support.
 #
 # SECURITY — schedule + workflow_dispatch run from the DEFAULT branch (trusted repo
 # content) with the base repo's GITHUB_TOKEN; the job checks out ONLY the trusted
-# approval scripts and executes no PR code — it reads thread/review state via the
-# API and can only post an approval. Least privilege: contents:read (checkout the
-# scripts) + pull-requests:write (post the approval), nothing else, so even an
-# unexpected PR can only be approved, never pushed to, merged, or otherwise reached.
+# approval and gate scripts and executes no PR code — it reads thread/review state via
+# the API and can only post an approval or a commit status. Least privilege:
+# contents:read (checkout the scripts) + pull-requests:write (post the approval) +
+# statuses:write (post the gate verdict), nothing else, so even an unexpected PR can
+# only be approved or have its verdict refreshed, never pushed to or merged.
 
 on:
   schedule:
@@ -34,7 +39,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read # sparse-checkout the trusted approval scripts
-      pull-requests: write # submit the approving review; no other scope
+      pull-requests: write # submit the approving review
+      statuses: write # re-post the `Automated review posted` verdict per PR
     env:
       # The sweep's own PR listing runs on the Actions token.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,12 +51,22 @@ jobs:
       # by dismissing it rather than by minting an approval on a PR no push-time
       # review just examined.
       GH_TOKEN_ACTIONS: ${{ secrets.GITHUB_TOKEN }}
+      # review-gate.sh links its status back to the run that posted it, so a
+      # sweep's re-post keeps the Details link review-gate.yaml's post carries.
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: Checkout the trusted approval scripts (default branch)
+      - name: Checkout the trusted approval and gate scripts (default branch)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          # The sweep runs review-gate.sh too, which sources the reviewer's
+          # thread walker and reads the severity SSOT; neither lives under
+          # .github/scripts, so both are named here.
+          sparse-checkout: |
+            .github/scripts
+            .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib-ci-retry.sh
+            config/review-severities.json
           sparse-checkout-cone-mode: false
-      - name: Sweep open PRs and clear any cleared reviewer hold
+      - name: Sweep open PRs, clear any cleared reviewer hold, re-post the gate
         run: bash .github/scripts/sweep-reviewer-holds.sh
