@@ -51,6 +51,9 @@ jobs:
       # by dismissing it rather than by minting an approval on a PR no push-time
       # review just examined.
       GH_TOKEN_ACTIONS: ${{ secrets.GITHUB_TOKEN }}
+      # review-gate.sh links its status back to the run that posted it, so a
+      # sweep's re-post keeps the Details link review-gate.yaml's post carries.
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout the trusted approval and gate scripts (default branch)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

@@ -50,28 +50,36 @@ def thread(body: str, *, resolved: bool = False, author: str = BOT) -> dict:
 
 
 def run_gate(
-    tmp_path: Path, reviews: list[dict], threads: list[dict] | None = None
+    tmp_path: Path, reviews: list[dict], thread_pages: list[list[dict]] | None = None
 ) -> str:
-    """Run the gate over `reviews` and `threads`; return the status state it posted."""
+    """Run the gate over `reviews` and `thread_pages`; return the status state posted.
+
+    Each element of `thread_pages` is one GraphQL PAGE of review threads. `gh api
+    graphql --paginate --jq` applies the filter to each page separately and
+    concatenates the results, so the stub does the same — a stub that answered
+    from one payload would run the gate's per-page count without ever exercising
+    the sum the gate takes across pages.
+    """
     (tmp_path / "reviews.json").write_text(json.dumps(reviews), encoding="utf-8")
-    (tmp_path / "threads.json").write_text(
-        json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {"reviewThreads": {"nodes": threads or []}}
+    for index, page in enumerate(thread_pages or [[]]):
+        (tmp_path / f"threads-{index}.json").write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {"reviewThreads": {"nodes": page}}
+                        }
                     }
                 }
-            }
-        ),
-        encoding="utf-8",
-    )
+            ),
+            encoding="utf-8",
+        )
     log = tmp_path / "gh-calls.txt"
     stub = f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "{log}"
 if [[ "$2" == "--paginate" || "$2" == "graphql" ]]; then
-  payload="{tmp_path}/reviews.json"
-  [[ "$2" == "graphql" ]] && payload="{tmp_path}/threads.json"
+  payloads=("{tmp_path}/reviews.json")
+  [[ "$2" == "graphql" ]] && payloads=("{tmp_path}"/threads-*.json)
   filter=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,7 +87,9 @@ if [[ "$2" == "--paginate" || "$2" == "graphql" ]]; then
       *) shift ;;
     esac
   done
-  jq -r "$filter" "$payload"
+  for payload in "${{payloads[@]}}"; do
+    jq -r "$filter" "$payload"
+  done
   exit 0
 fi
 exit 0
@@ -192,13 +202,13 @@ REVIEWED = [review("COMMENTED")]
 
 def test_an_unresolved_blocking_finding_holds_the_gate_red(tmp_path: Path) -> None:
     payload = [thread("Null deref here.\n\n<!-- severity: blocking -->")]
-    assert run_gate(tmp_path, REVIEWED, payload) == "failure"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "failure"
 
 
 def test_resolving_the_last_gating_thread_greens_the_gate(tmp_path: Path) -> None:
     """The clearing path, and the only one that does not need a push."""
     payload = [thread("Null deref here.\n\n<!-- severity: blocking -->", resolved=True)]
-    assert run_gate(tmp_path, REVIEWED, payload) == "success"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "success"
 
 
 def test_an_unresolved_nit_never_holds_the_gate(tmp_path: Path) -> None:
@@ -206,13 +216,13 @@ def test_an_unresolved_nit_never_holds_the_gate(tmp_path: Path) -> None:
     🔵 nit is advice: a gate a nit could hold would teach authors to resolve
     threads to merge rather than to fix what they name."""
     payload = [thread("Rename this.\n\n<!-- severity: nit -->")]
-    assert run_gate(tmp_path, REVIEWED, payload) == "success"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "success"
 
 
 def test_an_icon_led_finding_holds_the_gate_without_a_marker(tmp_path: Path) -> None:
     """A thread posted before the hidden marker existed carries only its icon."""
     payload = [thread("\U0001f7e1 The retry swallows the exit code.")]
-    assert run_gate(tmp_path, REVIEWED, payload) == "failure"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "failure"
 
 
 def test_a_marker_quoted_in_prose_does_not_gate(tmp_path: Path) -> None:
@@ -220,7 +230,7 @@ def test_a_marker_quoted_in_prose_does_not_gate(tmp_path: Path) -> None:
     would let a finding that quotes the marker — in prose, or in a suggestion
     block proposing one — relabel itself into or out of the gating set."""
     payload = [thread("Stamp it with `<!-- severity: blocking -->` next time.")]
-    assert run_gate(tmp_path, REVIEWED, payload) == "success"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "success"
 
 
 def test_another_actors_unresolved_thread_never_holds_the_gate(tmp_path: Path) -> None:
@@ -228,7 +238,7 @@ def test_another_actors_unresolved_thread_never_holds_the_gate(tmp_path: Path) -
     the review-required ruleset's business; holding this check on one would report
     a reviewer finding that does not exist."""
     payload = [thread("I disagree with this design.", author="pr-author")]
-    assert run_gate(tmp_path, REVIEWED, payload) == "success"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "success"
 
 
 def test_one_unresolved_finding_among_resolved_ones_still_holds(tmp_path: Path) -> None:
@@ -237,13 +247,28 @@ def test_one_unresolved_finding_among_resolved_ones_still_holds(tmp_path: Path) 
         thread("Rename this.\n\n<!-- severity: nit -->"),
         thread("Race on the shared file.\n\n<!-- severity: warning -->"),
     ]
-    assert run_gate(tmp_path, REVIEWED, payload) == "failure"
+    assert run_gate(tmp_path, REVIEWED, [payload]) == "failure"
+
+
+def test_a_gating_thread_on_an_EARLIER_page_still_holds_the_gate(
+    tmp_path: Path,
+) -> None:
+    """The gate counts per page and sums the counts in the shell, because a `--jq`
+    reducer would answer from the LAST page alone. This is the under-read that
+    greens a gate that should be red: the gating thread sits on page 1 and page 2
+    carries only a nit, so a reducer answers 0 and the merge goes through with the
+    finding open."""
+    pages = [
+        [thread("Race on the shared file.\n\n<!-- severity: warning -->")],
+        [thread("Rename this.\n\n<!-- severity: nit -->")],
+    ]
+    assert run_gate(tmp_path, REVIEWED, pages) == "failure"
 
 
 def test_findings_are_not_read_before_a_review_exists(tmp_path: Path) -> None:
     """Term (a) first: zero unresolved findings from zero reviews is vacuous, and
     a green there is exactly the merge-past-the-reviewer this gate exists to stop."""
-    assert run_gate(tmp_path, [], []) == "failure"
+    assert run_gate(tmp_path, [], [[]]) == "failure"
 
 
 # ── Every file a reviewer script reads must reach the runner that runs it ────
