@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# kcov-exclude: a GitHub Actions step body that no test runs — it reads the runner's
-#   context (a job-scoped GH_TOKEN, GITHUB_*) so it has no entry point off a runner.
 #
 # The review merge gate, as ONE stateless predicate: a pull request is clear to
 # merge when
@@ -70,9 +68,14 @@
 # propagates as a non-zero exit (set -e), because a gate that fails open lets a
 # pull request merge past findings nobody read.
 #
+# tests/test_review_findings_gate.py drives this script through a `gh` stub that
+# runs its own `--jq` filters over canned payloads. The safety property lives
+# inside those filters, so that is where it is pinned.
+#
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, GATE_CONTEXT, SEVERITY_CONFIG.
 # Optional: REPORT_SHA, RUN_URL, GATE_UNREPORTED, UNREVIEWED_STATE (pending or
-# failure), RECHECK_LABEL, REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES.
+# failure), RECHECK_LABEL, REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES,
+# REVIEW_SKIP_BOT_AUTHORS.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,8 +92,8 @@ source "$SCRIPT_DIR/lib/review-skip-set.bash"
 # MUST stay byte-identical to the consumer's required-check context. The
 # consumer's merge-queue job carries that name, and the status posted here has
 # to match it or the pull request head never satisfies the gate.
-: "${GATE_CONTEXT:?GATE_CONTEXT required — the consumer's required-check context}"
-: "${SEVERITY_CONFIG:?SEVERITY_CONFIG required — the consumer's severity SSOT}"
+: "${GATE_CONTEXT:?GATE_CONTEXT required — the required-check context of the consumer}"
+: "${SEVERITY_CONFIG:?SEVERITY_CONFIG required — the severity SSOT of the consumer}"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its reviews and threads
 # are authored by github-actions[bot]. A consumer whose reviewer runs under a

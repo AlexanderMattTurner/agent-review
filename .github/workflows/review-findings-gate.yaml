@@ -71,9 +71,8 @@ on:
         required: true
         type: string
       reviewer-ref:
-        description: "Branch, tag or commit of reviewer-repository to run. PASS IT — the same sha the caller pins on its `uses:` line. The fallback reads `github.job_workflow_sha`, which is empty in the expression context, so an unset input stops the run at the clone step."
-        required: false
-        default: ""
+        description: "Branch, tag or commit of reviewer-repository to run: the same ref the caller pins on its `uses:` line, or its own `github.sha` for a caller in this repository. Required, because the alternative is cloning this repository's default branch — which is exactly what pinning `uses:` exists to avoid."
+        required: true
         type: string
       status-context:
         description: "The commit-status context this verdict is posted under. It MUST equal the `name:` of the consumer's merge_group gate job, because that name is what the ruleset registers as the required check."
@@ -106,10 +105,15 @@ on:
         default: "needs-auto-review"
         type: string
       review-skip-types:
-        description: 'JSON array of the Conventional-Commit title types the reviewer skips, so the gate waives its wait for exactly them. Widen or narrow it to match the consumer''s own review workflow.'
+        description: 'JSON array of the Conventional-Commit title types YOUR reviewer skips, so the gate waives its wait for exactly them. EMPTY BY DEFAULT: a waiver is a claim about your reviewer, not about the pull requests, and this one keys on the title, which the author writes. Name a type only if your reviewer genuinely never reads it.'
         required: false
-        default: '["chore", "style", "release"]'
+        default: "[]"
         type: string
+      review-skip-bot-authors:
+        description: "Whether YOUR reviewer skips a bot-authored pull request, so the gate waives its wait for those too. False by default, for the same reason the type list is empty: a Dependabot bump is not safe by virtue of being a bot's."
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -180,17 +184,13 @@ jobs:
       - name: Check out the gate from its own repository
         env:
           REVIEWER_REPO: ${{ inputs.reviewer-repository }}
-          # Every caller must pass `reviewer-ref`. The fallback reads
-          # `github.job_workflow_sha`, which is EMPTY in the expression context
-          # on a local call and on a cross-repository call alike. It stays here
-          # only so a caller that does set it keeps working.
-          REVIEWER_REF: ${{ inputs.reviewer-ref || github.job_workflow_sha }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref }}
         run: |
-          # Empty means neither the caller nor GitHub named a commit, and a
-          # clone would then run this repository's default branch — which is
-          # what pinning `uses:` is for. Refuse rather than run unpinned code
-          # beside the caller's secrets.
-          : "${REVIEWER_REF:?pass reviewer-ref — the commit this gate must run. github.job_workflow_sha is empty in the expression context}"
+          # A required input can still arrive empty from an expression that
+          # evaluated to nothing, and a clone would then run this repository's
+          # default branch. Refuse rather than run unpinned code beside the
+          # caller's secrets.
+          : "${REVIEWER_REF:?pass reviewer-ref — the commit this gate must run}"
           dest="${RUNNER_TEMP}/reviewer"
           # The one network call in this job that is not behind the script's
           # retry ladder, and the one whose failure the `always()` arm below
@@ -198,7 +198,7 @@ jobs:
           # script to run. Three attempts is what keeps a transient GitHub blip
           # from stranding the head's required context.
           for attempt in 1 2 3; do
-            git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}" && break
+            git clone "https://github.com/${REVIEWER_REPO}.git" "${dest}" && break
             [[ "$attempt" -lt 3 ]] || exit 1
             rm -rf "${dest}"
             sleep $((attempt * 5))
@@ -251,6 +251,7 @@ jobs:
           REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           REVIEW_SKIP_TYPES: ${{ inputs.review-skip-types }}
+          REVIEW_SKIP_BOT_AUTHORS: ${{ inputs.review-skip-bot-authors }}
           # A status description is capped at 140 characters, so this is where a
           # reader gets the finding list a red verdict names.
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
