@@ -1,6 +1,6 @@
 # agent-review
 
-**A reusable GitHub Actions workflow that reviews a pull request with Claude.** It reads the whole diff once, then posts ONE review. The comments are inline: each one is anchored to a line of the diff, so you read the finding beside the code that caused it.
+**A reusable GitHub Actions workflow that reviews a pull request with Claude.** It reads the whole diff once, then posts a review. The comments are inline: each one is anchored to a line of the diff, so you read the finding beside the code that caused it.
 
 The read runs in three shapes, and the size of the diff picks the shape:
 
