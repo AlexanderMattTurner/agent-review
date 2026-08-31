@@ -62,6 +62,16 @@
 # pull request of a batch, so evaluating the ref alone lets every other pull
 # request in a multi-entry batch reach the default branch with no verdict.
 #
+# ── The first consumer, and why it is not in this repository yet ──────────────
+#
+# Nothing calls this workflow at the commit that introduces it, and nothing can.
+# A local `uses: ./.github/workflows/…` resolves against the CALLER's commit,
+# and under `pull_request_target` the caller is read from the default branch —
+# where this file does not exist until it merges. A caller added here would fail
+# to load rather than run. So the first consumer is the pull request AFTER this
+# one: a parity leg that runs this predicate beside the live `review-gate.sh`
+# under a separate non-required context, before anything depends on it.
+#
 # ── What the CALLER must grant ────────────────────────────────────────────────
 #
 # A called workflow cannot exceed its caller's grant, so the calling job needs
