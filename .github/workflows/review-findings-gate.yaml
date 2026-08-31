@@ -45,7 +45,14 @@
 #         - run: |
 #             git clone --no-tags https://github.com/<owner>/agent-review.git "$RUNNER_TEMP/r"
 #             git -C "$RUNNER_TEMP/r" checkout --detach <the sha your uses: pins>
-#         - run: |
+#         - env:
+#             MG_REF: ${{ github.event.merge_group.head_ref }}
+#             MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+#             # The BASE BRANCH, never merge_group.base_sha — under batching that
+#             # payload field is the previous queue entry, so a range from it
+#             # covers only the last pull request in the batch.
+#             MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
+#           run: |
 #             prs="$(bash "$RUNNER_TEMP/r/.github/reviewer/merge-group-prs.sh")"
 #             while IFS= read -r pr; do
 #               PR="$pr" bash "$RUNNER_TEMP/r/.github/reviewer/review-findings-gate.sh" </dev/null
