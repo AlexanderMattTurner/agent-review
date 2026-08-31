@@ -5,10 +5,8 @@ name: Review gate
 # review that has not been submitted yet, so a PR whose cheap checks go green in
 # ninety seconds merges before the reviewer has read it.
 #
-# One job posting one stateless predicate — has the reviewer reviewed this pull
-# request, and are all of its gating findings resolved? — as a commit status on
-# the head. The status is RED until both hold, so an unread finding blocks the
-# merge instead of riding along under a green check. `review-gate.sh` owns the
+# One job posting one stateless predicate — does an undismissed review of this
+# pull request exist? — as a commit status on the head. `review-gate.sh` owns the
 # predicate, and explains both why it is a status rather than this job's own
 # check run and why it is scoped to the pull request rather than to the head.
 #
@@ -17,22 +15,16 @@ name: Review gate
 # code is checked out or executed here. The job reads review state through the
 # API and posts a status.
 
-# WHICH BRANCH'S COPY OF THIS FILE RUNS differs per trigger. GitHub documents
-# that `pull_request_target` "will only trigger a workflow run if the workflow
-# file exists on the default branch", so that leg stays silent until this file
-# merges. It states no such rule for `pull_request_review`, whose documented
-# `GITHUB_REF` is the PR merge ref `refs/pull/:prNumber/merge`, so that leg runs
-# the pull request's own copy and fires immediately. Observed on #457: three
-# `pull_request_review` runs and zero `pull_request_target` runs. Either way the
-# checkout below pins `github.event.repository.default_branch`, so the SCRIPT
-# this job runs is the base branch's.
+# WHICH BRANCH'S COPY OF THIS FILE RUNS differs per trigger, and it decides what
+# the gate can do before it is merged. `pull_request_target` runs only the BASE
+# branch's copy, so this leg is silent until the file is on the default branch.
+# `pull_request_review` runs the copy on the branch the event's ref names — the
+# PR head, for a same-repo PR — so that leg fires immediately. Observed on #457:
+# three `pull_request_review` runs and zero `pull_request_target` runs.
 on: # zizmor: ignore[dangerous-triggers] — no PR code executes: an API-only script off a default-branch checkout; see the SECURITY header
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize]
-  # A HUMAN submitting or dismissing a review flips the predicate. The reviewer's
-  # own review cannot arrive this way: it posts with the workflow GITHUB_TOKEN,
-  # whose events start no workflow run, so the reviewer re-posts this verdict
-  # itself through claude-review.yaml's `post-review-command`.
+  # The reviewer submitting (or dismissing) a review is what flips the predicate.
   pull_request_review:
     types: [submitted, dismissed]
 
@@ -46,11 +38,11 @@ jobs:
   review-posted:
     # The job name MUST NOT be the required-check context. This job's own check
     # run lands on the PR head under its name, and the job succeeds whenever it
-    # managed to post a verdict — including a RED one. Sharing the name would put
-    # a green check run and a red status under one required context, and the
-    # green would satisfy it: a merge gate that reports an unresolved finding and
-    # lets the merge through anyway. The context is registered instead by the
-    # never-firing job in review-gate-context.yaml.
+    # managed to post a verdict — including a `pending` one. Sharing the name
+    # would put a green check run and a pending status under one required
+    # context, and the green would satisfy it: a merge gate that reports "waiting
+    # for a review" and lets the merge through anyway. The context is registered
+    # instead by the never-firing job in review-gate-context.yaml.
     name: Evaluate the automated-review gate # required-check: false  # this job reports whether the EVALUATION ran; the gate itself is the status it posts
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -75,16 +67,12 @@ jobs:
           # SECURITY header. This pin keeps PR-authored content out of this job.
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          # review-gate.sh sources the shared reviewer-identity and review-thread
-          # libraries and reads the severity SSOT, so all three must land in the
-          # same sparse checkout; without one the script dies at its `source`
-          # line, or at the `jq` that reads the severities, under `set -e`.
+          # review-gate.sh sources the shared reviewer-identity library, so the
+          # library must land in the same sparse checkout; without it the script
+          # dies at its `source` line under `set -e`.
           sparse-checkout: |
             .github/scripts/review-gate.sh
             .github/scripts/lib/reviewer-login.bash
-            .github/reviewer/lib/review-threads.bash
-            .github/reviewer/lib-ci-retry.sh
-            config/review-severities.json
           sparse-checkout-cone-mode: false
 
       - name: Evaluate the gate and post the verdict on the head
