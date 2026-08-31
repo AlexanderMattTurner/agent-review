@@ -179,11 +179,11 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Approve so a review-required ruleset does not strand a skipped PR
-        # A first-look act. The ruleset does not dismiss an approval on a push,
-        # so a later `synchronize` needs no second one.
-        if: >-
-          github.event.action == 'opened' ||
-          github.event.action == 'ready_for_review'
+        # Runs on EVERY event this job takes, `synchronize` included. A ruleset
+        # with "dismiss stale reviews" drops this approval on a push, and no
+        # other path re-posts one: the hold sweeper re-posts the status alone.
+        # Re-posting here is what keeps the class off a permanently red gate,
+        # and this file syncs into repos whose rulesets this one cannot read.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
