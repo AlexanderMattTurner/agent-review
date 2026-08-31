@@ -32,6 +32,35 @@
 # on pull request events would be reported `skipped` on every such run, and GitHub
 # counts a `skipped` check run as satisfying a required check — so a stray label
 # or review comment would overwrite a red gate with a passing skipped instance.
+#
+# That local job clones this repository the same way the job below does and runs
+# the same script, once per pull request in the queued batch:
+#
+#   jobs:
+#     merge_gate:
+#       name: Review findings resolved # required-check: true
+#       runs-on: ubuntu-latest
+#       permissions: { contents: read, pull-requests: read }
+#       steps:
+#         - run: |
+#             git clone --no-tags https://github.com/<owner>/agent-review.git "$RUNNER_TEMP/r"
+#             git -C "$RUNNER_TEMP/r" checkout --detach <the sha your uses: pins>
+#         - run: |
+#             prs="$(bash "$RUNNER_TEMP/r/.github/reviewer/merge-group-prs.sh")"
+#             while IFS= read -r pr; do
+#               PR="$pr" bash "$RUNNER_TEMP/r/.github/reviewer/review-findings-gate.sh" </dev/null
+#             done <<<"$prs"
+#
+# merge-group-prs.sh is why the loop exists: the queue's ref names only the LAST
+# pull request of a batch, so evaluating the ref alone lets every other pull
+# request in a multi-entry batch reach the default branch with no verdict.
+#
+# ── What the CALLER must grant ────────────────────────────────────────────────
+#
+# A called workflow cannot exceed its caller's grant, so the calling job needs
+# `contents: read`, `statuses: write` and `pull-requests: write`. Omit
+# `statuses: write` and the verdict POST 403s: the run reds, and the head keeps
+# "Expected — Waiting for status to be reported" until something else pushes.
 name: Review-findings gate (reusable)
 
 on:
@@ -65,6 +94,11 @@ on:
         description: "The label a human or agent adds to re-evaluate the gate. Thread resolution fires no workflow event and `workflow_dispatch` 403s for agent-session tokens, so this label is the manual hatch. This workflow removes it after acting, so re-adding it fires again. The caller must list `labeled` in its `pull_request_target` types."
         required: false
         default: "recheck-review-gate"
+        type: string
+      reviewer-login:
+        description: "The login the automated reviewer posts under. The default matches a reviewer running on the workflow GITHUB_TOKEN; a reviewer running as a GitHub App or a PAT MUST name its own login here, or this gate reads zero reviews and holds every pull request at unreviewed."
+        required: false
+        default: "github-actions"
         type: string
       review-label:
         description: "The label that takes a pull request back OUT of the set the reviewer skips. Matches the reusable review workflow's own `review-label`."
@@ -158,7 +192,17 @@ jobs:
           # beside the caller's secrets.
           : "${REVIEWER_REF:?pass reviewer-ref — the commit this gate must run. github.job_workflow_sha is empty in the expression context}"
           dest="${RUNNER_TEMP}/reviewer"
-          git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}"
+          # The one network call in this job that is not behind the script's
+          # retry ladder, and the one whose failure the `always()` arm below
+          # cannot report — it leaves REVIEWER_DIR unset, so that arm has no
+          # script to run. Three attempts is what keeps a transient GitHub blip
+          # from stranding the head's required context.
+          for attempt in 1 2 3; do
+            git clone --no-tags "https://github.com/${REVIEWER_REPO}.git" "${dest}" && break
+            [[ "$attempt" -lt 3 ]] || exit 1
+            rm -rf "${dest}"
+            sleep $((attempt * 5))
+          done
           # A ref may be a branch, a tag or a commit sha. `checkout --detach`
           # takes all three; `clone --branch` refuses a sha, which is the form a
           # caller pinning its `uses:` line has.
@@ -166,6 +210,18 @@ jobs:
           # Outside GITHUB_WORKSPACE on purpose: the gated repository's checkout
           # must not be able to replace the code gating it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+
+      - name: Reject a severity-config path outside the caller's tree
+        # The path is joined into SEVERITY_CONFIG and reused as a sparse-checkout
+        # pattern, so `../` or a leading `/` would read a file the consumer's
+        # default branch does not own. A repo-relative path is the only form the
+        # trust model above holds for.
+        env:
+          SEVERITY_PATH: ${{ inputs.severity-config }}
+        run: |
+          case "$SEVERITY_PATH" in
+            /* | *..*) echo "severity-config must be a repo-relative path without '..': ${SEVERITY_PATH}" >&2; exit 1 ;;
+          esac
 
       - name: Check out the caller's severity SSOT (default branch)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -192,6 +248,7 @@ jobs:
           GATE_CONTEXT: ${{ inputs.status-context }}
           SEVERITY_CONFIG: ${{ github.workspace }}/${{ inputs.severity-config }}
           UNREVIEWED_STATE: ${{ inputs.unreviewed-state }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           REVIEW_SKIP_TYPES: ${{ inputs.review-skip-types }}
           # A status description is capped at 140 characters, so this is where a

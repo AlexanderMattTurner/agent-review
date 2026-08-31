@@ -71,8 +71,8 @@
 # pull request merge past findings nobody read.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, GATE_CONTEXT, SEVERITY_CONFIG.
-# Optional: REPORT_SHA, RUN_URL, GATE_UNREPORTED, UNREVIEWED_STATE,
-# RECHECK_LABEL, REVIEWER_LOGIN.
+# Optional: REPORT_SHA, RUN_URL, GATE_UNREPORTED, UNREVIEWED_STATE (pending or
+# failure), RECHECK_LABEL, REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,8 +93,19 @@ source "$SCRIPT_DIR/lib/review-skip-set.bash"
 : "${SEVERITY_CONFIG:?SEVERITY_CONFIG required — the consumer's severity SSOT}"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its reviews and threads
-# are authored by github-actions[bot]. GraphQL omits the REST `[bot]` suffix,
-# and the shared jq predicates read this out of `env`.
+# are authored by github-actions[bot]. A consumer whose reviewer runs under a
+# GitHub App or a PAT passes REVIEWER_LOGIN instead; leave it unset and this
+# gate reads zero reviews and holds every pull request at unreviewed. GraphQL
+# omits the REST `[bot]` suffix, and the shared jq predicates read this out of
+# `env`.
+#
+# ONE login, not a set. lib/review-threads.bash also ships
+# REVIEW_THREAD_ROOT_IS_A_GATING_REVIEWER, which walks a list so an external
+# review bot's threads gate too. That predicate needs a per-login severity model
+# — an external bot marks priority with its own badge, not with this reviewer's
+# `<!-- severity: … -->` marker — and no consumer config here carries one, so
+# wiring the walk without it would read those threads and gate on none of them.
+# Single-login is the honest shape until a config defines that model.
 REVIEWER_LOGIN_BARE="${REVIEWER_LOGIN:-github-actions}"
 REVIEWER_LOGIN_BARE="${REVIEWER_LOGIN_BARE%'[bot]'}"
 export REVIEWER_LOGIN_BARE
@@ -170,10 +181,16 @@ done <<<"$severity_rows"
 }
 
 reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
-if [[ -z "$reviews" ]] && pr_review_is_skipped "$owner" "$name" "$PR"; then
-  verdict=green
-  reason="the reviewer owes this pull request no review (bot-authored, or a chore, style or release title)"
-elif [[ -z "$reviews" ]]; then
+# Clause (a): has the reviewer read this, or does it owe no read? `read_owed`
+# false means clause (b) still decides — a pull request in the skip set can
+# carry a finding thread anyway, because the oversized and degraded review paths
+# open one without posting a review, so greening on the waiver alone would
+# publish success over an open hold.
+read_owed=false
+if [[ -z "$reviews" ]] && ! pr_review_is_skipped "$owner" "$name" "$PR"; then
+  read_owed=true
+fi
+if [[ "$read_owed" == true ]]; then
   verdict=unreviewed
   reason="waiting for the automated review of this pull request"
 else
@@ -187,7 +204,11 @@ else
   count="$(jq 'length' <<<"$gating")"
   if [[ "$count" -eq 0 ]]; then
     verdict=green
-    reason="the reviewer has reviewed this PR and no unresolved thread carries a gating finding"
+    if [[ -z "$reviews" ]]; then
+      reason="the reviewer owes this pull request no review, and no unresolved thread carries a gating finding"
+    else
+      reason="the reviewer has reviewed this PR and no unresolved thread carries a gating finding"
+    fi
   else
     verdict=red
     where="$(jq -r '[.[] | (.path // "(general)") + (if .line then ":" + (.line|tostring) else "" end)] | join(", ")' <<<"$gating")"
@@ -208,7 +229,19 @@ green) state=success ;;
 # says "waiting" in the merge box; `failure` is louder — a pending status does
 # not appear in `gh pr checks` at all, so a reader cannot tell "the reviewer has
 # not spoken" from "no gate here". Both block a required context.
-unreviewed) state="${UNREVIEWED_STATE:-pending}" ;;
+unreviewed)
+  # ALLOWLISTED, never spliced: this is the one state that must never be
+  # `success`, and a consumer input reaching `state=` unchecked is how a gate
+  # posts green over a pull request nothing has read. Anything else fails
+  # CLOSED to `failure`.
+  case "${UNREVIEWED_STATE:-pending}" in
+  pending | failure) state="${UNREVIEWED_STATE:-pending}" ;;
+  *)
+    echo "::warning::unreviewed-state '${UNREVIEWED_STATE}' is not pending or failure — reporting failure" >&2
+    state=failure
+    ;;
+  esac
+  ;;
 *) state=failure ;;
 esac
 post_verdict "$state" "$reason"

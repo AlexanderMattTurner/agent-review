@@ -32,7 +32,11 @@ shas="$(gh api "repos/${GH_REPO}/compare/${MG_BASE_SHA}...${MG_HEAD_SHA}" \
   --paginate --jq '.commits[].sha')"
 while IFS= read -r sha; do
   [[ -n "$sha" ]] || continue
-  found="$(gh api "repos/${GH_REPO}/commits/${sha}/pulls" --jq '.[].number')"
+  # --paginate, like the compare above: a commit reachable from many branches
+  # can carry more than one page of associated pull requests, and losing one is
+  # losing its verdict. A batch is small, so the extra page costs nothing when
+  # there is none.
+  found="$(gh api --paginate "repos/${GH_REPO}/commits/${sha}/pulls" --jq '.[].number')"
   [[ -z "$found" ]] || numbers+=$'\n'"$found"
 done <<<"$shas"
 
