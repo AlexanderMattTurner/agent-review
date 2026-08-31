@@ -61,20 +61,20 @@ Both `uses:` and `reviewer-ref:` end in a ref, which is the branch name, tag or 
 
 Two secrets are what the reviewer costs. Everything else is a knob:
 
-| Input                   | Default               | What it does                                                                                                                            |
-| ----------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `reviewer-repository`   | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                       |
-| `reviewer-ref`          | required in practice  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins. An empty value stops the run at the clone step.        |
-| `model`                 | `claude-opus-5`       | The model behind every verdict.                                                                                                         |
-| `review-prompt`         | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                          |
-| `setup-command`         | none                  | A dependency sync run in your base checkout before the model call.                                                                      |
-| `setup-cache-path`      | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                          |
-| `setup-cache-key-files` | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry.    |
-| `elide-command`         | none                  | A command that drops generated files from the raw diff before the reviewer reads it. The reviewer's budget is diff lines, so a generated file spends budget on code nobody wrote. Name one if your diffs are mostly build files. |
+| Input                   | Default               | What it does                                                                                                                                                                                                                            |
+| ----------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reviewer-repository`   | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                                                                                                                       |
+| `reviewer-ref`          | required in practice  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins. An empty value stops the run at the clone step.                                                                                                        |
+| `model`                 | `claude-opus-5`       | The model behind every verdict.                                                                                                                                                                                                         |
+| `review-prompt`         | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                                                                                                                          |
+| `setup-command`         | none                  | A dependency sync run in your base checkout before the model call.                                                                                                                                                                      |
+| `setup-cache-path`      | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                                                                                                                          |
+| `setup-cache-key-files` | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry.                                                                                                    |
+| `elide-command`         | none                  | A command that drops generated files from the raw diff before the reviewer reads it. The reviewer's budget is diff lines, so a generated file spends budget on code nobody wrote. Name one if your diffs are mostly build files.        |
 | `post-review-command`   | none                  | Run after the review step, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set. It asks a required check to re-evaluate its gate. It also runs when the review failed, so the check reports a missing review rather than assuming one landed. |
-| `log-redactor`          | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                   |
-| `max-diff-lines`        | `12000`               | Above this many diff lines the read splits per file.                                                                                    |
-| `max-shardable-lines`   | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                   |
+| `log-redactor`          | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                                                                                                                   |
+| `max-diff-lines`        | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                                    |
+| `max-shardable-lines`   | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                                   |
 
 ## Budget
 
