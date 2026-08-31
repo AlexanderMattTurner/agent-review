@@ -34,6 +34,44 @@ permissions: {}
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
+  # The skip decision, computed ONCE.
+  #
+  # `review` and `auto_approve_skipped` must be exact complements: every pull
+  # request is reviewed or approved, never neither and never both. Stating the
+  # predicate in each job's `if:` made that a claim in a comment — the two copies
+  # drifted on `draft` and a draft in the skip class matched neither. One output,
+  # read by both, makes the complement structural.
+  #
+  # A title is author-written, so the class needs the trust half: only a same-repo
+  # head, which already implies write access.
+  # ────────────────────────────────────────────────────────────────────────────
+  classify:
+    name: Decide whether the reviewer skips this PR
+    # not-required-check: computes a routing decision, reports no verdict.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.decide.outputs.skip }}
+    steps:
+      - id: decide
+        env:
+          SKIP: >-
+            ${{
+              github.event.pull_request.draft == false &&
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              (
+                github.event.pull_request.user.type == 'Bot' ||
+                startsWith(github.event.pull_request.title, 'chore:') ||
+                startsWith(github.event.pull_request.title, 'chore(') ||
+                startsWith(github.event.pull_request.title, 'style:') ||
+                startsWith(github.event.pull_request.title, 'style(') ||
+                startsWith(github.event.pull_request.title, 'release:') ||
+                startsWith(github.event.pull_request.title, 'release(')
+              )
+            }}
+        run: echo "skip=${SKIP}" >>"$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Claude PR review (first pass) — one whole-diff read per PR, sharded across
   # parallel passes and posted as one review.
   #
@@ -50,30 +88,15 @@ jobs:
   # `startup_failure` before any job starts.
   # ────────────────────────────────────────────────────────────────────────────
   review:
-    # The exact complement of the `auto_approve_skipped` job below, so every pull
-    # request is reviewed or approved and never neither. Every clause of that
-    # job's predicate appears negated here, DRAFT INCLUDED: the approver refuses a
-    # draft, so a draft in the skip class stays on the review path rather than
-    # matching neither job. A title is author-written, so the skip needs the trust
-    # half too — an untrusted pull request gets the real read instead of an
-    # approval it cannot earn. `labeled` is the on-demand hatch.
+    # Reads `classify`, so this is the exact complement of `auto_approve_skipped`
+    # by construction. `labeled` is the on-demand hatch: it starts the read the
+    # stand-in approval offers, whatever the class says.
+    needs: classify
     if: >-
       github.event.action == 'labeled' ||
       (
         contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
-        !(
-          github.event.pull_request.draft == false &&
-          github.event.pull_request.head.repo.full_name == github.repository &&
-          (
-            github.event.pull_request.user.type == 'Bot' ||
-            startsWith(github.event.pull_request.title, 'chore:') ||
-            startsWith(github.event.pull_request.title, 'chore(') ||
-            startsWith(github.event.pull_request.title, 'style:') ||
-            startsWith(github.event.pull_request.title, 'style(') ||
-            startsWith(github.event.pull_request.title, 'release:') ||
-            startsWith(github.event.pull_request.title, 'release(')
-          )
-        )
+        needs.classify.outputs.skip != 'true'
       )
     permissions:
       contents: read
@@ -131,19 +154,12 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   auto_approve_skipped:
     name: Auto-approve low-risk and bot PRs the reviewer skips
+    # Reads the same `classify` output the review job negates, so the two are
+    # complements by construction rather than by a comment.
+    needs: classify
     if: >-
-      github.event.pull_request.draft == false &&
       contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (
-        github.event.pull_request.user.type == 'Bot' ||
-        startsWith(github.event.pull_request.title, 'chore:') ||
-        startsWith(github.event.pull_request.title, 'chore(') ||
-        startsWith(github.event.pull_request.title, 'style:') ||
-        startsWith(github.event.pull_request.title, 'style(') ||
-        startsWith(github.event.pull_request.title, 'release:') ||
-        startsWith(github.event.pull_request.title, 'release(')
-      )
+      needs.classify.outputs.skip == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Keyed per head, and never cancelling a run in flight, for the same reason
