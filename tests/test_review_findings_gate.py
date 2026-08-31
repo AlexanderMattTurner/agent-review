@@ -29,10 +29,17 @@ CONTEXT = "Review findings resolved"
 
 
 def review(state: str, *, author: str = BOT, body: str = "Automated review.") -> dict:
-    return {"state": state, "body": body, "author": {"login": author}, "submittedAt": "2026-01-01T00:00:00Z"}
+    return {
+        "state": state,
+        "body": body,
+        "author": {"login": author},
+        "submittedAt": "2026-01-01T00:00:00Z",
+    }
 
 
-def thread(body: str, *, resolved: bool = False, author: str = BOT, path: str = "a.py") -> dict:
+def thread(
+    body: str, *, resolved: bool = False, author: str = BOT, path: str = "a.py"
+) -> dict:
     return {
         "isResolved": resolved,
         "path": path,
@@ -51,12 +58,20 @@ def run_gate(
     """Run the gate and return the single status state it posted."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews.json").write_text(
-        json.dumps({"data": {"repository": {"pullRequest": {"reviews": {"nodes": reviews}}}}}),
+        json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviews": {"nodes": reviews}}}}}
+        ),
         encoding="utf-8",
     )
     (tmp_path / "threads.json").write_text(
         json.dumps(
-            {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads or []}}}}}
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {"reviewThreads": {"nodes": threads or []}}
+                    }
+                }
+            }
         ),
         encoding="utf-8",
     )
@@ -104,7 +119,9 @@ exit 0
     calls = log.read_text(encoding="utf-8")
     assert f"statuses/{HEAD_SHA}" in calls, f"the gate posted no status: {calls}"
     assert f"context={CONTEXT}" in calls, f"posted under the wrong context: {calls}"
-    states = [s for s in ("state=success", "state=failure", "state=pending") if s in calls]
+    states = [
+        s for s in ("state=success", "state=failure", "state=pending") if s in calls
+    ]
     assert len(states) == 1, f"expected exactly one verdict, got {states}: {calls}"
     return states[0].removeprefix("state=")
 
@@ -135,7 +152,9 @@ def test_a_dismissed_review_still_counts_as_a_read(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("author", ["pr-author", "outside-contributor", "dependabot"])
-def test_a_non_reviewer_review_never_clears_the_gate(tmp_path: Path, author: str) -> None:
+def test_a_non_reviewer_review_never_clears_the_gate(
+    tmp_path: Path, author: str
+) -> None:
     """Any actor's review counting would make the gate self-clearing: an author
     submits a one-word COMMENT review on their own PR and a required merge lever
     goes green with no reviewer having run."""
@@ -174,12 +193,23 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
     gating = "<!-- severity: blocking -->\nthis breaks"
     # Separate directories: run_gate asserts on ONE verdict in the call log, and
     # a shared log would carry both runs'.
-    assert run_gate(tmp_path / "open", [review("COMMENTED")], [thread(gating)]) == "failure"
-    assert run_gate(tmp_path / "done", [review("COMMENTED")], [thread(gating, resolved=True)]) == "success"
+    assert (
+        run_gate(tmp_path / "open", [review("COMMENTED")], [thread(gating)])
+        == "failure"
+    )
+    assert (
+        run_gate(
+            tmp_path / "done", [review("COMMENTED")], [thread(gating, resolved=True)]
+        )
+        == "success"
+    )
 
 
 def test_a_gating_thread_rooted_by_someone_else_does_not_gate(tmp_path: Path) -> None:
     """Only the reviewer's own findings are this gate's lever, so a human cannot
     hold a merge by pasting the marker — their CHANGES_REQUESTED does that."""
     body = "<!-- severity: blocking -->\nthis breaks"
-    assert run_gate(tmp_path, [review("COMMENTED")], [thread(body, author="a-human")]) == "success"
+    assert (
+        run_gate(tmp_path, [review("COMMENTED")], [thread(body, author="a-human")])
+        == "success"
+    )
