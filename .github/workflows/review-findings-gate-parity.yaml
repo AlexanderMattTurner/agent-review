@@ -1,0 +1,96 @@
+name: Review-findings gate (parity)
+
+# THE PARITY LEG, AND IT IS TEMPORARY. Delete this file in the change that
+# swaps review-gate.yaml onto the exported gate.
+#
+# review-findings-gate.yaml exports the predicate this repository already runs
+# as review-gate.sh, so a consumer repository can call it instead of keeping its
+# own copy. Swapping the live gate onto it is a rewrite of machinery that acts
+# with no human watching — review-gate.sh has nine call sites — so it lands
+# behind a parity period rather than big-bang. This job runs the EXPORTED
+# predicate beside the live one on every pull request and posts its verdict
+# under a DIFFERENT, non-required context, so both answers sit on each head and
+# a divergence is visible before anything depends on it.
+#
+# It is also the export's first consumer, and could not have existed before now:
+# a local `uses: ./.github/workflows/…` resolves against the CALLER's commit,
+# and under pull_request_target the caller is read from the default branch — so
+# this file was only writable once the export merged.
+#
+# THE TWO DIVERGENCES TO WATCH FOR, both intended:
+#   * a DISMISSED review counts as a read here and not in review-gate.sh, so a
+#     pull request whose only review was dismissed reads green here and red
+#     there. approve-if-reviewer-hold-clear.sh dismisses on the routine path, so
+#     this is the case that matters most;
+#   * a stand-in approval is judged differently. review-gate.sh reads its
+#     OUTCOME — a bodied reviewer approval clears the gate, deliberately — while
+#     the exported predicate inherits the convention that such an approval
+#     carries no body precisely so it cannot. Settling that fork is what this
+#     comparison is for.
+#
+# A THIRD source of disagreement is NOT a difference in the predicate, and a
+# reader has to rule it out first: the two legs fire on different events.
+# review-gate.yaml carries neither `labeled` nor `pull_request_review_comment`,
+# so a new review comment or a re-check label re-evaluates only this leg. Both
+# predicates read current state, so the posted statuses can then differ purely
+# because one is stale. Check which event last refreshed each context before
+# reading a divergence as real.
+#
+# The skip set is left EMPTY, because this repository's reviewer reads every
+# pull request — see review.yaml's decide job. Nothing is waived, so the two
+# legs are compared on the same population.
+on: # zizmor: ignore[dangerous-triggers] — no PR code executes: API-only scripts off a pinned clone and a default-branch checkout
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_comment:
+    types: [created]
+
+# Queue, never cancel, and keyed PER HEAD — the same key the called job uses.
+# Never cancel because the called job posts a commit status, and a cancel
+# between reading the state and POSTing leaves the head carrying a stale parity
+# verdict, which is exactly the noise a comparison must not generate.
+#
+# Per head because webhook delivery is unordered and this OUTER group is
+# evaluated before the called workflow's own. Under a per-branch key, a
+# late-delivered event for an old head joins the same group as a queued run for
+# the CURRENT head and displaces it, and the new head then gets no parity
+# verdict at all — the inner per-head group cannot undo a cancellation that
+# already happened out here.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  parity:
+    name: Review-findings gate parity # required-check: false  # a shadow verdict under its own context; it gates nothing
+    permissions:
+      contents: read # the export sparse-checks-out the severity SSOT
+      statuses: write # post the parity verdict on the head
+      pull-requests: write # read the threads, free the re-check label
+    uses: ./.github/workflows/review-findings-gate.yaml
+    with:
+      reviewer-repository: ${{ github.repository }}
+      # The DEFAULT BRANCH, not `github.sha`. Under pull_request_target those
+      # are the same commit, but this workflow also fires on the two review
+      # events, where GITHUB_REF is the pull request MERGE ref
+      # (`refs/pull/N/merge`) and `github.sha` is that merge commit — see
+      # review-gate.yaml's header. The export clones with `git clone`, which
+      # fetches `refs/heads/*` and `refs/tags/*` only, so the merge commit is
+      # absent and `checkout --detach` dies with "reference is not a tree".
+      # That reds the job before REVIEWER_DIR is set, which by the export's own
+      # documented limit also disables its always() reporting arm — the parity
+      # context strands at "Expected" and nothing is compared. It would have
+      # failed on exactly the dismissed-review case this leg exists to watch,
+      # because a dismissal only ever arrives as a pull_request_review event.
+      # A branch name resolves under every trigger and stays trusted.
+      reviewer-ref: ${{ github.event.repository.default_branch }}
+      # NOT "Automated review posted": that context is required, and this leg
+      # must never be able to satisfy or contradict it.
+      status-context: Review findings resolved (parity)
+      # Matches review-gate.sh, which reports failure rather than pending before
+      # the first review, so the comparison isolates the real divergences.
+      unreviewed-state: failure
