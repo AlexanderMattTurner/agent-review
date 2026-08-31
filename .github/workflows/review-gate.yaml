@@ -5,8 +5,10 @@ name: Review gate
 # review that has not been submitted yet, so a PR whose cheap checks go green in
 # ninety seconds merges before the reviewer has read it.
 #
-# One job posting one stateless predicate — does an undismissed review of this
-# pull request exist? — as a commit status on the head. `review-gate.sh` owns the
+# One job posting one stateless predicate — has the reviewer reviewed this pull
+# request, and are all of its gating findings resolved? — as a commit status on
+# the head. The status is RED until both hold, so an unread finding blocks the
+# merge instead of riding along under a green check. `review-gate.sh` owns the
 # predicate, and explains both why it is a status rather than this job's own
 # check run and why it is scoped to the pull request rather than to the head.
 #
@@ -30,6 +32,13 @@ on: # zizmor: ignore[dangerous-triggers] — no PR code executes: an API-only sc
   # The reviewer submitting (or dismissing) a review is what flips the predicate.
   pull_request_review:
     types: [submitted, dismissed]
+  # A new review comment changes the thread set, including the reviewer's own
+  # findings where it posts them one at a time after GitHub rejects the batch —
+  # threads that appear AFTER the `submitted` event this gate would otherwise
+  # answer on. A burst fires one run each; they all publish the same stateless
+  # verdict, and the per-head concurrency group runs them one at a time.
+  pull_request_review_comment:
+    types: [created]
 
 permissions: {}
 
@@ -41,11 +50,11 @@ jobs:
   review-posted:
     # The job name MUST NOT be the required-check context. This job's own check
     # run lands on the PR head under its name, and the job succeeds whenever it
-    # managed to post a verdict — including a `pending` one. Sharing the name
-    # would put a green check run and a pending status under one required
-    # context, and the green would satisfy it: a merge gate that reports "waiting
-    # for a review" and lets the merge through anyway. The context is registered
-    # instead by the never-firing job in review-gate-context.yaml.
+    # managed to post a verdict — including a RED one. Sharing the name would put
+    # a green check run and a red status under one required context, and the
+    # green would satisfy it: a merge gate that reports an unresolved finding and
+    # lets the merge through anyway. The context is registered instead by the
+    # never-firing job in review-gate-context.yaml.
     name: Evaluate the automated-review gate # required-check: false  # this job reports whether the EVALUATION ran; the gate itself is the status it posts
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -70,12 +79,16 @@ jobs:
           # SECURITY header. This pin keeps PR-authored content out of this job.
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          # review-gate.sh sources the shared reviewer-identity library, so the
-          # library must land in the same sparse checkout; without it the script
-          # dies at its `source` line under `set -e`.
+          # review-gate.sh sources the shared reviewer-identity and review-thread
+          # libraries and reads the severity SSOT, so all three must land in the
+          # same sparse checkout; without one the script dies at its `source`
+          # line, or at the `jq` that reads the severities, under `set -e`.
           sparse-checkout: |
             .github/scripts/review-gate.sh
             .github/scripts/lib/reviewer-login.bash
+            .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib-ci-retry.sh
+            config/review-severities.json
           sparse-checkout-cone-mode: false
 
       - name: Evaluate the gate and post the verdict on the head

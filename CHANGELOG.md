@@ -17,15 +17,22 @@ the prose from the release's commits.
 - `review.yaml`, the PR reviewer as a REUSABLE workflow other repositories call by `uses:`. It carries the whole first-pass reviewer — the one-read-per-PR budget, the per-file split for a diff that outgrows one model context, the input sanitizer, and the credential ladder — and runs its own scripts from `.github/reviewer/` at the commit the caller pinned. This repository's own `claude-review.yaml` is now a caller of it, so a change to the reviewer reviews the pull request that makes it. Configure it through the inputs the README lists; `elide-command`, `post-review-command` and `log-redactor` are how a consumer keeps its own repository-specific pieces.
 
 - `Automated review posted`, a **required** check that makes auto-merge wait for
-  the automated reviewer. The cheap checks finish in about ninety seconds while
-  an LLM review takes minutes, so a PR gated only on the cheap checks merged
-  first and the reviewer's `REQUEST_CHANGES` landed on a PR that had already
-  merged. `review-gate.yaml` posts the verdict as a commit status on each PR
-  head: green once an undismissed review of the PR exists, `pending` before that,
-  and `pending` again if the last review is dismissed. The context name is
-  registered by a never-firing job in `review-gate-context.yaml`, because a job
-  sharing the name would report its own green check run under the same context
-  and satisfy the gate while the status still said `pending`.
+  the automated reviewer AND for its findings to be handled. The cheap checks
+  finish in about ninety seconds while an LLM review takes minutes, so a PR gated
+  only on the cheap checks merged before the reviewer read it; and because the
+  reviewer posts every review as a `COMMENT`, its findings carried no merge
+  consequence at all. `review-gate.yaml` posts the verdict as a commit status on
+  each PR head, RED until both halves hold: an undismissed review of the PR
+  exists, and none of the reviewer's threads is both unresolved and gating.
+  Gating means the thread's root carries a `blocking` or `warning` severity —
+  `config/review-severities.json` is the SSOT the reviewer stamps from — so a
+  🔵 nit never holds a merge. Resolving a thread fires no workflow event, so the
+  twice-hourly sweep in `claude-reviewer-hold-clear.yaml` re-posts the verdict
+  for every open PR: that is what clears a PR whose author resolved the findings
+  without pushing. The context name is registered by a never-firing job in
+  `review-gate-context.yaml`, because a job sharing the name would report its own
+  green check run under the same context and satisfy the gate while the status
+  was still red.
 
 - PreToolUse skill gates: opening a PR, writing a test file, or writing a plan is
   denied until the session has invoked `pr-creation`, `writing-tests`, or
