@@ -42,8 +42,10 @@ jobs:
   # drifted on `draft` and a draft in the skip class matched neither. One output,
   # read by both, makes the complement structural.
   #
-  # A title is author-written, so the class needs the trust half: only a same-repo
-  # head, which already implies write access.
+  # The class reads no TITLE. A title is author-written, so any title in the skip
+  # set is an approval a pull request can write for itself, and the same-repo
+  # gate only narrows who may write it. Every title now gets a real read.
+  # `user.type` is GitHub's own field on the account, which no pull request sets.
   # ────────────────────────────────────────────────────────────────────────────
   classify:
     name: Decide whether the reviewer skips this PR
@@ -59,15 +61,7 @@ jobs:
             ${{
               github.event.pull_request.draft == false &&
               github.event.pull_request.head.repo.full_name == github.repository &&
-              (
-                github.event.pull_request.user.type == 'Bot' ||
-                startsWith(github.event.pull_request.title, 'chore:') ||
-                startsWith(github.event.pull_request.title, 'chore(') ||
-                startsWith(github.event.pull_request.title, 'style:') ||
-                startsWith(github.event.pull_request.title, 'style(') ||
-                startsWith(github.event.pull_request.title, 'release:') ||
-                startsWith(github.event.pull_request.title, 'release(')
-              )
+              github.event.pull_request.user.type == 'Bot'
             }}
         run: echo "skip=${SKIP}" >>"$GITHUB_OUTPUT"
 
@@ -146,8 +140,8 @@ jobs:
       rung_8: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Auto-approve the pull requests the review job above skips — a bot author, or
-  # a chore/style/release title, on a trusted pull request.
+  # Auto-approve the pull requests the review job above skips — a bot author on a
+  # trusted pull request, which is the whole skip set.
   #
   # The required check of this repository is the `Automated review posted`
   # status. review-gate.sh posts it, and it is RED until the reviewer has left a
@@ -168,7 +162,7 @@ jobs:
   # This job posts one review and one commit status. It runs no pull-request code.
   # ────────────────────────────────────────────────────────────────────────────
   auto_approve_skipped:
-    name: Auto-approve low-risk and bot PRs the reviewer skips
+    name: Auto-approve bot PRs the reviewer skips
     # Reads the same `classify` output the review job negates, so the two are
     # complements by construction rather than by a comment.
     needs: classify

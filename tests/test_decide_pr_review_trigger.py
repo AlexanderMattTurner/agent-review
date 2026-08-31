@@ -810,3 +810,38 @@ def test_the_decision_never_asks_whether_the_pr_is_a_draft(
     _, run, argv = _run(tmp_path, action, review_state="")
     assert run == "true"
     assert "pulls/42" not in argv, argv
+
+
+def _caller_skip_expression() -> str:
+    """The caller's skip predicate — the `SKIP` expression the `classify` job
+    computes once and both `review` and `auto_approve_skipped` read."""
+    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["classify"]["steps"]
+    decide = next(s for s in steps if s.get("id") == "decide")
+    return " ".join(decide["env"]["SKIP"].split())
+
+
+def test_the_caller_skip_set_reads_no_pr_title() -> None:
+    """A pull request's TITLE must not buy it an automated approval.
+
+    The author writes the title, and the skip set routes a PR to
+    `auto_approve_skipped`, which posts an approving review under the reviewer's
+    identity. A title arm therefore lets a PR approve itself: `chore: drop the
+    egress allowlist` was reviewed by nobody and approved by the bot. The
+    same-repo gate does not save it — it narrows WHO may write the title, not
+    what the title buys.
+    """
+    skip = _caller_skip_expression()
+    assert "title" not in skip, f"no title decides the skip set: {skip}"
+
+
+def test_the_caller_skip_set_stays_gated_on_a_same_repo_head() -> None:
+    """The remaining arm is `user.type == 'Bot'`, which GitHub sets on the
+    account. A fork PR still must not reach the approval path: a fork author
+    picks the account that opens it, so the head-repository check is what keeps
+    an outside bot account out of the auto-approved class."""
+    skip = _caller_skip_expression()
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository" in skip
+    ), skip
+    assert "github.event.pull_request.user.type == 'Bot'" in skip, skip

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Post an approving review on a PR the Claude reviewer deliberately SKIPS — a
-# low-risk chore/style title, a machine-cut `release:` PR, or a bot author.
+# bot author on a same-repo head, which is the whole skip set. No TITLE reaches
+# this class: a title is author-written, so a title in the skip set would be an
+# approval a pull request writes for itself.
 #
 # A review-required ruleset needs an approving review, and the `Automated review
 # posted` gate needs a review by the reviewer with a body. A skipped PR gets
