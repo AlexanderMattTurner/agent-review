@@ -1,13 +1,11 @@
 # agent-review
 
-**A reusable GitHub Actions workflow that reviews a pull request with Claude.** A reusable workflow is one you call from your own repository with a `uses:` line, the way you call a library function. You do not copy the reviewer's code into your repository. You name it, pass it a few inputs, and it runs.
-
-On a pull request the workflow reads the whole diff and posts ONE review. The comments are inline: each one is anchored to a line of the diff, so you read the finding beside the code that caused it.
+**A reusable GitHub Actions workflow that reviews a pull request with Claude.** It reads the whole diff once, then posts ONE review. The comments are inline: each one is anchored to a line of the diff, so you read the finding beside the code that caused it.
 
 The read runs in three shapes, and the size of the diff picks the shape:
 
 1. **A diff small enough for the model to read in one go is read whole**, by one agent, and posted as one review.
-2. **A larger diff is split per file.** Parallel agents read the files at the same time. The workflow folds their findings into one review before it posts. Splitting the work this way is called sharding.
+2. **A larger diff is sharded per file.** Parallel agents read the files at the same time. The workflow folds their findings into one review before it posts.
 3. **A diff too large even to split gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
 
 Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff under both line limits that still needs more shards than the limit allows, because a shard never splits a file.
