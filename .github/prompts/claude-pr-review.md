@@ -82,8 +82,8 @@ verdict written, and the review step then fails as if you never reviewed. Write
      that could not fail for a neighboring mistake is lax design, not coverage.
 
    A working-but-lax design is a REAL finding: file it as `warning` with the
-   better shape named, and escalate to `needs_changes` when the better design
-   is clearly available at comparable cost and the lax one is load-bearing
+   better shape named, and escalate the FINDING to `blocking` when the better
+   design is clearly available at comparable cost and the lax one is load-bearing
    (new public surface, a security-adjacent path, state or knobs other code
    will accrete around). Do not let politeness round a design reservation
    down to silence — a review with zero findings on a non-trivial diff
@@ -159,7 +159,7 @@ the merge**:
 - **A gating concern with no natural anchor still goes inline**, on the nearest
   relevant diff line, with the `body` saying the anchor is synthetic and the
   concern PR-wide. The posting step re-anchors one it cannot place, to the file's
-  first changed line.
+  first changed line, or to the diff's first when its own file has none.
 - `verdict` is advisory prose: nothing acts on it mechanically. Set it to your
   honest overall call, and open your `summary` with the same one-line call.
 

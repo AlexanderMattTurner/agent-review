@@ -1,6 +1,6 @@
 // Turn the review agent's structured findings (review.json) into ONE GitHub PR review (always a COMMENT — the merge consequence lives in the review-findings status gate, not the review event) with inline, line-anchored comments plus a summary body — Greptile style — for `gh api` to POST.
 //
-// Each finding names a (path, line, side). A comment on a line that is not part of the diff makes the whole reviews API call 422, so this parses the (sanitized) diff to learn which (path, line) positions are commentable on each side. An unanchorable NIT moves into the summary body; an unanchorable GATING finding gets a synthetic anchor (its file's first changed line, else the diff's first) so it always opens the resolvable thread the status gate blocks on. Layer-1 sanitization edits within lines, never adds or removes them, so the sanitized diff is a faithful anchor source.
+// Each finding names a (path, line, side). A comment on a line that is not part of the diff makes the whole reviews API call 422, so this parses the (sanitized) diff to learn which (path, line) positions are commentable on each side. An unanchorable NIT moves into the summary body; an unanchorable GATING finding gets a synthetic anchor (its file's first changed line, else the diff's first; RIGHT before LEFT, so a deletion-only diff still anchors) so it always opens the resolvable thread the status gate blocks on. Layer-1 sanitization edits within lines, never adds or removes them, so the sanitized diff is a faithful anchor source.
 //
 // One deterministic recovery runs before spilling: the diff-view remap at remapDiffViewAnchor,
 // which rescues a finding whose `line` is an index into diff.txt rather than a NEW-file number.
@@ -100,22 +100,33 @@ const normSeverity = (s) =>
 // Commentable (path, line) positions per side, parsed from the unified diff. Context lines are commentable on both sides; added lines on RIGHT, removed on LEFT. diffViewLines maps each 1-based physical line of diff.txt to the file coordinates of the content line there — the anchor space for the diff-view remap.
 const rightOk = new Set();
 const leftOk = new Set();
-// The first commentable RIGHT-side line per path, and the first overall — the synthetic-anchor ladder for a gating finding whose own anchor is not in the diff (nearest: its own file's first changed line; else the diff's first).
+// The first commentable line per path and the first overall, per side — the synthetic-anchor ladder for a gating finding whose own anchor is not in the diff (nearest: its own file's first changed line; else the diff's first). A deletion-only diff has no RIGHT side at all, so the LEFT ladder is what keeps a gating finding on such a PR anchored rather than spilled.
 const firstRightByPath = new Map();
 let firstRightOverall = null;
+const firstLeftByPath = new Map();
+let firstLeftOverall = null;
 /** @type {({path: string, kind: string, newLine: number|null, oldLine: number|null}|undefined)[]} */
 const diffViewLines = [];
 let path = null;
+let oldPath = null;
 let oldLine = 0;
 let newLine = 0;
 const diffLines = readFileSync(`${dir}/diff.txt`, "utf8").split("\n");
 for (let i = 0; i < diffLines.length; i++) {
   const raw = diffLines[i];
-  if (raw.startsWith("--- ")) continue;
+  if (raw.startsWith("--- ")) {
+    const source = raw.slice(4);
+    const m = source.match(/^a\/(?<path>.*)$/);
+    oldPath = m ? m.groups.path : source;
+    continue;
+  }
   if (raw.startsWith("+++ ")) {
     const target = raw.slice(4);
     const m = target.match(/^b\/(?<path>.*)$/);
-    path = m ? m.groups.path : target;
+    // A deleted file's new-side header is /dev/null, which names no commentable
+    // file. Its LEFT anchors live under the path it had, so read that off the
+    // old-side header instead.
+    path = m ? m.groups.path : target === "/dev/null" ? oldPath : target;
     continue;
   }
   if (raw.startsWith("@@")) {
@@ -137,6 +148,8 @@ for (let i = 0; i < diffLines.length; i++) {
   } else if (kind === "-") {
     leftOk.add(`${path}\t${oldLine}`);
     diffViewLines[i + 1] = { path, kind, newLine: null, oldLine };
+    if (!firstLeftByPath.has(path)) firstLeftByPath.set(path, oldLine);
+    if (!firstLeftOverall) firstLeftOverall = { path, line: oldLine };
     oldLine += 1;
   } else if (kind === " ") {
     rightOk.add(`${path}\t${newLine}`);
@@ -144,6 +157,8 @@ for (let i = 0; i < diffLines.length; i++) {
     diffViewLines[i + 1] = { path, kind, newLine, oldLine };
     if (!firstRightByPath.has(path)) firstRightByPath.set(path, newLine);
     if (!firstRightOverall) firstRightOverall = { path, line: newLine };
+    if (!firstLeftByPath.has(path)) firstLeftByPath.set(path, oldLine);
+    if (!firstLeftOverall) firstLeftOverall = { path, line: oldLine };
     oldLine += 1;
     newLine += 1;
   }
@@ -193,6 +208,35 @@ function suggestionBlock(text) {
 
 /** @param {string} p @param {number|null} l */
 const commentableRight = (p, l) => l !== null && rightOk.has(`${p}\t${l}`);
+
+/**
+ * The synthetic anchor for a gating finding whose own (path, line) is not commentable:
+ * the finding's own file first, the diff's first changed line otherwise, and RIGHT before
+ * LEFT at each step. LEFT is not a fallback for style — a deletion-only diff offers no
+ * RIGHT-side line anywhere, so without it every gating finding on such a PR would spill
+ * into the summary and the status gate would see no thread to hold the merge on.
+ * @param {string|undefined} findingPath
+ * @returns {{path: string, line: number, side: string}|null}
+ */
+function syntheticAnchor(findingPath) {
+  if (findingPath) {
+    if (firstRightByPath.has(findingPath))
+      return {
+        path: findingPath,
+        line: firstRightByPath.get(findingPath),
+        side: "RIGHT",
+      };
+    if (firstLeftByPath.has(findingPath))
+      return {
+        path: findingPath,
+        line: firstLeftByPath.get(findingPath),
+        side: "LEFT",
+      };
+  }
+  if (firstRightOverall) return { ...firstRightOverall, side: "RIGHT" };
+  if (firstLeftOverall) return { ...firstLeftOverall, side: "LEFT" };
+  return null;
+}
 
 /** One inline comment of the posted review. start_line/start_side ride along only
  * for a multi-line RIGHT-side range.
@@ -267,16 +311,12 @@ for (const f of findings) {
     // unresolvable — the one way this reviewer could silently lose its hold on a merge. The body
     // says so, so the author reads it as PR-wide, and no suggestion rides a synthetic anchor,
     // since it would edit a line the finding is not about. Only nits, advisory either way, spill.
-    const synthetic =
-      GATING_SEVERITIES.has(sev) &&
-      (f.path && firstRightByPath.has(f.path)
-        ? { path: f.path, line: firstRightByPath.get(f.path) }
-        : firstRightOverall);
+    const synthetic = GATING_SEVERITIES.has(sev) && syntheticAnchor(f.path);
     if (synthetic) {
       comments.push({
         path: synthetic.path,
         line: synthetic.line,
-        side: "RIGHT",
+        side: synthetic.side,
         body: `${icon(sev)} ${detail}\n\n<sub>PR-wide finding at ${where}: it names no line in this diff, so it is anchored here to open a resolvable thread.</sub>${severityMarker(sev)}`,
       });
     } else {
