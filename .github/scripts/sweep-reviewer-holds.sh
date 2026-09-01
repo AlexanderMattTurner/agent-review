@@ -3,7 +3,7 @@
 # automated-reviewer state that no workflow event re-evaluates:
 #   * the reviewer's hold — approve-if-reviewer-hold-clear.sh, the one source of
 #     truth for "the hold is cleared -> approve";
-#   * the `Automated review posted` merge gate — review-gate.sh, which stays RED
+#   * the `Automated review posted` merge gate — review-findings-gate.sh, which stays RED
 #     while one of the reviewer's finding threads is unresolved.
 # This is the no-push safety net: GitHub fires no event when a review thread is
 # resolved, so a PR whose author resolves every finding without pushing gets
@@ -66,7 +66,11 @@ for row in "${prs[@]}"; do
   if [[ -z "$head_sha" ]]; then
     echo "::warning::sweep-reviewer-holds: PR #${pr} reported no head sha; its review gate is not re-evaluated" >&2
     status=1
-  elif ! PR="$pr" HEAD_SHA="$head_sha" bash "$here/review-gate.sh"; then
+  elif ! PR="$pr" REPORT_SHA="$head_sha" \
+    GATE_CONTEXT="Automated review posted" \
+    SEVERITY_CONFIG="$(cd "$here/../.." && pwd)/config/review-severities.json" \
+    UNREVIEWED_STATE=failure \
+    bash "$here/../reviewer/review-findings-gate.sh"; then
     echo "sweep: PR #${pr} review gate could not be re-evaluated" >&2
     status=1
   fi

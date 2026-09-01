@@ -129,24 +129,12 @@ jobs:
       # finding threads) exist. Nothing else would: the review posts with the
       # workflow GITHUB_TOKEN, whose events start no workflow run, so
       # review-gate.yaml never hears about it and the gate would keep the head's
-      # pre-review red until the next push. HEAD_SHA is the gate's own name for
-      # the sha this contract calls REPORT_SHA.
-      #
-      # The PARITY leg needs the same re-post for the same reason, and this is
-      # the transition that comparison most wants: the exported predicate's
-      # first named divergence is about whether a review exists at all. Its own
-      # workflow cannot hear this event either. It is a SHADOW, so its exit
-      # status is reported and never propagated — branching on the code rather
-      # than `|| true`, which would swallow a real failure of the live gate on
-      # the first line too.
+      # pre-review red until the next push.
       post-review-command: |
-        HEAD_SHA="$REPORT_SHA" bash .github/scripts/review-gate.sh
-        GATE_CONTEXT="Review findings resolved (parity)" \
+        GATE_CONTEXT="Automated review posted" \
           SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
           UNREVIEWED_STATE=failure \
           bash .github/reviewer/review-findings-gate.sh
-        rc=$?
-        [ "$rc" -eq 0 ] || echo "::warning::parity gate exited ${rc}; its shadow context is stale for this head"
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
@@ -162,7 +150,7 @@ jobs:
   # trusted pull request, which is the whole skip set.
   #
   # The required check of this repository is the `Automated review posted`
-  # status. review-gate.sh posts it, and it is RED until the reviewer has left a
+  # status. review-findings-gate.sh posts it, and it is RED until the reviewer has left a
   # review with a body. A skipped pull request gets no such review, so it strands
   # on a check that nothing will ever turn green. The deliberate skip is what
   # licenses the merge, so this job posts the missing review and then re-runs the
@@ -171,7 +159,7 @@ jobs:
   #
   # The approval carries the reviewer identity because it posts with
   # GITHUB_TOKEN, which is what makes the gate count it. So the gate is re-derived
-  # here, never asserted: review-gate.sh reads the reviews and the finding threads
+  # here, never asserted: the gate reads the reviews and the finding threads
   # and posts whatever it finds.
   #
   # A draft is excluded. It cannot merge, and it reaches this job on
@@ -214,10 +202,10 @@ jobs:
           sparse-checkout: |
             .github/scripts/auto-approve-skipped-pr.sh
             .github/scripts/lib-post-review-with-retry.sh
-            .github/scripts/review-gate.sh
-            .github/scripts/lib/reviewer-login.bash
+            .github/reviewer/review-findings-gate.sh
             .github/reviewer/lib/pr-reviews.bash
             .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib/review-skip-set.bash
             .github/reviewer/lib-ci-retry.sh
             config/review-severities.json
           sparse-checkout-cone-mode: false
@@ -245,9 +233,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: bash .github/scripts/review-gate.sh
+          GATE_CONTEXT: Automated review posted
+          SEVERITY_CONFIG: config/review-severities.json
+          UNREVIEWED_STATE: failure
+        run: bash .github/reviewer/review-findings-gate.sh
 
   # This workflow deliberately does NOT arm auto-merge. Arming belongs to the
   # flow that OPENS a pull request: only that flow holds the facts the decision

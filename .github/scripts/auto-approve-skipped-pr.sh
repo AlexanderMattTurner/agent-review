@@ -7,10 +7,10 @@
 # A review-required ruleset needs an approving review, and the `Automated review
 # posted` gate needs a review by the reviewer with a body. A skipped PR gets
 # neither, so it strands on both. This review supplies both at once, because it
-# posts with GITHUB_TOKEN and so carries the reviewer identity review-gate.sh
+# posts with GITHUB_TOKEN and so carries the reviewer identity the gate
 # counts. The caller (claude-review.yaml's `auto_approve_skipped` job `if:`) has
 # already decided this PR is in the skip set, and that job re-runs
-# review-gate.sh afterwards to post the cleared verdict on the head.
+# review-findings-gate.sh afterwards to post the cleared verdict on the head.
 #
 # The post goes through the shared retry-as-COMMENT helper
 # (lib-post-review-with-retry.sh), because an APPROVE can 422 here the same way
