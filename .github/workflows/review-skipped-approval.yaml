@@ -34,8 +34,7 @@ on:
         type: string
       reviewer-ref:
         description: "Branch, tag or commit of reviewer-repository to run: the same ref the caller pins on its `uses:` line, or its own `github.sha` for a caller in this repository. Required, because the alternative is cloning this repository's default branch."
-        required: false
-        default: ""
+        required: true
         type: string
       status-context:
         description: "The commit-status context the gate verdict is posted under. MUST equal the caller's required-check context, or the approved head satisfies nothing."

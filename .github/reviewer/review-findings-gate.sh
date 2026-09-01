@@ -89,11 +89,17 @@ source "$SCRIPT_DIR/lib/review-skip-set.bash"
 : "${GH_REPO:?GH_REPO required}"
 : "${PR:?PR number required}"
 : "${GH_TOKEN:?GH_TOKEN required}"
-# MUST stay byte-identical to the consumer's required-check context. The
-# consumer's merge-queue job carries that name, and the status posted here has
-# to match it or the pull request head never satisfies the gate.
-: "${GATE_CONTEXT:?GATE_CONTEXT required — the required-check context of the consumer}"
 : "${SEVERITY_CONFIG:?SEVERITY_CONFIG required — the severity SSOT of the consumer}"
+[[ -f "$SEVERITY_CONFIG" ]] || {
+  echo "missing $SEVERITY_CONFIG — the gate cannot know which severities gate; failing closed" >&2
+  exit 1
+}
+# MUST stay byte-identical to the consumer's required-check context: its
+# merge-queue job carries that name, and a status posted under any other one
+# leaves the head satisfying nothing. So it comes from the SSOT rather than a
+# caller's literal; a caller may still override for a second gate of its own.
+GATE_CONTEXT="${GATE_CONTEXT:-$(jq -er '.gate_context' "$SEVERITY_CONFIG")}"
+: "${GATE_CONTEXT:?no gate_context in $SEVERITY_CONFIG and none passed}"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its reviews and threads
 # are authored by github-actions[bot]. A consumer whose reviewer runs under a
@@ -159,10 +165,6 @@ fi
 owner="${GH_REPO%%/*}"
 name="${GH_REPO##*/}"
 
-[[ -f "$SEVERITY_CONFIG" ]] || {
-  echo "missing $SEVERITY_CONFIG — the gate cannot know which severities gate; failing closed" >&2
-  exit 1
-}
 # Captured before iterating so a jq failure (malformed config, a gating severity
 # with no icon) fails the gate loudly instead of dissolving into an empty loop.
 severity_rows="$(jq -r '.gating[] as $s | [$s, (.icons[$s] // error("no icon for gating severity \($s)"))] | @tsv' "$SEVERITY_CONFIG")"

@@ -747,6 +747,68 @@ describe("post-pr-review: synthetic anchors for un-anchorable gating findings", 
   });
 });
 
+describe("post-pr-review: a removed line that looks like a diff header", () => {
+  // A REMOVED line whose own text starts with `-- ` emits the diff line
+  // `--- a comment header`. A header test that does not know it is inside a hunk
+  // reads that as an old-side file header and skips it, so `oldLine` stops
+  // advancing and every LEFT anchor below it in the file is off by one.
+  //
+  // Old side: 1 `SELECT 1;`, 2 `-- a comment header`, 3 `SELECT 2;`.
+  const sqlComment = `diff --git a/db/x.sql b/db/x.sql
+index 1111111..2222222 100644
+--- a/db/x.sql
++++ b/db/x.sql
+@@ -1,3 +1,1 @@
+ SELECT 1;
+--- a comment header
+-SELECT 2;
+`;
+
+  it("keeps the LEFT anchor of the line after it", () => {
+    const { payload } = run(
+      {
+        summary: "s",
+        findings: [
+          {
+            path: "db/x.sql",
+            line: 3,
+            side: "LEFT",
+            severity: "nit",
+            title: "t",
+            body: "b",
+          },
+        ],
+      },
+      { diff: sqlComment },
+    );
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].path, "db/x.sql");
+    assert.equal(payload.comments[0].side, "LEFT");
+    assert.equal(payload.comments[0].line, 3);
+  });
+
+  it("anchors the look-alike line itself on its own old-file number", () => {
+    const { payload } = run(
+      {
+        summary: "s",
+        findings: [
+          {
+            path: "db/x.sql",
+            line: 2,
+            side: "LEFT",
+            severity: "nit",
+            title: "t",
+            body: "b",
+          },
+        ],
+      },
+      { diff: sqlComment },
+    );
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].line, 2);
+  });
+});
+
 describe("post-pr-review: diffs that name no b/ path", () => {
   // A wholly deleted file's `+++ /dev/null` names no new-file path, so its lines
   // are commentable on the LEFT side only, under the path the file HAD. The

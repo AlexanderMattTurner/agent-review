@@ -112,8 +112,7 @@ jobs:
       # depend on the caller happening to BE the reviewer. `${PWD}` is the
       # caller's checkout, where its severity SSOT is.
       post-review-command: |
-        GATE_CONTEXT="Automated review posted" \
-          SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
+        SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
           UNREVIEWED_STATE=failure \
           bash "${REVIEWER_DIR}/review-findings-gate.sh"
     secrets:

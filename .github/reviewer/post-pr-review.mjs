@@ -111,16 +111,32 @@ let path = null;
 let oldPath = null;
 let oldLine = 0;
 let newLine = 0;
+// How many old-side and new-side lines the current hunk still owes, from its own
+// `@@ -a,b +c,d @@` counts. A REMOVED line whose text starts with `-- ` emits the
+// diff line `--- foo`, and a header test alone reads that as a file header: the
+// line is skipped, `oldLine` never advances, and every LEFT anchor after it in
+// the file is off by one. Inside a hunk the counts say the line is content.
+let oldRemaining = 0;
+let newRemaining = 0;
+const inHunk = () => oldRemaining > 0 || newRemaining > 0;
 const diffLines = readFileSync(`${dir}/diff.txt`, "utf8").split("\n");
 for (let i = 0; i < diffLines.length; i++) {
   const raw = diffLines[i];
-  if (raw.startsWith("--- ")) {
+  // Content lines start with '+', '-', ' ' or '\\', so a bare `diff --git ` is
+  // always a header. It closes an unbalanced hunk — a diff truncated mid-hunk
+  // would otherwise leave the budget open and swallow the next file's headers.
+  if (raw.startsWith("diff --git ")) {
+    oldRemaining = 0;
+    newRemaining = 0;
+    continue;
+  }
+  if (!inHunk() && raw.startsWith("--- ")) {
     const source = raw.slice(4);
     const m = source.match(/^a\/(?<path>.*)$/);
     oldPath = m ? m.groups.path : source;
     continue;
   }
-  if (raw.startsWith("+++ ")) {
+  if (!inHunk() && raw.startsWith("+++ ")) {
     const target = raw.slice(4);
     const m = target.match(/^b\/(?<path>.*)$/);
     // A deleted file's new-side header is /dev/null, which names no commentable
@@ -129,11 +145,16 @@ for (let i = 0; i < diffLines.length; i++) {
     path = m ? m.groups.path : target === "/dev/null" ? oldPath : target;
     continue;
   }
-  if (raw.startsWith("@@")) {
-    const m = raw.match(/@@ -(?<old>\d+)(?:,\d+)? \+(?<new>\d+)(?:,\d+)? @@/);
+  if (!inHunk() && raw.startsWith("@@")) {
+    const m = raw.match(
+      /@@ -(?<old>\d+)(?:,(?<oldCount>\d+))? \+(?<new>\d+)(?:,(?<newCount>\d+))? @@/,
+    );
     if (m) {
       oldLine = Number.parseInt(m.groups.old, 10);
       newLine = Number.parseInt(m.groups.new, 10);
+      // An omitted count means 1, per `gitdiffcore`'s unified format.
+      oldRemaining = Number.parseInt(m.groups.oldCount ?? "1", 10);
+      newRemaining = Number.parseInt(m.groups.newCount ?? "1", 10);
     }
     continue;
   }
@@ -145,12 +166,14 @@ for (let i = 0; i < diffLines.length; i++) {
     if (!firstRightByPath.has(path)) firstRightByPath.set(path, newLine);
     if (!firstRightOverall) firstRightOverall = { path, line: newLine };
     newLine += 1;
+    newRemaining -= 1;
   } else if (kind === "-") {
     leftOk.add(`${path}\t${oldLine}`);
     diffViewLines[i + 1] = { path, kind, newLine: null, oldLine };
     if (!firstLeftByPath.has(path)) firstLeftByPath.set(path, oldLine);
     if (!firstLeftOverall) firstLeftOverall = { path, line: oldLine };
     oldLine += 1;
+    oldRemaining -= 1;
   } else if (kind === " ") {
     rightOk.add(`${path}\t${newLine}`);
     leftOk.add(`${path}\t${oldLine}`);
@@ -161,6 +184,8 @@ for (let i = 0; i < diffLines.length; i++) {
     if (!firstLeftOverall) firstLeftOverall = { path, line: oldLine };
     oldLine += 1;
     newLine += 1;
+    oldRemaining -= 1;
+    newRemaining -= 1;
   }
 }
 

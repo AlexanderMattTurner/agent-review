@@ -1,9 +1,10 @@
 {
-  "comment": "SSOT for the review-finding severity model. `gating` lists the severities whose findings the reviewer anchors to a line even when it cannot find one, so a caller's merge gate can hold the merge on the thread; `icons` maps every severity to the emoji its posted finding leads with. A non-gating finding that cannot be anchored spills into the review body instead. Consumer: .github/reviewer/post-pr-review.mjs (renders findings, stamps the hidden `<!-- severity: ... -->` marker). Editing this file changes review behavior with no code change.",
+  "comment": "SSOT for the review-finding severity model. `gating` lists the severities whose findings the reviewer anchors to a line even when it cannot find one, so a caller's merge gate can hold the merge on the thread; `icons` maps every severity to the emoji its posted finding leads with. A non-gating finding that cannot be anchored spills into the review body instead. Consumer: .github/reviewer/post-pr-review.mjs (renders findings, stamps the hidden `<!-- severity: ... -->` marker). Editing this file changes review behavior with no code change. `gate_context` is the commit-status context the gate posts its verdict under, and the required-check name a consumer's ruleset registers: one string that MUST be byte-identical everywhere, so the scripts read it here instead of restating it. Consumers: .github/reviewer/review-findings-gate.sh (default for GATE_CONTEXT).",
+  "gate_context": "Automated review posted",
   "gating": ["blocking", "warning"],
   "icons": {
-    "blocking": "🔴",
-    "warning": "🟡",
-    "nit": "🔵"
+    "blocking": "\ud83d\udd34",
+    "warning": "\ud83d\udfe1",
+    "nit": "\ud83d\udd35"
   }
 }

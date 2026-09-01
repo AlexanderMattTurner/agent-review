@@ -26,10 +26,11 @@ permissions: {}
 
 jobs:
   review-posted:
-    # BYTE-IDENTICAL to review-gate.yaml's `status-context`. The ruleset
-    # requires this name; the status the gate posts carries it. They are one
-    # string in two places, and a rename in either one alone silently leaves
-    # every PR waiting on a context nothing reports.
+    # BYTE-IDENTICAL to `gate_context` in config/review-severities.json, which
+    # is where the gate script reads the context it posts under. YAML cannot
+    # read a file, so this name and the two `status-context:` inputs are the
+    # only literals left; renaming one alone leaves every PR waiting on a
+    # context nothing reports.
     name: Automated review posted # required-check: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -73,6 +74,5 @@ jobs:
           # REPORT_SHA unset: in the merge queue this job's own conclusion is
           # the report, so the gate exits non-zero on a red verdict rather than
           # posting a status.
-          GATE_CONTEXT="Automated review posted" \
-            SEVERITY_CONFIG=config/review-severities.json \
+          SEVERITY_CONFIG=config/review-severities.json \
             bash .github/reviewer/review-findings-gate.sh

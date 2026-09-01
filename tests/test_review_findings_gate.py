@@ -136,6 +136,60 @@ exit 0
     return states[0].removeprefix("state=")
 
 
+def test_the_gate_context_defaults_to_the_severity_ssot(tmp_path: Path) -> None:
+    """A caller that passes no GATE_CONTEXT posts under the SSOT's `gate_context`,
+    so the context is not restated at each call site."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reviews.json").write_text(
+        json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviews": {"nodes": []}}}}}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "threads-0.json").write_text(
+        json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}
+        ),
+        encoding="utf-8",
+    )
+    log = tmp_path / "calls.log"
+    stub = f"""#!/usr/bin/env bash
+echo "$*" >>"{log}"
+[[ "$1" == graphql ]] || exit 0
+filter=""
+for ((i = 1; i <= $#; i++)); do
+  [[ "${{!i}}" == --jq ]] && {{ j=$((i + 1)); filter="${{!j}}"; }}
+done
+case "$*" in
+  *reviewThreads*) for page in "{tmp_path}"/threads-*.json; do jq -r "$filter" "$page"; done; exit 0 ;;
+  *reviews.nodes*) jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
+esac
+exit 0
+"""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gh").write_text(stub, encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin",
+            "GH_TOKEN": "t",
+            "GH_REPO": "o/r",
+            "PR": "18",
+            "REPORT_SHA": HEAD_SHA,
+            "SEVERITY_CONFIG": str(SEVERITIES),
+        },
+    )
+    assert res.returncode == 0, res.stderr
+    expected = json.loads(SEVERITIES.read_text(encoding="utf-8"))["gate_context"]
+    assert f"context={expected}" in log.read_text(encoding="utf-8")
+
+
 def test_a_reviewed_pr_with_no_findings_is_green(tmp_path: Path) -> None:
     """The clean path: no fix may green-lock or red-lock the gate."""
     assert run_gate(tmp_path, [review("COMMENTED")]) == "success"

@@ -67,7 +67,6 @@ for row in "${prs[@]}"; do
     echo "::warning::sweep-reviewer-holds: PR #${pr} reported no head sha; its review gate is not re-evaluated" >&2
     status=1
   elif ! PR="$pr" REPORT_SHA="$head_sha" \
-    GATE_CONTEXT="Automated review posted" \
     SEVERITY_CONFIG="$(cd "$here/../.." && pwd)/config/review-severities.json" \
     UNREVIEWED_STATE=failure \
     bash "$here/../reviewer/review-findings-gate.sh"; then
