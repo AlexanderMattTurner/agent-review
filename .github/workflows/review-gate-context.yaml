@@ -9,10 +9,10 @@ name: Review gate (context)
 #
 # It cannot be the job that posts the status. That job's own check run lands on
 # the PR head under its name, and it succeeds whenever it managed to post a
-# verdict — including a `pending` one. Sharing the name would put a green check
-# run and a pending status under one required context, and the green would
-# satisfy it: a gate reporting "waiting for a review" while the merge goes
-# through. So the name lives here, on a job that CANNOT run on a pull request.
+# verdict — including a RED one. Sharing the name would put a green check run and
+# a red status under one required context, and the green would satisfy it: a gate
+# reporting an unresolved finding while the merge goes through. So the name lives
+# here, on a job that CANNOT run on a pull request.
 #
 # `merge_group` is the trigger precisely because this repo has no merge queue, so
 # the job never runs and reports nothing that could compete with the status. A
@@ -40,12 +40,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # review-gate.sh sources the shared reviewer-identity library, so the
-          # library must land in the same sparse checkout; without it the script
-          # dies at its `source` line under `set -e`.
+          # review-gate.sh sources the shared reviewer-identity and review-thread
+          # libraries and reads the severity SSOT, so all three must land in the
+          # same sparse checkout; without one the script dies at its `source`
+          # line, or at the `jq` that reads the severities, under `set -e`.
           sparse-checkout: |
             .github/scripts/review-gate.sh
             .github/scripts/lib/reviewer-login.bash
+            .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib-ci-retry.sh
+            config/review-severities.json
           sparse-checkout-cone-mode: false
 
       - name: Evaluate the gate for every pull request in the batch
