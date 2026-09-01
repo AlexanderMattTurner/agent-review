@@ -26,10 +26,11 @@ permissions: {}
 
 jobs:
   review-posted:
-    # BYTE-IDENTICAL to GATE_CONTEXT in .github/scripts/review-gate.sh. The
-    # ruleset requires this name; the status the gate posts carries it. They are
-    # one string in two places, and a rename in either one alone silently leaves
-    # every PR waiting on a context nothing reports.
+    # BYTE-IDENTICAL to `gate_context` in config/review-severities.json, which
+    # is where the gate script reads the context it posts under. YAML cannot
+    # read a file, so this name and the two `status-context:` inputs are the
+    # only literals left; renaming one alone leaves every PR waiting on a
+    # context nothing reports.
     name: Automated review posted # required-check: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -40,14 +41,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # review-gate.sh sources the shared reviewer-identity and review-thread
-          # libraries and reads the severity SSOT, so all three must land in the
-          # same sparse checkout; without one the script dies at its `source`
-          # line, or at the `jq` that reads the severities, under `set -e`.
+          # review-findings-gate.sh sources the shared review-thread, review
+          # and skip-set libraries and reads the severity SSOT, so every one
+          # must land in the same sparse checkout; without one the script dies
+          # at its `source` line, or at the `jq` that reads the severities,
+          # under `set -e`.
           sparse-checkout: |
-            .github/scripts/review-gate.sh
-            .github/scripts/lib/reviewer-login.bash
+            .github/reviewer/review-findings-gate.sh
             .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib/pr-reviews.bash
+            .github/reviewer/lib/review-skip-set.bash
             .github/reviewer/lib-ci-retry.sh
             config/review-severities.json
           sparse-checkout-cone-mode: false
@@ -60,7 +63,6 @@ jobs:
           # `${{ }}` expansion inside `run:` is textual substitution, so a ref
           # carrying shell metacharacters would execute as code.
           QUEUE_REF: ${{ github.ref }}
-          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         # The queue branch name carries the pull request number.
         run: |
           PR="$(sed -n 's|.*/pr-\([0-9]\{1,\}\)-.*|\1|p' <<<"$QUEUE_REF")"
@@ -69,4 +71,8 @@ jobs:
             exit 1
           fi
           export PR
-          bash .github/scripts/review-gate.sh
+          # REPORT_SHA unset: in the merge queue this job's own conclusion is
+          # the report, so the gate exits non-zero on a red verdict rather than
+          # posting a status.
+          SEVERITY_CONFIG=config/review-severities.json \
+            bash .github/reviewer/review-findings-gate.sh

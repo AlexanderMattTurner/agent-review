@@ -747,11 +747,74 @@ describe("post-pr-review: synthetic anchors for un-anchorable gating findings", 
   });
 });
 
+describe("post-pr-review: a removed line that looks like a diff header", () => {
+  // A REMOVED line whose own text starts with `-- ` emits the diff line
+  // `--- a comment header`. A header test that does not know it is inside a hunk
+  // reads that as an old-side file header and skips it, so `oldLine` stops
+  // advancing and every LEFT anchor below it in the file is off by one.
+  //
+  // Old side: 1 `SELECT 1;`, 2 `-- a comment header`, 3 `SELECT 2;`.
+  const sqlComment = `diff --git a/db/x.sql b/db/x.sql
+index 1111111..2222222 100644
+--- a/db/x.sql
++++ b/db/x.sql
+@@ -1,3 +1,1 @@
+ SELECT 1;
+--- a comment header
+-SELECT 2;
+`;
+
+  it("keeps the LEFT anchor of the line after it", () => {
+    const { payload } = run(
+      {
+        summary: "s",
+        findings: [
+          {
+            path: "db/x.sql",
+            line: 3,
+            side: "LEFT",
+            severity: "nit",
+            title: "t",
+            body: "b",
+          },
+        ],
+      },
+      { diff: sqlComment },
+    );
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].path, "db/x.sql");
+    assert.equal(payload.comments[0].side, "LEFT");
+    assert.equal(payload.comments[0].line, 3);
+  });
+
+  it("anchors the look-alike line itself on its own old-file number", () => {
+    const { payload } = run(
+      {
+        summary: "s",
+        findings: [
+          {
+            path: "db/x.sql",
+            line: 2,
+            side: "LEFT",
+            severity: "nit",
+            title: "t",
+            body: "b",
+          },
+        ],
+      },
+      { diff: sqlComment },
+    );
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].line, 2);
+  });
+});
+
 describe("post-pr-review: diffs that name no b/ path", () => {
-  // A wholly deleted file's `+++ /dev/null` names no new-file path, so nothing
-  // in it is commentable — the guarantee is that the reviewer never posts a
-  // comment against `/dev/null`, and never attributes the deleted file's lines
-  // to the file before it in the diff.
+  // A wholly deleted file's `+++ /dev/null` names no new-file path, so its lines
+  // are commentable on the LEFT side only, under the path the file HAD. The
+  // guarantee is that the reviewer never posts a comment against `/dev/null`,
+  // and never attributes the deleted file's lines to the file before it in the
+  // diff.
   const withDeletion = `diff --git a/src/foo.js b/src/foo.js
 index 1111111..2222222 100644
 --- a/src/foo.js
@@ -802,7 +865,7 @@ index 1111111..2222222 100644
     assert.equal(payload.comments[0].line, 2);
   });
 
-  it("spills a nit on a deleted file instead of anchoring it", () => {
+  it("anchors a nit on a deleted file to that file's LEFT side", () => {
     const { payload } = run(
       {
         summary: "s",
@@ -819,8 +882,10 @@ index 1111111..2222222 100644
       },
       { diff: withDeletion },
     );
-    assert.deepEqual(payload.comments, []);
-    assert.match(payload.body, /`src\/gone\.js:1`: t — b/);
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].path, "src/gone.js");
+    assert.equal(payload.comments[0].side, "LEFT");
+    assert.equal(payload.comments[0].line, 1);
   });
 
   it("still anchors a finding on the surviving file of the same diff", () => {
@@ -845,14 +910,14 @@ index 1111111..2222222 100644
     assert.equal(payload.comments[0].side, "LEFT");
   });
 
-  it("never synthetically anchors a gating finding at /dev/null", () => {
+  it("synthetically anchors a gating finding on the deleted file itself, never at /dev/null", () => {
     const { payload } = run(
       {
         summary: "s",
         findings: [
           {
             path: "src/gone.js",
-            line: 1,
+            line: 999,
             side: "LEFT",
             severity: "blocking",
             title: "t",
@@ -863,8 +928,52 @@ index 1111111..2222222 100644
       { diff: withDeletion },
     );
     assert.equal(payload.comments.length, 1);
-    assert.equal(payload.comments[0].path, "src/foo.js");
-    assert.equal(payload.comments[0].side, "RIGHT");
+    assert.equal(payload.comments[0].path, "src/gone.js");
+    assert.equal(payload.comments[0].side, "LEFT");
+    assert.equal(payload.comments[0].line, 1);
+    assert.match(payload.comments[0].body, /PR-wide finding at/);
+  });
+});
+
+describe("post-pr-review: a diff that only deletes", () => {
+  // The whole diff is removals, so it offers no RIGHT-side line anywhere. The
+  // synthetic-anchor ladder must fall to LEFT here: spilling would leave the
+  // gating finding with no thread, and the status gate reads only threads.
+  const deletionOnly = `diff --git a/src/gone.js b/src/gone.js
+deleted file mode 100644
+--- a/src/gone.js
++++ /dev/null
+@@ -1,2 +0,0 @@
+-const g = 1;
+-const h = 2;
+`;
+
+  const finding = (severity) => ({
+    summary: "s",
+    findings: [
+      {
+        path: "src/gone.js",
+        line: 999,
+        side: "LEFT",
+        severity,
+        title: "t",
+        body: "b",
+      },
+    ],
+  });
+
+  it("synthetically anchors an un-anchorable gating finding on the LEFT side", () => {
+    const { payload } = run(finding("blocking"), { diff: deletionOnly });
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].path, "src/gone.js");
+    assert.equal(payload.comments[0].side, "LEFT");
+    assert.equal(payload.comments[0].line, 1);
+  });
+
+  it("still spills an un-anchorable nit", () => {
+    const { payload } = run(finding("nit"), { diff: deletionOnly });
+    assert.deepEqual(payload.comments, []);
+    assert.match(payload.body, /`src\/gone\.js:999`: t — b/);
   });
 });
 

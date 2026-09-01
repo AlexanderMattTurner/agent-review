@@ -15,11 +15,16 @@ from pathlib import Path
 from tests._helpers import REPO_ROOT
 
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "sweep-reviewer-holds.sh"
-SIBLINGS = ("approve-if-reviewer-hold-clear.sh", "review-gate.sh")
+# Each per-PR script the sweep runs, at the path it runs it from — relative to
+# the sweep's own directory, because that is how the sweep resolves them.
+SIBLINGS = {
+    "approve-if-reviewer-hold-clear.sh": "approve-if-reviewer-hold-clear.sh",
+    "review-findings-gate.sh": "../reviewer/review-findings-gate.sh",
+}
 
 
 def run_sweep(tmp_path: Path, prs: list[dict]) -> tuple[int, dict[str, list[str]]]:
-    """Sweep `prs`; return the exit code and each per-PR script's `PR HEAD_SHA`
+    """Sweep `prs`; return the exit code and each per-PR script's `PR REPORT_SHA`
     lines, in call order.
 
     The sweep runs its siblings by path, so it runs here out of a sandbox holding
@@ -33,13 +38,15 @@ def run_sweep(tmp_path: Path, prs: list[dict]) -> tuple[int, dict[str, list[str]
     sandbox = tmp_path / "scripts"
     sandbox.mkdir()
     shutil.copy(SCRIPT, sandbox / SCRIPT.name)
-    for name in SIBLINGS:
-        (sandbox / name).write_text(
+    for name, rel in SIBLINGS.items():
+        stub = (sandbox / rel).resolve()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text(
             "#!/usr/bin/env bash\n"
-            f'printf "%s %s\\n" "$PR" "${{HEAD_SHA:-}}" >> "{tmp_path}/{name}.log"\n',
+            f'printf "%s %s\\n" "$PR" "${{REPORT_SHA:-}}" >> "{tmp_path}/{name}.log"\n',
             encoding="utf-8",
         )
-        (sandbox / name).chmod(0o755)
+        stub.chmod(0o755)
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -87,7 +94,7 @@ def test_the_sweep_re_posts_the_gate_verdict_on_each_swept_head(tmp_path: Path) 
     with no follow-up push, and the required check stays red on handled work."""
     code, calls = run_sweep(tmp_path, [pull_request(7, head="deadbeef")])
     assert code == 0
-    assert calls["review-gate.sh"] == ["7 deadbeef"]
+    assert calls["review-findings-gate.sh"] == ["7 deadbeef"]
 
 
 def test_the_sweep_still_clears_the_reviewer_hold(tmp_path: Path) -> None:
@@ -110,7 +117,7 @@ def test_draft_and_bot_pull_requests_are_not_swept(tmp_path: Path) -> None:
         ],
     )
     assert code == 0
-    assert calls["review-gate.sh"] == ["3 cafe"]
+    assert calls["review-findings-gate.sh"] == ["3 cafe"]
     assert calls["approve-if-reviewer-hold-clear.sh"] == ["3 "]
 
 
@@ -124,5 +131,5 @@ def test_a_pr_with_no_readable_head_gets_no_verdict_and_reds_the_sweep(
         tmp_path, [pull_request(9, head=""), pull_request(10, head="beef")]
     )
     assert code != 0
-    assert calls["review-gate.sh"] == ["10 beef"]
+    assert calls["review-findings-gate.sh"] == ["10 beef"]
     assert calls["approve-if-reviewer-hold-clear.sh"] == ["9 ", "10 "]

@@ -34,54 +34,31 @@ permissions: {}
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # The skip decision, computed ONCE.
+  # The skip decision, computed ONCE, and the approval the skipped class needs.
   #
-  # `review` and `auto_approve_skipped` must be exact complements: every pull
-  # request is reviewed or approved, never neither and never both. Stating the
-  # predicate in each job's `if:` made that a claim in a comment — the two copies
-  # drifted on `draft` and a draft in the skip class matched neither. One output,
-  # read by both, makes the complement structural.
+  # Both live in review-skipped-approval.yaml, which other repositories call by
+  # `uses:` — so a consumer copies no script to route its own pull requests, and
+  # this repository dogfoods what it exports. Its header states the class.
   #
-  # Every field the class reads must be one the pull request cannot choose, because
-  # a skipped pull request is APPROVED unread. The TITLE is not such a field, so no
-  # title reaches here. Nor is the OPENER on its own: a same-repo bot PR's head
-  # branch is pushable by any collaborator, and this job re-runs on `synchronize`.
-  # So the payload half below is only half the class — classify-review-skip.sh adds
-  # the head half, and fails closed.
+  # `review` below negates this job's `skip` output, so the two are exact
+  # complements: every pull request is reviewed or approved, never neither and
+  # never both.
   # ────────────────────────────────────────────────────────────────────────────
   classify:
-    name: Decide whether the reviewer skips this PR
-    # not-required-check: computes a routing decision, reports no verdict.
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    name: Reviewer skip routing
+    # not-required-check: routes a pull request and reports no verdict of its own.
     permissions:
-      contents: read # sparse-checkout the trusted script
-      pull-requests: read # list this PR's commits
-    outputs:
-      skip: ${{ steps.decide.outputs.skip }}
-    steps:
-      - name: Checkout the trusted script (default branch)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The default branch GitHub reports — never base.ref, which the pull
-          # request author picks, and never the untrusted head.
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          sparse-checkout: .github/scripts/classify-review-skip.sh
-          sparse-checkout-cone-mode: false
-
-      - id: decide
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          PAYLOAD_SKIP: >-
-            ${{
-              github.event.pull_request.draft == false &&
-              github.event.pull_request.head.repo.full_name == github.repository &&
-              github.event.pull_request.user.type == 'Bot'
-            }}
-        run: bash .github/scripts/classify-review-skip.sh
+      contents: read
+      pull-requests: write
+      statuses: write
+    uses: ./.github/workflows/review-skipped-approval.yaml
+    with:
+      reviewer-repository: ${{ github.repository }}
+      # This call is local, so the commit to run is this workflow file's own —
+      # the same reason the review job below pins `github.sha`.
+      reviewer-ref: ${{ github.sha }}
+      status-context: Automated review posted
+      unreviewed-state: failure
 
   # ────────────────────────────────────────────────────────────────────────────
   # Claude PR review (first pass) — one whole-diff read per PR, sharded across
@@ -100,9 +77,9 @@ jobs:
   # `startup_failure` before any job starts.
   # ────────────────────────────────────────────────────────────────────────────
   review:
-    # Reads `classify`, so this is the exact complement of `auto_approve_skipped`
-    # by construction. `labeled` is the on-demand hatch: it starts the read the
-    # stand-in approval offers, whatever the class says.
+    # Reads `classify`, so this is the exact complement of the approval that job
+    # posts. `labeled` is the on-demand hatch: it starts the read the stand-in
+    # approval offers, whatever the class says.
     needs: classify
     if: >-
       github.event.action == 'labeled' ||
@@ -129,24 +106,15 @@ jobs:
       # finding threads) exist. Nothing else would: the review posts with the
       # workflow GITHUB_TOKEN, whose events start no workflow run, so
       # review-gate.yaml never hears about it and the gate would keep the head's
-      # pre-review red until the next push. HEAD_SHA is the gate's own name for
-      # the sha this contract calls REPORT_SHA.
-      #
-      # The PARITY leg needs the same re-post for the same reason, and this is
-      # the transition that comparison most wants: the exported predicate's
-      # first named divergence is about whether a review exists at all. Its own
-      # workflow cannot hear this event either. It is a SHADOW, so its exit
-      # status is reported and never propagated — branching on the code rather
-      # than `|| true`, which would swallow a real failure of the live gate on
-      # the first line too.
+      # pre-review red until the next push.
+      # `${REVIEWER_DIR}` is the reviewer's own clone, which the called workflow
+      # exports — the same form a consumer repository writes, and it does not
+      # depend on the caller happening to BE the reviewer. `${PWD}` is the
+      # caller's checkout, where its severity SSOT is.
       post-review-command: |
-        HEAD_SHA="$REPORT_SHA" bash .github/scripts/review-gate.sh
-        GATE_CONTEXT="Review findings resolved (parity)" \
-          SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
+        SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
           UNREVIEWED_STATE=failure \
-          bash .github/reviewer/review-findings-gate.sh
-        rc=$?
-        [ "$rc" -eq 0 ] || echo "::warning::parity gate exited ${rc}; its shadow context is stale for this head"
+          bash "${REVIEWER_DIR}/review-findings-gate.sh"
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
@@ -156,98 +124,6 @@ jobs:
       rung_6: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_5 }}
       rung_7: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_6 }}
       rung_8: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Auto-approve the pull requests the review job above skips — a bot author on a
-  # trusted pull request, which is the whole skip set.
-  #
-  # The required check of this repository is the `Automated review posted`
-  # status. review-gate.sh posts it, and it is RED until the reviewer has left a
-  # review with a body. A skipped pull request gets no such review, so it strands
-  # on a check that nothing will ever turn green. The deliberate skip is what
-  # licenses the merge, so this job posts the missing review and then re-runs the
-  # gate. It offers the `needs-auto-review` label to anyone who wants a real read
-  # after all.
-  #
-  # The approval carries the reviewer identity because it posts with
-  # GITHUB_TOKEN, which is what makes the gate count it. So the gate is re-derived
-  # here, never asserted: review-gate.sh reads the reviews and the finding threads
-  # and posts whatever it finds.
-  #
-  # A draft is excluded. It cannot merge, and it reaches this job on
-  # `ready_for_review`.
-  #
-  # This job posts one review and one commit status. It runs no pull-request code.
-  # ────────────────────────────────────────────────────────────────────────────
-  auto_approve_skipped:
-    name: Auto-approve bot PRs the reviewer skips
-    # Reads the same `classify` output the review job negates, so the two are
-    # complements by construction rather than by a comment.
-    needs: classify
-    if: >-
-      contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
-      needs.classify.outputs.skip == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Keyed per head, and never cancelling a run in flight, for the same reason
-    # review-gate.yaml is: a cancel between the approval and the status loses the
-    # verdict and leaves the head with a stale one.
-    concurrency:
-      group: auto-approve-skipped-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-      cancel-in-progress: false
-    permissions:
-      contents: read # sparse-checkout the trusted scripts
-      pull-requests: write # submit the approving review, and read the finding threads
-      statuses: write # post the gate verdict on the head
-    steps:
-      - name: Checkout the trusted scripts (default branch)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The default branch GitHub reports — never base.ref, which the pull
-          # request author picks, and never the untrusted head. Same posture as
-          # the review job above.
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          # Each script AND every file it sources. A sparse checkout naming
-          # single files gets exactly those, so a missing one kills the step at
-          # its `source` line under `set -e`.
-          sparse-checkout: |
-            .github/scripts/auto-approve-skipped-pr.sh
-            .github/scripts/lib-post-review-with-retry.sh
-            .github/scripts/review-gate.sh
-            .github/scripts/lib/reviewer-login.bash
-            .github/reviewer/lib/pr-reviews.bash
-            .github/reviewer/lib/review-threads.bash
-            .github/reviewer/lib-ci-retry.sh
-            config/review-severities.json
-          sparse-checkout-cone-mode: false
-
-      - name: Approve so a review-required ruleset does not strand a skipped PR
-        # Runs on EVERY event this job takes, `synchronize` included. A ruleset
-        # with "dismiss stale reviews" drops this approval on a push, and no
-        # other path re-posts one: the hold sweeper re-posts the status alone.
-        # Re-posting here is what keeps the class off a permanently red gate,
-        # and this file syncs into repos whose rulesets this one cannot read.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: bash .github/scripts/auto-approve-skipped-pr.sh
-
-      # `always()`, because the two levers are independent: the approval answers
-      # the review-required ruleset, this status answers the required check. A
-      # bare step skips when the approve step fails — and it fails whenever the
-      # repository forbids Actions to approve — which strands the whole class on
-      # a red check. That failure stays loud: this job still goes red.
-      - name: Post the gate verdict on this head
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: bash .github/scripts/review-gate.sh
 
   # This workflow deliberately does NOT arm auto-merge. Arming belongs to the
   # flow that OPENS a pull request: only that flow holds the facts the decision

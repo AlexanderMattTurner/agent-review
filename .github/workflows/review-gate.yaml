@@ -5,36 +5,59 @@ name: Review gate
 # review that has not been submitted yet, so a PR whose cheap checks go green in
 # ninety seconds merges before the reviewer has read it.
 #
-# One job posting one stateless predicate — has the reviewer reviewed this pull
-# request, and are all of its gating findings resolved? — as a commit status on
-# the head. The status is RED until both hold, so an unread finding blocks the
-# merge instead of riding along under a green check. `review-gate.sh` owns the
-# predicate, and explains both why it is a status rather than this job's own
-# check run and why it is scoped to the pull request rather than to the head.
+# This job CALLS the exported gate (review-findings-gate.yaml), which owns the
+# predicate, the pagination, the retry ladder, the 140-character status budget
+# and the skip set. Its header explains each.
 #
-# SECURITY — `pull_request_target` runs in the base repo's context. The explicit
-# default-branch `ref:` on the checkout is the enforcement point: no PR-authored
-# code is checked out or executed here. The job reads review state through the
-# API and posts a status.
-
+# A DISMISSED review counts as a read there, because a dismissal retracts a HOLD
+# and not the reading. The unresolved finding threads are the merge lever, and a
+# dismissal moves none of them. The stand-in approval auto-approve-skipped-pr.sh
+# posts clears the gate for the same reason a real review does: it is a review
+# by the reviewer, so the threads decide.
+#
+# The skip set is left EMPTY: this repository's reviewer reads every pull
+# request (see review.yaml's decide job), so nothing is waived and the gate
+# waits for a real read.
+#
+# SECURITY — `pull_request_target` runs in the base repo's context. No
+# PR-authored code is checked out or executed: the export clones its own
+# repository at the ref below and reads the caller's severity SSOT off the
+# default branch.
+#
 # WHICH BRANCH'S COPY OF THIS FILE RUNS differs per trigger. GitHub documents
 # that `pull_request_target` "will only trigger a workflow run if the workflow
 # file exists on the default branch", so that leg stays silent until this file
 # merges. It states no such rule for `pull_request_review`, whose documented
 # `GITHUB_REF` is the PR merge ref `refs/pull/:prNumber/merge`, so that leg runs
-# the pull request's own copy and fires immediately. Observed on #457: three
-# `pull_request_review` runs and zero `pull_request_target` runs. Either way the
-# checkout below pins `github.event.repository.default_branch`, so the SCRIPT
-# this job runs is the base branch's.
-on: # zizmor: ignore[dangerous-triggers] — no PR code executes: an API-only script off a default-branch checkout; see the SECURITY header
+# the pull request's own copy and fires immediately.
+on: # zizmor: ignore[dangerous-triggers] — no PR code executes: API-only scripts off a pinned clone and a default-branch checkout
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
   # A HUMAN submitting or dismissing a review flips the predicate. The reviewer's
   # own review cannot arrive this way: it posts with the workflow GITHUB_TOKEN,
   # whose events start no workflow run, so the reviewer re-posts this verdict
   # itself through claude-review.yaml's `post-review-command`.
   pull_request_review:
     types: [submitted, dismissed]
+  # A new review comment can open a gating thread, and resolution fires no event
+  # at all — the twice-hourly sweep is what clears a resolved-only head.
+  pull_request_review_comment:
+    types: [created]
+
+# Queue, never cancel, and keyed PER HEAD — the same key the called job uses.
+# Never cancel because the called job posts a commit status, and a cancel
+# between reading the state and POSTing leaves the head carrying a stale
+# verdict on a REQUIRED context.
+#
+# Per head because webhook delivery is unordered and this OUTER group is
+# evaluated before the called workflow's own. Under a per-branch key, a
+# late-delivered event for an old head joins the same group as a queued run for
+# the CURRENT head and displaces it, and the new head then gets no verdict at
+# all — the inner per-head group cannot undo a cancellation that already
+# happened out here.
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -52,63 +75,27 @@ jobs:
     # lets the merge through anyway. The context is registered instead by the
     # never-firing job in review-gate-context.yaml.
     name: Evaluate the automated-review gate # required-check: false  # this job reports whether the EVALUATION ran; the gate itself is the status it posts
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Keyed per HEAD, and never cancelling a run in flight. Webhook delivery is
-    # unordered, so a PR-only key would let a late event carrying a stale head
-    # displace the queued evaluation for the current one. `cancel-in-progress`
-    # stays false because GitHub cancels mid-step: a true here could kill a run
-    # between reading the reviews and posting the status, losing the verdict and
-    # leaving the head with a stale one.
-    concurrency:
-      group: review-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-      cancel-in-progress: false
     permissions:
-      contents: read # sparse-checkout the trusted gate script
-      pull-requests: read # read the PR's reviews
+      contents: read # the export sparse-checks-out the severity SSOT
       statuses: write # post the verdict on the head
-    steps:
-      - name: Checkout the trusted gate script (default branch)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Explicit default-branch ref — never the event's SHA; see the
-          # SECURITY header. This pin keeps PR-authored content out of this job.
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          # review-gate.sh sources the shared reviewer-identity and review-thread
-          # libraries and reads the severity SSOT, so all three must land in the
-          # same sparse checkout; without one the script dies at its `source`
-          # line, or at the `jq` that reads the severities, under `set -e`.
-          sparse-checkout: |
-            .github/scripts/review-gate.sh
-            .github/scripts/lib/reviewer-login.bash
-            .github/reviewer/lib/review-threads.bash
-            .github/reviewer/lib-ci-retry.sh
-            config/review-severities.json
-          sparse-checkout-cone-mode: false
-
-      - name: Evaluate the gate and post the verdict on the head
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # The absent-script arm is the BOOTSTRAP, and every repo adopting this
-        # file hits it exactly once: the checkout above reads the base branch, so
-        # on the pull request that INTRODUCES the gate the script is not there
-        # yet. Reading it off the PR head instead would execute PR-authored code
-        # under pull_request_target, which is the one thing this trigger must
-        # never do. So report `pending` — not green, which would be fail-open,
-        # and not a 127 red, which tells a reader to go diagnose an installation
-        # that is merely incomplete.
-        run: |
-          if [[ -f .github/scripts/review-gate.sh ]]; then
-            bash .github/scripts/review-gate.sh
-            exit 0
-          fi
-          gh api -X POST "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
-            -f "state=pending" \
-            -f "context=Automated review posted" \
-            -f "description=Gate not yet on the base branch; it arms when this merges" \
-            -f "target_url=${RUN_URL}" >/dev/null
+      pull-requests: write # read the threads, free the re-check label
+    uses: ./.github/workflows/review-findings-gate.yaml
+    with:
+      reviewer-repository: ${{ github.repository }}
+      # The DEFAULT BRANCH, not `github.sha`. Under pull_request_target those
+      # are the same commit, but this workflow also fires on the review events,
+      # where GITHUB_REF is the pull request MERGE ref (`refs/pull/N/merge`) and
+      # `github.sha` is that merge commit. The export clones with `git clone`,
+      # which fetches `refs/heads/*` and `refs/tags/*` only, so the merge commit
+      # is absent and `checkout --detach` dies with "reference is not a tree".
+      # A branch name resolves under every trigger and stays trusted.
+      reviewer-ref: ${{ github.event.repository.default_branch }}
+      # BYTE-IDENTICAL to the `name:` of the job in review-gate-context.yaml:
+      # that job name is what sync-required-checks registers as the ruleset's
+      # required context, and the status posted here has to carry the same
+      # context or the head never satisfies it.
+      status-context: Automated review posted
+      # `failure`, not `pending`: a pending status does not appear in `gh pr
+      # checks` at all, so a reader cannot tell "the reviewer has not spoken"
+      # from "no gate here at all". Both block the required context.
+      unreviewed-state: failure

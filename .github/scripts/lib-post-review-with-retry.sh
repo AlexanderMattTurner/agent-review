@@ -4,7 +4,7 @@
 # cast a formal vote — observed in both the reviewer's post-pr-review.sh and
 # auto-approve-skipped-pr.sh — while COMMENT always succeeds. Any script in
 # this repo that posts a PR review via the reviews API must retry a rejected
-# event as COMMENT before giving up, since review-gate.sh's "Automated review
+# event as COMMENT before giving up, since the gate's "Automated review
 # posted" check counts any undismissed review regardless of event.
 #
 # post_review_with_retry <pr> <payload_json_path> <fallback_comment_path>

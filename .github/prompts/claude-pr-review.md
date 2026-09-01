@@ -57,7 +57,7 @@ verdict written, and the review step then fails as if you never reviewed. Write
    is the floor, not the bar: the bar is "a strong maintainer would call this
    the right shape, not merely a working one." For every non-trivial change,
    actively construct the strongest simpler/tighter alternative and weigh the
-   PR against it before approving. Check concretely, against the repo's
+   PR against it before you call it clean. Check concretely, against the repo's
    documented style (CLAUDE.md → Code Style / Readability):
    - **A materially better shape available at similar cost.** Less mutable
      state, a narrower create-to-consume span, reuse of an existing mechanism
@@ -82,11 +82,11 @@ verdict written, and the review step then fails as if you never reviewed. Write
      that could not fail for a neighboring mistake is lax design, not coverage.
 
    A working-but-lax design is a REAL finding: file it as `warning` with the
-   better shape named, and escalate to `needs_changes` when the better design
-   is clearly available at comparable cost and the lax one is load-bearing
+   better shape named, and escalate the FINDING to `blocking` when the better
+   design is clearly available at comparable cost and the lax one is load-bearing
    (new public surface, a security-adjacent path, state or knobs other code
    will accrete around). Do not let politeness round a design reservation
-   down to silence — an approval with zero findings on a non-trivial diff
+   down to silence — a review with zero findings on a non-trivial diff
    should mean you looked for the better design and genuinely failed to find
    one, and your `summary` must say what alternative you weighed and why the
    PR's shape beats it (a summary that could have been written without reading
@@ -95,9 +95,9 @@ verdict written, and the review step then fails as if you never reviewed. Write
 7. Also surface, where it genuinely improves the change (usually `nit`, at most
    `warning`). **Severity decides what the reader sees and what holds the merge**
    — `config/review-severities.json` says which severities hold, and in this repo
-   that is all three, so even a 🔵 `nit` opens a thread the merge waits on. Choose
-   severity by consequence, and leave out anything too trivial to be worth the
-   author's read:
+   that is 🔴 `blocking` and 🟡 `warning`, so a 🔵 `nit` is advisory and holds
+   nothing. Choose severity by consequence, and leave out anything too trivial to
+   be worth the author's read:
    - reductions in lines of code the reader would thank you for — dead code,
      single-caller abstractions, needless indirection, restated comments;
    - opportunities to compress or consolidate tests — parametrize repetitive
@@ -144,24 +144,26 @@ verdict written, and the review step then fails as if you never reviewed. Write
 
 ## Output format
 
-Your review posts as a real GitHub review, so both your `verdict` and your
-findings' severities have a merge consequence. Under a review-required ruleset
-this reviewer IS the approval or the hold:
+Your review always posts as a **COMMENT** — you never approve and never request
+changes, and no review event of yours holds or releases a merge. The merge is
+gated by a separate status check that is red exactly while an unresolved thread
+of yours carries a 🔴 `blocking` or 🟡 `warning` finding; resolving the last such
+thread turns it green. So **your findings' severities are your ONLY lever over
+the merge**:
 
-- `looks_good` — no blocking issues; posts an **APPROVE** review, which satisfies
-  the required review so auto-merge may proceed.
-- `needs_changes` / `blocking` — posts a **REQUEST_CHANGES** review, which holds
-  the merge until the request is resolved. Reserve these for real blocking
-  problems: a correctness/security bug, a broken or missing test, a violated
-  convention, or a load-bearing lax design with a clearly better shape at
-  comparable cost (step 6's escalation case).
-- **Any finding whose severity gates escalates the posted event to
-  REQUEST_CHANGES, whatever your verdict says.** A `looks_good` carrying one 🔵
-  `nit` still holds the merge, because `nit` is in `config/review-severities.json`'s
-  `gating` list here. So a finding is never a free aside: file one when you want
-  the author to act, and leave it out when you do not.
+- **You CANNOT hold a merge except through a specific inline finding.** A concern
+  raised only in the `summary` opens no thread, so the gate never sees it.
+  Reserve a gating finding for a real problem: a correctness or security bug, a
+  broken or missing test, a violated convention, or a load-bearing lax design
+  with a clearly better shape at comparable cost (step 6's escalation case).
+- **A gating concern with no natural anchor still goes inline**, on the nearest
+  relevant diff line, with the `body` saying the anchor is synthetic and the
+  concern PR-wide. The posting step re-anchors one it cannot place, to the file's
+  first changed line, or to the diff's first when its own file has none.
+- `verdict` is advisory prose: nothing acts on it mechanically. Set it to your
+  honest overall call, and open your `summary` with the same one-line call.
 
-Approval is the default outcome only in the sense that most PRs are fine — not a
+Silence is the default outcome only in the sense that most PRs are fine — not a
 courtesy the diff is owed; when you are genuinely torn between filing a finding
 and staying silent, ask whether merging as-is would make the codebase permanently
 worse in a way a follow-up realistically won't fix (new surface and lax shapes
@@ -188,8 +190,10 @@ almost never get revisited once merged) — if yes, file it.
 
 ## Anchoring rules
 
-A mis-anchored finding is dropped from the inline view (it falls back into the
-summary), so anchor carefully:
+A mis-anchored 🔵 nit is dropped from the inline view (it falls back into the
+summary); a mis-anchored 🔴/🟡 finding is re-anchored to a synthetic fallback line
+and labeled PR-wide, which is noisier for the reader than your real anchor.
+Anchor carefully either way:
 
 - Anchor to a line that appears in the diff. Use side `RIGHT` and the NEW-file
   line number for added or context lines — this is the normal case. Use `LEFT`

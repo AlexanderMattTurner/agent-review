@@ -12,7 +12,7 @@ name: Claude reviewer-hold sweeper
 # claude-review.yaml to react to, and no event for review-gate.yaml to re-post its
 # verdict on. A cron sweep re-runs both state-based evaluations for all open PRs, so
 # no resolution path can strand the hold or leave a handled PR red. Each is
-# idempotent — approve-if-reviewer-hold-clear.sh and review-gate.sh both read the
+# idempotent — approve-if-reviewer-hold-clear.sh and review-findings-gate.sh both read the
 # current thread and review state — so a sweep never double-approves, and never
 # publishes a verdict the live state does not support.
 #
@@ -51,7 +51,7 @@ jobs:
       # by dismissing it rather than by minting an approval on a PR no push-time
       # review just examined.
       GH_TOKEN_ACTIONS: ${{ secrets.GITHUB_TOKEN }}
-      # review-gate.sh links its status back to the run that posted it, so a
+      # The gate links its status back to the run that posted it, so a
       # sweep's re-post keeps the Details link review-gate.yaml's post carries.
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -59,12 +59,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The sweep runs review-gate.sh too, which sources the reviewer's
-          # thread walker and reads the severity SSOT; neither lives under
-          # .github/scripts, so both are named here.
+          # The sweep runs review-findings-gate.sh too, which sources the
+          # reviewer's thread, review and skip-set libraries and reads the
+          # severity SSOT; none of them lives under .github/scripts, so each is
+          # named here.
           sparse-checkout: |
             .github/scripts
+            .github/reviewer/review-findings-gate.sh
             .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib/pr-reviews.bash
+            .github/reviewer/lib/review-skip-set.bash
             .github/reviewer/lib-ci-retry.sh
             config/review-severities.json
           sparse-checkout-cone-mode: false
