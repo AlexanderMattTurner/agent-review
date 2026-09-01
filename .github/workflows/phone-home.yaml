@@ -45,7 +45,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /usr/local/bin/gitleaks
-          key: gitleaks-${{ runner.os }}-${{ env.GITLEAKS_VERSION }}
+          # The path belongs in the key. `gitleaks.yaml` caches the binary at a
+          # workspace-relative `gitleaks` under what was the identical key, and a
+          # cache key is immutable: whichever workflow saved first won, the other
+          # read a hit, skipped its download, and then failed on a binary that is
+          # not where it looked.
+          key: gitleaks-usrlocalbin-${{ runner.os }}-${{ env.GITLEAKS_VERSION }}
 
       - name: Download gitleaks
         if: steps.extract.outputs.has_lessons == 'true' && steps.gitleaks-cache.outputs.cache-hit != 'true'
