@@ -159,3 +159,55 @@ def test_a_failed_read_is_non_zero_once_the_ladder_is_exhausted(github):
     github.add_review()
     github.fail_reads = True
     assert _call(github, "reviewer_reviews_ndjson").returncode != 0
+
+
+# The exact body auto-approve-skipped-pr.sh posts, read out of the ONE definition
+# both it and the read share, so a renamed marker reds here rather than silently
+# splitting producer from consumer.
+def _marker() -> str:
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf %s "$AUTO_APPROVAL_MARKER"', "_", str(LIB)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout, "the library must define AUTO_APPROVAL_MARKER"
+    return proc.stdout
+
+
+def test_the_stand_in_approval_does_not_spend_the_one_read(github):
+    """The auto-approve job posts its APPROVE with GITHUB_TOKEN, so it carries the
+    reviewer's own login and a non-empty body. Counted as a review it latches the
+    PR permanently unread: the reviewer's decide step answers "already reviewed"
+    on every later event, so a PR that leaves the skip class — or that asks for a
+    read with the `needs-auto-review` label — never gets its first pass."""
+    github.add_review(
+        state="APPROVED",
+        body=f"{_marker()}\nAutomated approval: this PR type isn't Claude-reviewed.",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _latest(github) == "", "a review nobody read does not spend the read"
+
+
+def test_the_gate_s_read_still_counts_the_stand_in_approval(github):
+    """The two questions differ. `reviewer_reviews_ndjson` answers whether a review
+    EXISTS for the review-findings gate and the review-required ruleset, and the
+    stand-in approval is exactly that review — the skipped PR strands on a red
+    check without it."""
+    body = f"{_marker()}\nAutomated approval: this PR type isn't Claude-reviewed."
+    github.add_review(state="APPROVED", body=body, submitted_at="2026-07-01T00:00:00Z")
+    assert [r["state"] for r in _ndjson(github)] == ["APPROVED"]
+
+
+def test_a_real_review_after_a_stand_in_approval_still_spends_the_read(github):
+    """Dropping the stand-in must not drop a real review that came after it —
+    otherwise the marker turns every such PR into an unlimited review budget."""
+    github.add_review(
+        state="APPROVED",
+        body=f"{_marker()}\nAutomated approval.",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    github.add_review(
+        state="COMMENTED", body="the real read", submitted_at="2026-07-02T00:00:00Z"
+    )
+    assert json.loads(_latest(github))["body"] == "the real read"

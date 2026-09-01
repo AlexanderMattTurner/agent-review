@@ -810,3 +810,80 @@ def test_the_decision_never_asks_whether_the_pr_is_a_draft(
     _, run, argv = _run(tmp_path, action, review_state="")
     assert run == "true"
     assert "pulls/42" not in argv, argv
+
+
+def _caller_skip_expression() -> str:
+    """The event-payload half of the caller's skip predicate — the `PAYLOAD_SKIP`
+    expression the `classify` job computes and hands to its decide script."""
+    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["classify"]["steps"]
+    decide = next(s for s in steps if s.get("id") == "decide")
+    return " ".join(decide["env"]["PAYLOAD_SKIP"].split())
+
+
+def test_only_github_set_fields_decide_the_caller_skip_set() -> None:
+    """No field the pull request can CHOOSE may put it in the skip set.
+
+    A skipped PR is routed to `auto_approve_skipped`, which posts an approving
+    review under the reviewer's identity — so an author-written field buys an
+    unread approval. The TITLE did: `chore: drop the egress allowlist` was
+    reviewed by nobody and approved by the bot. Pinning the enumerated field set
+    rather than banning the one spelling fails closed on the next arm of the same
+    shape — `head.ref`, `body`, `labels` are all author-picked too.
+    """
+    skip = _caller_skip_expression()
+    fields = set(
+        re.findall(r"github\.event\.pull_request\.(?P<field>[A-Za-z_.]+)", skip)
+    )
+    assert fields == {"draft", "head.repo.full_name", "user.type"}, (
+        f"only GitHub-set fields may decide the skip set: {skip}"
+    )
+
+
+def test_the_caller_skip_set_also_reads_the_head_commits() -> None:
+    """The payload half alone gates on the OPENER, which never changes, while the
+    head does: a same-repo bot PR's branch is pushable by any collaborator, and
+    the job re-runs on `synchronize`. So a human commit pushed onto a dependabot
+    branch would take the approval its opener bought. The decide step must run the
+    script that reads the commits."""
+    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["classify"]["steps"]
+    decide = next(s for s in steps if s.get("id") == "decide")
+    assert "classify-review-skip.sh" in decide["run"], decide["run"]
+
+
+def _auto_approval_marker() -> str:
+    """The marker string out of the ONE definition the producer and the read
+    share — never a literal copied into this test."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf %s "$AUTO_APPROVAL_MARKER"', "_", str(lib)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout, "the library must define AUTO_APPROVAL_MARKER"
+    return proc.stdout
+
+
+def test_the_stand_in_approval_leaves_the_first_pass_owed(tmp_path: Path) -> None:
+    """A PR the caller skipped carries an APPROVE from the auto-approve job, posted
+    with GITHUB_TOKEN and so under the reviewer's own login with a non-empty body.
+
+    Read as a verdict it latches the PR permanently unread: every later event
+    answers "already reviewed", so a PR that leaves the skip class gets no first
+    pass, and the `needs-auto-review` label buys a run that reviews nothing.
+    """
+    run, decision = _run_real_jq(
+        tmp_path,
+        reviews_pages=[
+            [
+                _bot_review(
+                    "APPROVED",
+                    body=f"{_auto_approval_marker()}\nAutomated approval.",
+                )
+            ]
+        ],
+    )
+    assert run == "true", "an approval nobody read leaves the first pass owed"
+    assert "never reviewed" in decision, decision
