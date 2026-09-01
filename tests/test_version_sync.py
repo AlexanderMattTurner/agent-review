@@ -54,15 +54,22 @@ SYNC_REQUIRED_CHECKS_WORKFLOW = (
 )
 
 
-def _search(pattern: str, path: Path, *, flags: int = 0) -> str:
-    """Return the first capture group of *pattern* in *path*, or fail loudly.
+def _search(
+    pattern: str, path: Path, *, flags: int = 0, group: int | tuple[int, ...] = 1
+) -> str:
+    """Return the named capture group(s) of *pattern* in *path*, or fail loudly.
+
+    Several groups are joined with `@`, so a pin whose identity is more than a
+    version — an owner plus a sha — compares as one string.
 
     Failing when the pattern matches nothing keeps the test from passing
     vacuously if a source file is restructured and a pin moves or disappears.
     """
     m = re.search(pattern, path.read_text(), flags)
     assert m, f"Pattern {pattern!r} matched nothing in {path}"
-    return m.group(1)
+    if isinstance(group, int):
+        return m.group(group)
+    return "@".join(m.group(n) for n in group)
 
 
 def _session_setup_pin(tool: str) -> str:
@@ -106,12 +113,18 @@ def _python_pins() -> dict[str, str]:
 
 def _ci_truth_serum_pins() -> dict[str, str]:
     return {
+        # The OWNER is captured with the sha: a fork or a rename moves one file
+        # and not the other, and two files pinning the same sha under different
+        # owners are still two different tools.
         ".pre-commit-config.yaml": _search(
-            r"alexander-turner/ci-truth-serum\s+rev:\s+(\S+)", PRE_COMMIT_CFG
+            r"github\.com/(\S+/ci-truth-serum)\s+rev:\s+(\S+)",
+            PRE_COMMIT_CFG,
+            group=(1, 2),
         ),
         "sync-required-checks.yaml": _search(
-            r"ci-truth-serum @ git\+https://github\.com/alexander-turner/ci-truth-serum@(\S+)\"",
+            r"ci-truth-serum @ git\+https://github\.com/(\S+/ci-truth-serum)@([^\"\s]+)",
             SYNC_REQUIRED_CHECKS_WORKFLOW,
+            group=(1, 2),
         ),
     }
 
