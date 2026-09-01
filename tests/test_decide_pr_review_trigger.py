@@ -832,7 +832,9 @@ def test_only_github_set_fields_decide_the_caller_skip_set() -> None:
     shape — `head.ref`, `body`, `labels` are all author-picked too.
     """
     skip = _caller_skip_expression()
-    fields = set(re.findall(r"github\.event\.pull_request\.([A-Za-z_.]+)", skip))
+    fields = set(
+        re.findall(r"github\.event\.pull_request\.(?P<field>[A-Za-z_.]+)", skip)
+    )
     assert fields == {"draft", "head.repo.full_name", "user.type"}, (
         f"only GitHub-set fields may decide the skip set: {skip}"
     )
