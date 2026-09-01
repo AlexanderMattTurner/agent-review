@@ -94,7 +94,15 @@ env:
   # .github/scripts/auto-resolve is the retired shell resolver. A consumer that
   # still carries it keeps its own copy rather than having sync delete it out
   # from under a caller that has not converted yet.
-  EXCLUDE_PATHS: ".github/workflows/security-vulnerability-scan.yaml .github/prompts/security-vulnerability-scan.md .github/scripts/auto-resolve"
+  # This repository IS the reviewer the template calls. The template ships a
+  # DOWNSTREAM-CONSUMER copy of the same machinery — a pinned external call to
+  # this repo, a gate with no unresolved-findings half, an approval path with no
+  # author-exclusion guard — so syncing those files inverts the direction and
+  # overwrites the source of truth with a copy derived from it. #14 did exactly
+  # that: it dropped the reviewer's own merge gate and let a PR author
+  # self-approve past a blocking finding. The reviewer implementation therefore
+  # syncs in one direction only, out of here.
+  EXCLUDE_PATHS: ".github/workflows/security-vulnerability-scan.yaml .github/prompts/security-vulnerability-scan.md .github/scripts/auto-resolve .github/scripts/approve-if-reviewer-hold-clear.sh .github/scripts/auto-approve-skipped-pr-retry.test.mjs .github/scripts/auto-approve-skipped-pr.sh .github/scripts/lib-path-match.sh .github/scripts/lib-post-review-with-retry.sh .github/scripts/lib/reviewer-login.bash .github/scripts/review-gate.sh .github/scripts/sweep-reviewer-holds.sh .github/workflows/claude-review.yaml .github/workflows/claude-reviewer-hold-clear.yaml .github/workflows/review-gate-context.yaml .github/workflows/review-gate.yaml .github/prompts/claude-pr-review.md"
   # Files the sync UPDATES but never INTRODUCES. Absent from the child repo they
   # are skipped; present, they sync like anything else. This is the opt-in half
   # of EXCLUDE_PATHS: opting in is creating the file once, opting out is deleting
