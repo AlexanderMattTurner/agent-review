@@ -61,7 +61,7 @@ jobs:
       skip: ${{ steps.decide.outputs.skip }}
     steps:
       - name: Checkout the trusted script (default branch)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The default branch GitHub reports — never base.ref, which the pull
           # request author picks, and never the untrusted head.
@@ -201,7 +201,7 @@ jobs:
       statuses: write # post the gate verdict on the head
     steps:
       - name: Checkout the trusted scripts (default branch)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The default branch GitHub reports — never base.ref, which the pull
           # request author picks, and never the untrusted head. Same posture as
