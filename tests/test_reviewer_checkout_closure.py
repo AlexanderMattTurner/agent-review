@@ -62,8 +62,9 @@ def _reviewer_jobs():
             # A job that CLONES the reviewer repository carries its own closure:
             # the script and every library it sources arrive with the clone, and
             # the sparse checkout beside it fetches only the caller's severity
-            # SSOT. The clone's path is what such a job runs the script from.
-            if "REVIEWER_DIR" in run_text:
+            # SSOT. Keyed on the clone itself, so renaming the variable that
+            # holds its path cannot silently exempt a job that does not clone.
+            if "git clone" in run_text and "REVIEWER_REPO" in run_text:
                 continue
             scripts = [s for s in REVIEWER_SCRIPT_DEPS if s in run_text]
             if not scripts:

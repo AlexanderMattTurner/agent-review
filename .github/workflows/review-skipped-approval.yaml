@@ -1,0 +1,200 @@
+name: Reviewer skip routing (reusable)
+
+# Decide whether the automated reviewer skips a pull request, and — when it does
+# — post the approval and the gate verdict that keep the pull request from
+# stranding. A consumer calls this instead of copying the scripts: the skip
+# predicate, the stand-in approval and the gate re-post all run from THIS
+# repository at the commit the caller pinned on its `uses:` line.
+#
+# The caller reads `skip` and negates it to gate its own review job, so the two
+# are complements by construction: every pull request is reviewed or approved,
+# never neither and never both.
+#
+# ── The skip class ────────────────────────────────────────────────────────────
+#
+# A bot author, a same-repo head, not a draft — and every commit bot-authored,
+# which classify-review-skip.sh adds by reading the pull request. Every field is
+# one the pull request cannot choose, because a skipped pull request is APPROVED
+# unread. The TITLE is not such a field, so no title reaches this class. A draft
+# is out because the reviewer reads it on `ready_for_review`.
+#
+# ── Trust model ───────────────────────────────────────────────────────────────
+#
+# The caller fires on `pull_request_target`, so these jobs hold the base
+# repository's secrets. No PR-authored code runs: the scripts come from the
+# reviewer clone, the caller's severity SSOT is read off its DEFAULT BRANCH, and
+# the pull request is read only through the API.
+
+on:
+  workflow_call:
+    inputs:
+      reviewer-repository:
+        description: "owner/name of the repository that ships this routing. It is cloned at the ref below, so the reviewed repository cannot rewrite the code that approves it."
+        required: true
+        type: string
+      reviewer-ref:
+        description: "Branch, tag or commit of reviewer-repository to run: the same ref the caller pins on its `uses:` line, or its own `github.sha` for a caller in this repository. Required, because the alternative is cloning this repository's default branch."
+        required: false
+        default: ""
+        type: string
+      status-context:
+        description: "The commit-status context the gate verdict is posted under. MUST equal the caller's required-check context, or the approved head satisfies nothing."
+        required: false
+        default: "Review findings resolved"
+        type: string
+      severity-config:
+        description: "Repo-relative path IN THE CALLING repository to the severity SSOT. Read from the caller's default branch."
+        required: false
+        default: "config/review-severities.json"
+        type: string
+      unreviewed-state:
+        description: "The status state the gate posts while nothing has read the pull request. Matches the caller's own gate call, so one head never carries two answers."
+        required: false
+        default: "pending"
+        type: string
+      reviewer-login:
+        description: "The login the automated reviewer posts under. The default matches a reviewer running on the workflow GITHUB_TOKEN."
+        required: false
+        default: "github-actions"
+        type: string
+      review-label:
+        description: "The label that takes a pull request back OUT of the skip class. The caller must also list `labeled` in its `pull_request_target` types."
+        required: false
+        default: "needs-auto-review"
+        type: string
+    outputs:
+      skip:
+        description: "`true` when the reviewer skips this pull request. The caller gates its review job on the negation."
+        value: ${{ jobs.classify.outputs.skip }}
+
+permissions: {}
+
+jobs:
+  classify:
+    name: Decide whether the reviewer skips this PR
+    # not-required-check: computes a routing decision, reports no verdict.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # clone the reviewer
+      pull-requests: read # list this PR's commits
+    outputs:
+      skip: ${{ steps.decide.outputs.skip }}
+    steps:
+      - name: Check out the routing from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref }}
+        run: |
+          : "${REVIEWER_REF:?pass reviewer-ref — the commit this routing must run}"
+          dest="${RUNNER_TEMP}/reviewer"
+          for attempt in 1 2 3; do
+            git clone "https://github.com/${REVIEWER_REPO}.git" "${dest}" && break
+            [[ "$attempt" -lt 3 ]] || exit 1
+            rm -rf "${dest}"
+            sleep $((attempt * 5))
+          done
+          # A ref may be a branch, a tag or a commit sha; `checkout --detach`
+          # takes all three. Outside GITHUB_WORKSPACE on purpose: the reviewed
+          # repository's checkout must not be able to replace this code.
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          echo "REVIEWER_ROOT=${dest}" >>"$GITHUB_ENV"
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          # The event-payload half of the class. classify-review-skip.sh adds the
+          # head half and fails closed, so a drift here costs a real review, never
+          # an unread approval.
+          PAYLOAD_SKIP: >-
+            ${{
+              github.event.pull_request.draft == false &&
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              github.event.pull_request.user.type == 'Bot'
+            }}
+        run: bash "${REVIEWER_ROOT}/.github/scripts/classify-review-skip.sh"
+
+  approve:
+    name: Auto-approve bot PRs the reviewer skips
+    needs: classify
+    if: >-
+      contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
+      needs.classify.outputs.skip == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Keyed per head and never cancelling a run in flight: a cancel between the
+    # approval and the status loses the verdict and leaves the head with a stale
+    # one.
+    concurrency:
+      group: review-skipped-approval-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # clone the reviewer, sparse-checkout the caller's severity SSOT
+      pull-requests: write # submit the approving review, and read the finding threads
+      statuses: write # post the gate verdict on the head
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Check out the routing from its own repository
+        env:
+          REVIEWER_REPO: ${{ inputs.reviewer-repository }}
+          REVIEWER_REF: ${{ inputs.reviewer-ref }}
+        run: |
+          : "${REVIEWER_REF:?pass reviewer-ref — the commit this routing must run}"
+          dest="${RUNNER_TEMP}/reviewer"
+          for attempt in 1 2 3; do
+            git clone "https://github.com/${REVIEWER_REPO}.git" "${dest}" && break
+            [[ "$attempt" -lt 3 ]] || exit 1
+            rm -rf "${dest}"
+            sleep $((attempt * 5))
+          done
+          git -C "${dest}" checkout --detach "${REVIEWER_REF}"
+          echo "REVIEWER_ROOT=${dest}" >>"$GITHUB_ENV"
+
+      - name: Reject a severity-config path outside the caller's tree
+        # The path is joined into SEVERITY_CONFIG and reused as a sparse-checkout
+        # pattern, so `../` or a leading `/` would read a file the consumer's
+        # default branch does not own.
+        env:
+          SEVERITY_PATH: ${{ inputs.severity-config }}
+        run: |
+          case "$SEVERITY_PATH" in
+            /* | *..*) echo "severity-config must be a repo-relative path without '..': ${SEVERITY_PATH}" >&2; exit 1 ;;
+          esac
+
+      - name: Check out the caller's severity SSOT (default branch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Never the event's sha: the severity config decides which findings
+          # gate, so a head-ref checkout would let an author empty `gating`.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: ${{ inputs.severity-config }}
+          sparse-checkout-cone-mode: false
+
+      - name: Approve so a review-required ruleset does not strand a skipped PR
+        # Runs on every event this job takes, `synchronize` included: a ruleset
+        # with "dismiss stale reviews" drops this approval on a push, and no
+        # other path re-posts one.
+        run: bash "${REVIEWER_ROOT}/.github/scripts/auto-approve-skipped-pr.sh"
+
+      - name: Post the gate verdict on this head
+        # `always()`, because the two levers are independent: the approval answers
+        # the review-required ruleset, this status answers the required check. A
+        # bare step skips when the approval fails — and it fails whenever the
+        # repository forbids Actions to approve — which strands the whole class on
+        # a red check. That failure stays loud: this job still goes red.
+        if: always()
+        env:
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          GATE_CONTEXT: ${{ inputs.status-context }}
+          SEVERITY_CONFIG: ${{ github.workspace }}/${{ inputs.severity-config }}
+          UNREVIEWED_STATE: ${{ inputs.unreviewed-state }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
+          REVIEW_LABEL: ${{ inputs.review-label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "${REVIEWER_ROOT}/.github/reviewer/review-findings-gate.sh"

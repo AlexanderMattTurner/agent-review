@@ -54,6 +54,11 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
 # This repository's own caller of the reusable reviewer. Its `if:` names every
 # event that reaches `decide`, which is what the repeatable-action test walks.
 CALLER_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "claude-review.yaml"
+# The skip predicate the caller runs, which every consumer calls rather than
+# copies.
+SKIP_ROUTING_WORKFLOW = (
+    REPO_ROOT / ".github" / "workflows" / "review-skipped-approval.yaml"
+)
 HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
 # The commit an existing reviewer verdict was left against.
 REVIEWED_SHA = "0ldc0de0ldc0de0ldc0de0ldc0de0ldc0de0ldc0"
@@ -815,7 +820,7 @@ def test_the_decision_never_asks_whether_the_pr_is_a_draft(
 def _caller_skip_expression() -> str:
     """The event-payload half of the caller's skip predicate — the `PAYLOAD_SKIP`
     expression the `classify` job computes and hands to its decide script."""
-    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    doc = yaml.safe_load(SKIP_ROUTING_WORKFLOW.read_text(encoding="utf-8"))
     steps = doc["jobs"]["classify"]["steps"]
     decide = next(s for s in steps if s.get("id") == "decide")
     return " ".join(decide["env"]["PAYLOAD_SKIP"].split())
@@ -824,7 +829,7 @@ def _caller_skip_expression() -> str:
 def test_only_github_set_fields_decide_the_caller_skip_set() -> None:
     """No field the pull request can CHOOSE may put it in the skip set.
 
-    A skipped PR is routed to `auto_approve_skipped`, which posts an approving
+    A skipped PR is routed to the `approve` job, which posts an approving
     review under the reviewer's identity — so an author-written field buys an
     unread approval. The TITLE did: `chore: drop the egress allowlist` was
     reviewed by nobody and approved by the bot. Pinning the enumerated field set
@@ -846,7 +851,7 @@ def test_the_caller_skip_set_also_reads_the_head_commits() -> None:
     the job re-runs on `synchronize`. So a human commit pushed onto a dependabot
     branch would take the approval its opener bought. The decide step must run the
     script that reads the commits."""
-    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    doc = yaml.safe_load(SKIP_ROUTING_WORKFLOW.read_text(encoding="utf-8"))
     steps = doc["jobs"]["classify"]["steps"]
     decide = next(s for s in steps if s.get("id") == "decide")
     assert "classify-review-skip.sh" in decide["run"], decide["run"]
