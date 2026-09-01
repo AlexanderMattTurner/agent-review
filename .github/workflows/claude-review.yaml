@@ -239,7 +239,8 @@ jobs:
   # This workflow deliberately does NOT arm auto-merge. Arming belongs to the
   # flow that OPENS a pull request: only that flow holds the facts the decision
   # needs. template-sync-automerge.sh refuses to arm a sync whose conflict a
-  # model resolved, and dependabot-auto-merge.yaml refuses a semver-major bump.
+  # model resolved, and dependabot-auto-merge.yaml arms every dependabot PR,
+  # but refuses when the base branch requires no status checks.
   # A reviewer-side job that armed every skipped pull request overrode both.
 
   # ────────────────────────────────────────────────────────────────────────────
