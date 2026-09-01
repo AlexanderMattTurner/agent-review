@@ -385,13 +385,9 @@ jobs:
       # A sync merges itself only when NOTHING needed judgement. See the script
       # for the full predicate; the two carve-outs are that a model-resolved file
       # never qualifies, and neither does a change to the supervision surface.
-      # It runs a BASE_SHA copy for the same reason the gate does: the gate
-      # passing only proves the branch carries no conflict marker, never that
-      # this script or the predicate it reads still match the reviewed version.
       - name: Enable auto-merge on a fully deterministic sync
         if: inputs.dry-run != true && steps.create-pr.outputs.pull-request-number && vars.TEMPLATE_SYNC_AUTOMERGE != 'false'
         env:
-          BASE_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ secrets.TEMPLATE_SYNC_TOKEN_ORG || github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
