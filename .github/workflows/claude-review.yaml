@@ -42,28 +42,46 @@ jobs:
   # drifted on `draft` and a draft in the skip class matched neither. One output,
   # read by both, makes the complement structural.
   #
-  # The class reads no TITLE. A title is author-written, so any title in the skip
-  # set is an approval a pull request can write for itself, and the same-repo
-  # gate only narrows who may write it. Every title now gets a real read.
-  # `user.type` is GitHub's own field on the account, which no pull request sets.
+  # Every field the class reads must be one the pull request cannot choose, because
+  # a skipped pull request is APPROVED unread. The TITLE is not such a field, so no
+  # title reaches here. Nor is the OPENER on its own: a same-repo bot PR's head
+  # branch is pushable by any collaborator, and this job re-runs on `synchronize`.
+  # So the payload half below is only half the class — classify-review-skip.sh adds
+  # the head half, and fails closed.
   # ────────────────────────────────────────────────────────────────────────────
   classify:
     name: Decide whether the reviewer skips this PR
     # not-required-check: computes a routing decision, reports no verdict.
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read # sparse-checkout the trusted script
+      pull-requests: read # list this PR's commits
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
     steps:
+      - name: Checkout the trusted script (default branch)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The default branch GitHub reports — never base.ref, which the pull
+          # request author picks, and never the untrusted head.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts/classify-review-skip.sh
+          sparse-checkout-cone-mode: false
+
       - id: decide
         env:
-          SKIP: >-
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PAYLOAD_SKIP: >-
             ${{
               github.event.pull_request.draft == false &&
               github.event.pull_request.head.repo.full_name == github.repository &&
               github.event.pull_request.user.type == 'Bot'
             }}
-        run: echo "skip=${SKIP}" >>"$GITHUB_OUTPUT"
+        run: bash .github/scripts/classify-review-skip.sh
 
   # ────────────────────────────────────────────────────────────────────────────
   # Claude PR review (first pass) — one whole-diff read per PR, sharded across

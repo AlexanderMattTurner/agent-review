@@ -34,6 +34,7 @@ CASES = [
     # PR-review suite. The first-pass reviewer's own scripts moved to
     # .github/reviewer/, where the reusable review.yaml runs them.
     ("auto-approve-skipped-pr.sh", ["PR", "GH_REPO"]),
+    ("classify-review-skip.sh", ["PR", "GH_REPO", "PAYLOAD_SKIP"]),
     # The resolve credential is no longer an input: it is picked from the
     # GH_TOKEN_* ladder, so PR_INPUT_DIR is the only var this script demands.
     ("approve-if-reviewer-hold-clear.sh", ["GH_REPO", "PR"]),

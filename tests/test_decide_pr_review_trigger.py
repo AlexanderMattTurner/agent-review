@@ -813,38 +813,41 @@ def test_the_decision_never_asks_whether_the_pr_is_a_draft(
 
 
 def _caller_skip_expression() -> str:
-    """The caller's skip predicate — the `SKIP` expression the `classify` job
-    computes once and both `review` and `auto_approve_skipped` read."""
+    """The event-payload half of the caller's skip predicate — the `PAYLOAD_SKIP`
+    expression the `classify` job computes and hands to its decide script."""
     doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
     steps = doc["jobs"]["classify"]["steps"]
     decide = next(s for s in steps if s.get("id") == "decide")
-    return " ".join(decide["env"]["SKIP"].split())
+    return " ".join(decide["env"]["PAYLOAD_SKIP"].split())
 
 
-def test_the_caller_skip_set_reads_no_pr_title() -> None:
-    """A pull request's TITLE must not buy it an automated approval.
+def test_only_github_set_fields_decide_the_caller_skip_set() -> None:
+    """No field the pull request can CHOOSE may put it in the skip set.
 
-    The author writes the title, and the skip set routes a PR to
-    `auto_approve_skipped`, which posts an approving review under the reviewer's
-    identity. A title arm therefore lets a PR approve itself: `chore: drop the
-    egress allowlist` was reviewed by nobody and approved by the bot. The
-    same-repo gate does not save it — it narrows WHO may write the title, not
-    what the title buys.
+    A skipped PR is routed to `auto_approve_skipped`, which posts an approving
+    review under the reviewer's identity — so an author-written field buys an
+    unread approval. The TITLE did: `chore: drop the egress allowlist` was
+    reviewed by nobody and approved by the bot. Pinning the enumerated field set
+    rather than banning the one spelling fails closed on the next arm of the same
+    shape — `head.ref`, `body`, `labels` are all author-picked too.
     """
     skip = _caller_skip_expression()
-    assert "title" not in skip, f"no title decides the skip set: {skip}"
+    fields = set(re.findall(r"github\.event\.pull_request\.([A-Za-z_.]+)", skip))
+    assert fields == {"draft", "head.repo.full_name", "user.type"}, (
+        f"only GitHub-set fields may decide the skip set: {skip}"
+    )
 
 
-def test_the_caller_skip_set_stays_gated_on_a_same_repo_head() -> None:
-    """The remaining arm is `user.type == 'Bot'`, which GitHub sets on the
-    account. A fork PR still must not reach the approval path: a fork author
-    picks the account that opens it, so the head-repository check is what keeps
-    an outside bot account out of the auto-approved class."""
-    skip = _caller_skip_expression()
-    assert (
-        "github.event.pull_request.head.repo.full_name == github.repository" in skip
-    ), skip
-    assert "github.event.pull_request.user.type == 'Bot'" in skip, skip
+def test_the_caller_skip_set_also_reads_the_head_commits() -> None:
+    """The payload half alone gates on the OPENER, which never changes, while the
+    head does: a same-repo bot PR's branch is pushable by any collaborator, and
+    the job re-runs on `synchronize`. So a human commit pushed onto a dependabot
+    branch would take the approval its opener bought. The decide step must run the
+    script that reads the commits."""
+    doc = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["classify"]["steps"]
+    decide = next(s for s in steps if s.get("id") == "decide")
+    assert "classify-review-skip.sh" in decide["run"], decide["run"]
 
 
 def _auto_approval_marker() -> str:
