@@ -845,3 +845,40 @@ def test_the_caller_skip_set_stays_gated_on_a_same_repo_head() -> None:
         "github.event.pull_request.head.repo.full_name == github.repository" in skip
     ), skip
     assert "github.event.pull_request.user.type == 'Bot'" in skip, skip
+
+
+def _auto_approval_marker() -> str:
+    """The marker string out of the ONE definition the producer and the read
+    share — never a literal copied into this test."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf %s "$AUTO_APPROVAL_MARKER"', "_", str(lib)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout, "the library must define AUTO_APPROVAL_MARKER"
+    return proc.stdout
+
+
+def test_the_stand_in_approval_leaves_the_first_pass_owed(tmp_path: Path) -> None:
+    """A PR the caller skipped carries an APPROVE from the auto-approve job, posted
+    with GITHUB_TOKEN and so under the reviewer's own login with a non-empty body.
+
+    Read as a verdict it latches the PR permanently unread: every later event
+    answers "already reviewed", so a PR that leaves the skip class gets no first
+    pass, and the `needs-auto-review` label buys a run that reviews nothing.
+    """
+    run, decision = _run_real_jq(
+        tmp_path,
+        reviews_pages=[
+            [
+                _bot_review(
+                    "APPROVED",
+                    body=f"{_auto_approval_marker()}\nAutomated approval.",
+                )
+            ]
+        ],
+    )
+    assert run == "true", "an approval nobody read leaves the first pass owed"
+    assert "never reviewed" in decision, decision

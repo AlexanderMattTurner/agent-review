@@ -198,6 +198,7 @@ jobs:
             .github/scripts/lib-post-review-with-retry.sh
             .github/scripts/review-gate.sh
             .github/scripts/lib/reviewer-login.bash
+            .github/reviewer/lib/pr-reviews.bash
             .github/reviewer/lib/review-threads.bash
             .github/reviewer/lib-ci-retry.sh
             config/review-severities.json

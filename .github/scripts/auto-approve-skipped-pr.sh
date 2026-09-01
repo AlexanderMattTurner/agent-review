@@ -21,11 +21,20 @@ set -euo pipefail
 
 # shellcheck source=.github/scripts/lib-post-review-with-retry.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib-post-review-with-retry.sh"
+# AUTO_APPROVAL_MARKER, so the string this review is recognized by has one
+# definition shared with the read that recognizes it.
+# shellcheck source=.github/reviewer/lib/pr-reviews.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../reviewer/lib" && pwd)/pr-reviews.bash"
 
 : "${PR:?PR number required}"
 : "${GH_REPO:?GH_REPO required}"
 
-BODY="Automated approval: this PR type isn't Claude-reviewed (low-risk change or bot-authored), so it's approved here to satisfy a review-required ruleset. Add the \`needs-auto-review\` label to have Claude review it anyway."
+# The marker is what keeps this approval from spending the PR's one whole-diff
+# read: without it the reviewer's own decide step reads this back as "already
+# reviewed", and the `needs-auto-review` label below buys a run that reviews
+# nothing.
+BODY="${AUTO_APPROVAL_MARKER}
+Automated approval: this PR type isn't Claude-reviewed (bot-authored), so it's approved here to satisfy a review-required ruleset. Add the \`needs-auto-review\` label to have Claude review it anyway."
 
 payload="$(mktemp)"
 fallback="$(mktemp)"

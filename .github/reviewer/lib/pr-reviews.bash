@@ -64,13 +64,29 @@ reviewer_reviews_ndjson() {
              reviewedSha: (.commit.oid // "")}'
 }
 
+# The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
+# body. It is the SSOT for that string: the producer sources this file for it, and
+# `latest_reviewer_review` below drops any review carrying it.
+#
+# An HTML comment, so GitHub renders nothing and a human reading the review sees the
+# prose alone.
+AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
+
 # latest_reviewer_review <owner> <name> <pr>
 #
-# The reviewer's most recent review as a single JSON object {state, body,
+# The reviewer's most recent REAL review as a single JSON object {state, body,
 # submittedAt, reviewId, reviewedSha} on stdout — or NOTHING at all when the
-# reviewer never reviewed this PR, which the caller distinguishes with
-# `[[ -n … ]]` (an empty body is a reviewed-with-no-prose review, a different
-# thing).
+# reviewer never actually read this PR, which the caller distinguishes with
+# `[[ -n … ]]`.
+#
+# The stand-in approval is excluded HERE, because both consumers ask the same
+# question: has the one whole-diff read been spent? That approval is posted by a job
+# that skipped the read, under the reviewer's identity because it posts with
+# GITHUB_TOKEN. Counted as a review it latches the PR permanently unread — the
+# `needs-auto-review` label then buys a run whose own decide answers "already
+# reviewed", and a PR that leaves the skip class never gets its first pass.
+# `reviewer_reviews_ndjson` above keeps counting it: the review-findings gate asks
+# whether a review EXISTS for the ruleset, and the stand-in is exactly that.
 #
 # The per-page --jq emits the reviewer's reviews as NDJSON and the slurp picks the
 # globally latest by submittedAt — the fold has to span pages, because gh emits
@@ -78,5 +94,7 @@ reviewer_reviews_ndjson() {
 # Non-zero only once the retry ladder is exhausted.
 latest_reviewer_review() {
   reviewer_reviews_ndjson "$@" |
-    jq -rs 'if length == 0 then empty else (sort_by(.submittedAt) | last) end'
+    jq -rs --arg marker "$AUTO_APPROVAL_MARKER" \
+      'map(select((.body // "") | contains($marker) | not))
+       | if length == 0 then empty else (sort_by(.submittedAt) | last) end'
 }
