@@ -44,7 +44,7 @@ GRAPHQL
 #
 # Empty-body reviews are excluded HERE, in the one shared read: GitHub synthesizes a
 # body-less COMMENTED review around every standalone review-comment POST, and counting one
-# as a review both spends the one-review-per-PR budget and satisfies the review-findings
+# as a review both spends a read from this PR's budget and satisfies the review-findings
 # gate's reviewed-at-all condition vacuously. The real reviewer never posts an empty body.
 #
 # reviewId is fullDatabaseId AS A STRING ("" when GitHub omits it), not databaseId: review

@@ -77,7 +77,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 
 ## Budget
 
-Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. A later push is not re-read once they are spent, because the threads the first read opened are what hold the merge. Two things buy a read past the budget: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Both are somebody asking for this pull request to be read, so `max-reviews-per-pr: 0` still leaves them working while no push starts a review on its own.
+Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. A later push is not re-read once they are spent, because the threads the first read opened are what hold the merge. Two things buy a read past the budget: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Both are somebody asking for this pull request to be read, so `max-reviews-per-pr: 0` still leaves them working while no push starts a review on its own. Do not pair `0` with the review-findings gate: that gate holds the merge until a review exists, and it takes only `pending` or `failure` for a pull request with none, so every pull request would stay blocked until somebody added the label.
 
 ## What the reviewer never does
 
