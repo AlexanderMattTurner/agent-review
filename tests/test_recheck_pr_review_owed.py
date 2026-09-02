@@ -1,7 +1,7 @@
 """Behavioral tests for .github/reviewer/recheck-pr-review-owed.sh — the second
 look the review job takes, inside its concurrency group, before spending a
 whole-diff read. Fail direction: an unanswerable query emits skip=false, because
-losing a possibly-unreviewed PR's only read is worse than one duplicate."""
+losing a read a possibly-unreviewed PR still owes is worse than one duplicate."""
 
 import json
 import subprocess
@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT, workflow_jobs
+from tests._helpers import REPO_ROOT, reviewer_marker, workflow_jobs
+
+#: What makes a fixture review count against MAX_REVIEWS_PER_PR.
+READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "recheck-pr-review-owed.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
@@ -20,28 +23,28 @@ OWN_RUN_ID = 111
 def _run(
     tmp_path: Path,
     *,
-    review_state: str = "",
+    review_states: tuple[str, ...] = (),
     runs: list[dict] | None = None,
     jobs: list[dict] | None = None,
     fail: bool = False,
     fail_runs: bool = False,
     fail_jobs: bool = False,
+    max_reviews: str = "1",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Drive the REAL script with a `gh` stub answering the shared reviews query
-    with one NDJSON node (nothing when the state is empty — how "never reviewed"
-    reaches the script), the workflow-runs listing with `runs`, and every
-    per-run jobs listing with `jobs` (the script's own jq does the filtering).
-    Returns (proc, skip, argv)."""
+    with one NDJSON node per entry in `review_states`, oldest first (nothing at
+    all for an empty tuple — how "never reviewed" reaches the script), the
+    workflow-runs listing with `runs`, and every per-run jobs listing with `jobs`
+    (the script's own jq does the filtering). The number of entries is what the
+    script compares against MAX_REVIEWS_PER_PR. Returns (proc, skip, argv)."""
     gh = tmp_path / "gh"
-    node = (
-        ""
-        if not review_state
-        else (
-            "printf '"
-            f'{{"state":"{review_state}","body":"Automated review.",'
-            '"submittedAt":"2024-01-01T00:00:00Z","reviewId":"1","reviewedSha":"c0ffee"}'
-            "\\n'"
-        )
+    nodes = "".join(
+        "printf '"
+        f'{{"state":"{state}","body":"read {n} {READ_MARKER}",'
+        f'"submittedAt":"2024-01-{n + 1:02d}T00:00:00Z",'
+        f'"reviewId":"{n + 1}","reviewedSha":"c0ffee"}}'
+        "\\n' ; "
+        for n, state in enumerate(review_states)
     )
     runs_arm = "exit 7" if fail_runs else 'cat "$RUNS_JSON_FILE"'
     jobs_arm = "exit 7" if fail_jobs else 'cat "$JOBS_JSON_FILE"'
@@ -51,7 +54,7 @@ def _run(
             "exit 7\n"
             if fail
             else (
-                f'case "$*" in\n*graphql*) {node} ;;\n'
+                f'case "$*" in\n*graphql*) {nodes} ;;\n'
                 f"*/jobs*) {jobs_arm} ;;\n"
                 f"*actions/workflows*) {runs_arm} ;;\n*) ;;\nesac\n"
             )
@@ -87,6 +90,9 @@ def _run(
             # Only the delay is test-tuned, so the fail cases still exercise the
             # real "ladder exhausted" path.
             "RETRY_BASE_DELAY": "0",
+            # The script takes no default of its own — review.yaml's input owns
+            # the number — so every run names one.
+            "MAX_REVIEWS_PER_PR": max_reviews,
         },
     )
     skips = [
@@ -106,7 +112,7 @@ def test_a_review_that_landed_while_we_queued_cancels_the_read(
 ) -> None:
     """Any submitted state counts — the budget is one whole-diff read, not one
     of a particular verdict (DISMISSED is spent too, matching decide)."""
-    proc, skip, argv = _run(tmp_path, review_state=state)
+    proc, skip, argv = _run(tmp_path, review_states=(state,))
     assert proc.returncode == 0, proc.stderr
     assert skip == "true"
     assert "--paginate" in argv, "a PR can have more reviews than one page holds"
@@ -118,6 +124,70 @@ def test_still_unreviewed_runs_the_first_pass(tmp_path: Path) -> None:
     proc, skip, _ = _run(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
+
+
+def test_a_higher_budget_still_owes_a_read_after_one_landed(tmp_path: Path) -> None:
+    """This script must count the same way decide does. Reading "some review
+    exists" instead would cancel a read decide had just approved, and the PR
+    would go unreviewed with decide and the review job both green."""
+    proc, skip, _ = _run(tmp_path, review_states=("COMMENTED",), max_reviews="2")
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "false"
+
+
+def test_the_budget_cancels_the_read_once_every_one_is_spent(tmp_path: Path) -> None:
+    """The other side of the same count: two reads against a budget of two means
+    the reviews that landed while this run queued spent the whole budget."""
+    proc, skip, _ = _run(
+        tmp_path, review_states=("COMMENTED", "APPROVED"), max_reviews="2"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "true"
+
+
+def test_the_budget_must_be_passed_in(tmp_path: Path) -> None:
+    """No default here either: review.yaml's input owns the number, and a
+    default in this script could disagree with decide's on the same event."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        # Everything else the script requires, so the budget is the only thing
+        # missing and its own refusal is what this asserts.
+        env={
+            "PATH": "/usr/bin:/bin",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "GITHUB_RUN_ID": str(OWN_RUN_ID),
+            "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/review.yaml@main",
+        },
+    )
+    assert proc.returncode != 0
+    assert "MAX_REVIEWS_PER_PR required" in proc.stderr, proc.stderr
+
+
+def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
+    tmp_path: Path,
+) -> None:
+    """`[[ -ge ]]` evaluates arithmetically, and bash reads `08` as octal with an
+    invalid digit: the comparison errors and answers false, so this script would
+    review while decide, whose comparison runs the other way, would not. Both
+    read the budget through one helper so one refusal covers both."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "GITHUB_RUN_ID": str(OWN_RUN_ID),
+            "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/review.yaml@main",
+            "MAX_REVIEWS_PER_PR": "08",
+        },
+    )
+    assert proc.returncode != 0
+    assert "no leading zero" in proc.stderr, proc.stderr
 
 
 SHARD_JOB = {"name": "Claude PR review (shard 2)", "status": "in_progress"}
@@ -148,6 +218,38 @@ def test_an_in_flight_earlier_run_counts_as_the_review(
     assert "actions/runs/99/jobs" in argv, (
         "run granularity is not enough — only a live sharded-review JOB is the read"
     )
+
+
+def test_a_read_in_flight_stops_this_one_only_when_it_fills_the_budget(
+    tmp_path: Path,
+) -> None:
+    """One read spent and one generating is two of a budget of three, so a third
+    is still owed and THIS event is what buys it. Treating any live read as a
+    stop would drop the event and leave that read with nothing to trigger it."""
+    proc, skip, _ = _run(
+        tmp_path,
+        review_states=("COMMENTED",),
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[SHARD_JOB],
+        max_reviews="3",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "false"
+
+
+def test_a_read_in_flight_plus_a_spent_one_fills_a_budget_of_two(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same sum: at a budget of two those same two reads
+    are the whole budget, so this run must yield rather than buy a third."""
+    _, skip, _ = _run(
+        tmp_path,
+        review_states=("COMMENTED",),
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[SHARD_JOB],
+        max_reviews="2",
+    )
+    assert skip == "true"
 
 
 # What GitHub actually names these jobs once a consumer calls the reviewer as a
@@ -249,7 +351,7 @@ def test_our_own_run_and_other_prs_runs_do_not_count(tmp_path: Path) -> None:
 def test_an_unreadable_query_still_reviews(tmp_path: Path, kwargs: dict) -> None:
     """Both queries fail toward reviewing — the OPPOSITE of decide's fail-safe:
     the spend is already decided, and an API blip that skipped here would cost a
-    possibly review-less PR its only read."""
+    possibly review-less PR a read it still owes."""
     proc, skip, _ = _run(tmp_path, **kwargs)
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
@@ -282,7 +384,12 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
     )
     steps = _review_job()["steps"]
     recheck = next(s for s in steps if s.get("id") == "recheck")
-    assert recheck["if"] == "needs.decide.outputs.recheck == 'true'"
+    assert recheck["if"] == "needs.decide.outputs.recheck == 'true'", (
+        "only decide's budget arm may reach the re-check: that script judges the "
+        "budget alone and answers skip=true whenever the spent reads fill it, so a "
+        "condition widened to the keyword or the label arm would cancel exactly the "
+        "two reads that fire whatever the count says"
+    )
     gated = {
         s.get("id") or str(s.get("uses", "")).split("@")[0]
         for s in steps

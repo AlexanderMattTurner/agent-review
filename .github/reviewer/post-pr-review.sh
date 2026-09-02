@@ -27,6 +27,11 @@ set -euo pipefail
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.github/reviewer/lib/review-threads.bash
 source "$_SCRIPT_DIR/lib/review-threads.bash"
+# WHOLE_DIFF_READ_MARKER — stamped on the summary review below. It is what makes this
+# read spend the PR's budget; an unstamped review counts for nothing, so a crash before
+# the summary leaves the read unrecorded and the next push buys it again.
+# shellcheck source=.github/reviewer/lib/pr-reviews.bash
+source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its threads are authored by this bot, and
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.
@@ -212,7 +217,7 @@ post_review_comment_by_comment() {
   local body
   body="$(mktemp)"
   {
-    printf '%s\n\n' "$DEGRADED_REVIEW_MARKER"
+    printf '%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$WHOLE_DIFF_READ_MARKER"
     printf '<sub>GitHub refused this review as one payload, so %d of its %d findings were posted as individual comments.</sub>\n\n' "$((total - failed))" "$total"
     cat "${PR_INPUT_DIR}/review-summary.txt"
   } >"$body"
@@ -235,10 +240,17 @@ if [[ "$status" != "PAYLOAD" ]]; then
   exit 0
 fi
 
+# The read marker goes on the payload's own summary body, so the ONE post that records
+# this read is the one that carries it. jq rather than a rebuild: every other field, and
+# every comment, rides through untouched with the type the payload gave it.
+stamped_payload="$(mktemp)"
+jq --arg marker "$WHOLE_DIFF_READ_MARKER" '.body = ((.body // "") + "\n\n" + $marker)' \
+  "${PR_INPUT_DIR}/review-payload.json" >"$stamped_payload"
+
 api_err="$(mktemp)"
-trap 'rm -f "$api_err"' EXIT
+trap 'rm -f "$api_err" "$stamped_payload"' EXIT
 if gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
-  --input "${PR_INPUT_DIR}/review-payload.json" >/dev/null 2>"$api_err"; then
+  --input "$stamped_payload" >/dev/null 2>"$api_err"; then
   echo "posted structured review with inline comments" >&2
   exit 0
 fi

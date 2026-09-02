@@ -35,7 +35,7 @@ on:
         default: ""
         type: string
       model:
-        description: "The model behind every verdict. One whole-diff read gates the merge, so this is not a place to economize."
+        description: "The model behind every verdict. A PR gets few whole-diff reads and they gate the merge, so this is not a place to economize."
         required: false
         default: "claude-opus-5"
         type: string
@@ -49,6 +49,11 @@ on:
         required: false
         default: "needs-auto-review"
         type: string
+      max-reviews-per-pr:
+        description: "How many whole-diff reads one pull request may spend, across its whole life, from 0 to 999. A run that finds the diff too large to read spends one too — it still paid for the job, and counting it is what stops an oversized pull request re-running on every push. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
+        required: false
+        default: 1
+        type: number
       setup-command:
         description: "Command run in the caller's base checkout before the model call — a dependency sync a later step needs (the log redactor's interpreter, for one). Empty runs nothing."
         required: false
@@ -137,17 +142,17 @@ jobs:
   # draft state — so a bot-authored or machine-cut release PR gets a genuine read
   # rather than an unread rubber-stamp. The script then decides `opened` (always —
   # GitHub fires it once per PR) against `ready_for_review` and `synchronize`,
-  # which both repeat without limit and so review only when the PR's ONE
-  # whole-diff read is still owed, or when the [opus-review] head-commit opt-in
-  # buys another.
+  # which both repeat without limit and so review only while the PR has spent
+  # fewer than `max-reviews-per-pr` reads, or when the [opus-review] head-commit
+  # opt-in buys another.
   decide:
     name: Decide whether to review
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      # Reads the reviews already on the PR, which is what tells the script
-      # whether the one whole-diff read is still owed.
+      # Reads the reviews already on the PR, which is what tells the script how
+      # many of the automatic reads this PR has already spent.
       pull-requests: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
@@ -195,6 +200,7 @@ jobs:
           # lists it, and only this label answers true.
           LABEL: ${{ github.event.label.name }}
           REVIEW_LABEL: ${{ inputs.review-label }}
+          MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
         run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
 
   review:
@@ -267,6 +273,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
         run: bash "${REVIEWER_DIR}/recheck-pr-review-owed.sh"
 
       - name: Set up Node and the input sanitizer
