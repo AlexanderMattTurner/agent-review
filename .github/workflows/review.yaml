@@ -35,7 +35,7 @@ on:
         default: ""
         type: string
       model:
-        description: "The model behind every verdict. One whole-diff read gates the merge, so this is not a place to economize."
+        description: "The model behind every verdict. A PR gets few whole-diff reads and they gate the merge, so this is not a place to economize."
         required: false
         default: "claude-opus-5"
         type: string
@@ -50,7 +50,7 @@ on:
         default: "needs-auto-review"
         type: string
       max-reviews-per-pr:
-        description: "How many whole-diff reads the AUTOMATIC arms may spend on one pull request, across its whole life. The `[opus-review]` head-commit opt-in and the review label sit ABOVE this number: each is an explicit request for one more read. 0 leaves a pull request with no automatic read at all, so only those two arms review it."
+        description: "How many whole-diff reads one pull request may spend, across its whole life. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
         required: false
         default: 1
         type: number

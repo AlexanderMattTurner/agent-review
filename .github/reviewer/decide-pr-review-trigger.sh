@@ -37,27 +37,18 @@ KEYWORD="[opus-review]"
 # empty name matches the empty LABEL every other event carries.
 REVIEW_LABEL="${REVIEW_LABEL:-needs-auto-review}"
 LABEL="${LABEL:-}"
-# How many whole-diff reads this PR may spend on the AUTOMATIC arms. The
-# `[opus-review]` head-commit opt-in and the review label sit above it: each is
-# an explicit request for one more read, the way the label already sits above
-# every automatic arm. A caller that wants no automatic read at all passes 0.
-#
-# REQUIRED, with no default here: review.yaml's `max-reviews-per-pr` input owns
-# the number, and a second default in this file is a copy that drifts. Validated
-# rather than compared raw, because `[[ -lt ]]` reads an unreadable value as 0 —
-# so a typo would silently review forever, or never.
-MAX_REVIEWS_PER_PR="${MAX_REVIEWS_PER_PR:?MAX_REVIEWS_PER_PR required — review.yaml passes its max-reviews-per-pr input}"
-[[ "$MAX_REVIEWS_PER_PR" =~ ^[0-9]+$ ]] ||
-  {
-    echo "max-reviews-per-pr must be a whole number, not '$MAX_REVIEWS_PER_PR'" >&2
-    exit 1
-  }
 REVIEWER="github-actions[bot]"                   # posts with GITHUB_TOKEN, so every review from this bot is one whole-diff read of this PR
 export REVIEWER_LOGIN_BARE="${REVIEWER%'[bot]'}" # bare, since GraphQL omits the REST `[bot]` suffix
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.github/reviewer/lib/pr-reviews.bash
 source "$_SCRIPT_DIR/lib/pr-reviews.bash"
+# How many whole-diff reads this PR may spend on the AUTOMATIC arms. The
+# `[opus-review]` head-commit opt-in and the review label are not BOUNDED by it —
+# each fires whatever the count says — but a read either one posts still counts,
+# because the number bounds what one PR costs. A caller that wants no automatic
+# read at all passes 0.
+require_review_budget
 REPO="${REPO:?REPO (owner/name) required}"
 owner="${REPO%%/*}"
 name="${REPO##*/}"
@@ -122,6 +113,13 @@ if [[ "$ACTION" == "synchronize" ]]; then
   fi
 fi
 
+# A budget of 0 is decided by the constant alone, so this arm pays no paginated read
+# either — the same short-circuit the `opened` arm takes for the same reason.
+if [[ "$MAX_REVIEWS_PER_PR" -eq 0 ]]; then
+  emit false "max-reviews-per-pr is 0, so no automatic review runs on this PR"
+  exit 0
+fi
+
 # Consumed only by trigger 2, and run AFTER trigger 1 so a tagged push pays no paginated
 # GraphQL read it never uses. The exit STATUS is captured separately from the state, because
 # the two empty results mean opposite things: a successful "" is the strongest reason to
@@ -130,14 +128,12 @@ fi
 # "never reviewed" and review forever. The shared library owns the pagination and the
 # latest-by-`submittedAt` fold, so this is one call and not a page walk written twice.
 reviews_rc=0
+count=0
 spent="$(real_reviewer_reviews "$owner" "$name" "${PR:-}" 2>/dev/null)" || reviews_rc=$?
-# One walk answers both questions: how many reads are spent, and what the last
-# one said. `grep -c` would count the empty string as a line, so the count comes
-# from jq's own slurp over the same NDJSON the fold reads.
-count="$(jq -rs 'length' <<<"$spent")"
-latest="$(latest_of_reviews <<<"$spent")"
-state="$(jq -r '.state // ""' <<<"$latest")"
-reviewed_sha="$(jq -r '.reviewedSha // ""' <<<"$latest")"
+# Folded inside the same status capture: a jq failure here means the count is as
+# unknown as a failed walk, and left outside it `set -e` would abort before either
+# branch below wrote a decision.
+[[ "$reviews_rc" -ne 0 ]] || count="$(jq -rs 'length' <<<"$spent")" || reviews_rc=$?
 
 # Trigger 2: any state — APPROVED, DISMISSED, or a still-live CHANGES_REQUESTED / COMMENTED —
 # means the reviewer looked, so it spends one of the budgeted reads; past the budget only
@@ -152,5 +148,10 @@ elif [[ "$count" -lt "$MAX_REVIEWS_PER_PR" ]]; then
   # otherwise buy a second whole-diff read of the same head.
   emit true "$REVIEWER has spent $count of $MAX_REVIEWS_PER_PR read(s) on this PR — running one on this $ACTION" true
 else
+  # The latest verdict is read HERE alone, off the walk already in hand, because
+  # only this message names it.
+  latest="$(latest_of_reviews <<<"$spent")"
+  state="$(jq -r '.state // ""' <<<"$latest")"
+  reviewed_sha="$(jq -r '.reviewedSha // ""' <<<"$latest")"
   emit false "$REVIEWER has spent all $MAX_REVIEWS_PER_PR read(s) on this PR (latest: $state, at ${reviewed_sha:-an unrecorded commit}) — a $ACTION is not re-read; push a commit titled $KEYWORD for a full re-read"
 fi

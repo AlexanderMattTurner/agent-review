@@ -29,15 +29,9 @@ WORKFLOW_FILE="${WORKFLOW_FILE%%@*}"
 WORKFLOW_FILE="${WORKFLOW_FILE##*/}"
 # GraphQL omits the REST `[bot]` suffix; the shared read's jq reads this from env.
 export REVIEWER_LOGIN_BARE="github-actions"
-# The same cap decide-pr-review-trigger.sh reads, from the same review.yaml
-# input, so the two cannot disagree about whether this PR still owes a read.
-# Required rather than defaulted, for the reason that script's own read gives.
-MAX_REVIEWS_PER_PR="${MAX_REVIEWS_PER_PR:?MAX_REVIEWS_PER_PR required — review.yaml passes its max-reviews-per-pr input}"
-[[ "$MAX_REVIEWS_PER_PR" =~ ^[0-9]+$ ]] ||
-  {
-    echo "max-reviews-per-pr must be a whole number, not '$MAX_REVIEWS_PER_PR'" >&2
-    exit 1
-  }
+# The same budget decide-pr-review-trigger.sh reads, through the same helper, so
+# the two cannot disagree about whether this PR still owes a read.
+require_review_budget
 
 emit() {
   # $1 skip, $2 reason
@@ -46,16 +40,19 @@ emit() {
 }
 
 reviews_rc=0
+count=0
 spent="$(real_reviewer_reviews "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
-count="$(jq -rs 'length' <<<"$spent")"
-state="$(latest_of_reviews <<<"$spent" | jq -r '.state // ""')"
+# Folded into the same status capture, for the reason decide's own read gives: a
+# jq failure leaves the count as unknown as a failed walk does.
+[[ "$reviews_rc" -ne 0 ]] || count="$(jq -rs 'length' <<<"$spent")" || reviews_rc=$?
 if [[ "$reviews_rc" -ne 0 ]]; then
   emit false "could not read $REPO#$PR reviews (exhausted the retry ladder, rc=$reviews_rc) — reviewing rather than risking the PR's only read"
   exit 0
 fi
 if [[ "$count" -ge "$MAX_REVIEWS_PER_PR" ]]; then
   # Any state — including DISMISSED — counts as spent, matching decide's trigger 2.
-  emit true "a review landed while this run waited for the concurrency slot (latest: $state) — all $MAX_REVIEWS_PER_PR read(s) are spent"
+  state="$(latest_of_reviews <<<"$spent" | jq -r '.state // ""')"
+  emit true "$REPO#$PR has spent all $MAX_REVIEWS_PER_PR read(s) (latest: $state) — this run buys none"
   exit 0
 fi
 
@@ -113,8 +110,11 @@ while IFS= read -r run; do
   if _sharded_review_live "$run"; then inflight=$((inflight + 1)); fi
 done <<<"$candidates"
 
-if [[ "$inflight" -gt 0 ]]; then
-  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — its review is this event's whole-diff read"
+# A read in flight only cancels this one once it fills the budget. Counting it as
+# a stop whatever the budget says would drop this event at a budget of 3 with one
+# read spent and one generating, leaving the third owed and no event to buy it.
+if [[ $((count + inflight)) -ge "$MAX_REVIEWS_PER_PR" ]]; then
+  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — those fill the $MAX_REVIEWS_PER_PR read(s) this PR may spend"
 else
-  emit false "$REPO#$PR has spent $count of $MAX_REVIEWS_PER_PR read(s) and nothing is in flight — running this one"
+  emit false "$REPO#$PR has spent $count of $MAX_REVIEWS_PER_PR read(s), with $inflight in flight — running this one"
 fi

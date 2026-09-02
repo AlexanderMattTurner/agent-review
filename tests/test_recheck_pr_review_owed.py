@@ -163,6 +163,30 @@ def test_the_budget_must_be_passed_in(tmp_path: Path) -> None:
     assert "MAX_REVIEWS_PER_PR required" in proc.stderr, proc.stderr
 
 
+def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
+    tmp_path: Path,
+) -> None:
+    """`[[ -ge ]]` evaluates arithmetically, and bash reads `08` as octal with an
+    invalid digit: the comparison errors and answers false, so this script would
+    review while decide, whose comparison runs the other way, would not. Both
+    read the budget through one helper so one refusal covers both."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "GITHUB_RUN_ID": str(OWN_RUN_ID),
+            "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/review.yaml@main",
+            "MAX_REVIEWS_PER_PR": "08",
+        },
+    )
+    assert proc.returncode != 0
+    assert "no leading zero" in proc.stderr, proc.stderr
+
+
 SHARD_JOB = {"name": "Claude PR review (shard 2)", "status": "in_progress"}
 SYNTHESIS_JOB = {"name": "Post the sharded PR review", "status": "queued"}
 # The umbrella's other long leg. A run reduced to this alone has already lost
@@ -191,6 +215,38 @@ def test_an_in_flight_earlier_run_counts_as_the_review(
     assert "actions/runs/99/jobs" in argv, (
         "run granularity is not enough — only a live sharded-review JOB is the read"
     )
+
+
+def test_a_read_in_flight_stops_this_one_only_when_it_fills_the_budget(
+    tmp_path: Path,
+) -> None:
+    """One read spent and one generating is two of a budget of three, so a third
+    is still owed and THIS event is what buys it. Treating any live read as a
+    stop would drop the event and leave that read with nothing to trigger it."""
+    proc, skip, _ = _run(
+        tmp_path,
+        review_states=("COMMENTED",),
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[SHARD_JOB],
+        max_reviews="3",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "false"
+
+
+def test_a_read_in_flight_plus_a_spent_one_fills_a_budget_of_two(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same sum: at a budget of two those same two reads
+    are the whole budget, so this run must yield rather than buy a third."""
+    _, skip, _ = _run(
+        tmp_path,
+        review_states=("COMMENTED",),
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[SHARD_JOB],
+        max_reviews="2",
+    )
+    assert skip == "true"
 
 
 # What GitHub actually names these jobs once a consumer calls the reviewer as a

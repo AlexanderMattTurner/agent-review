@@ -7,21 +7,23 @@ Contract:
     state at all. The ready-PR cap drafts most PRs within seconds of `opened`, so
     a reviewer that waited for `ready_for_review` would give its feedback only
     once the work was finished.
-  * opened -> always run (its first review). GitHub fires this action exactly
-    once per pull request, which is what makes an unconditional arm here safe.
+  * opened -> run whenever the budget is at least 1 (its first review). GitHub
+    fires this action exactly once per pull request, so no review can exist yet
+    and the count is 0 by construction — the arm reads the budget, never the API.
   * ready_for_review / synchronize -> run when EITHER
       1. the event is a `synchronize` AND the head commit's TITLE (subject line,
          not body) carries the "[opus-review]" opt-in (matched
          case-insensitively) -> a full re-read. A `ready_for_review` never opts
          in: a toggle carries no new commit, so honoring it would buy one read
          per toggle off a single tagged head; or
-      2. the reviewer bot has left NO review at all — the first pass never
-         produced one, so this event is it.
-    A PR gets ONE automated review. Any existing verdict — APPROVED, DISMISSED,
-    or a still-outstanding CHANGES_REQUESTED or COMMENTED — means the read is
-    spent, and no repeatable event buys another; only the [opus-review] opt-in
-    does. Both `ready_for_review` and `synchronize` can fire without limit on one
-    PR, so an unconditional arm on either costs a whole-diff Opus read per fire.
+      2. the reviewer bot has spent FEWER reads than `max-reviews-per-pr`, which
+         is 1 by default — so the first pass re-arms when `opened` produced no
+         review, and a higher budget buys the next read on the next push.
+    Any verdict — APPROVED, DISMISSED, or a still-outstanding CHANGES_REQUESTED
+    or COMMENTED — spends one read; past the budget no repeatable event buys
+    another, and only the [opus-review] opt-in and the review label do. Both
+    `ready_for_review` and `synchronize` can fire without limit on one PR, so an
+    unconditional arm on either costs a whole-diff Opus read per fire.
   * the base branch never decides anything: a PR based on a feature branch is
     reviewed exactly like one based on the default branch. Enforcement matches —
     a second ruleset requires the same checks over `claude/**` — so a merged
@@ -718,6 +720,19 @@ def test_an_empty_body_bot_review_still_owes_the_first_pass(tmp_path: Path) -> N
     assert "spent 0 of 1 read(s)" in decision, decision
 
 
+def test_a_higher_budget_counts_real_reviews_across_pages(tmp_path: Path) -> None:
+    """The count runs through the library's OWN per-page --jq, one page at a
+    time, so a fold that counted within a page would answer 1 here and buy a
+    third read the budget of two does not cover."""
+    run, decision = _run_real_jq(
+        tmp_path,
+        reviews_pages=[[_bot_review("COMMENTED")], [_bot_review("APPROVED")]],
+        max_reviews="2",
+    )
+    assert run == "false", "two reads against a budget of two is spent"
+    assert "spent all 2 read(s)" in decision, decision
+
+
 def test_only_other_peoples_reviews_still_owes_the_first_pass(tmp_path: Path) -> None:
     """The login filter is load-bearing in the other direction: a PR reviewed only
     by humans has had no automated pass, so trigger 2 must still fire."""
@@ -804,6 +819,32 @@ def test_an_unreadable_budget_is_refused_rather_than_compared(tmp_path: Path) ->
     )
     assert proc.returncode != 0
     assert "must be a whole number" in proc.stderr, proc.stderr
+
+
+def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
+    tmp_path: Path,
+) -> None:
+    """`^[0-9]+$` admits `08`, and bash then reads it as octal with an invalid
+    digit: `[[ -lt ]]` errors and answers FALSE, so this script silently reviews
+    nothing while the re-check, comparing the other way, reviews everything."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "MAX_REVIEWS_PER_PR": "08"},
+    )
+    assert proc.returncode != 0
+    assert "no leading zero" in proc.stderr, proc.stderr
+
+
+def test_a_zero_budget_decides_a_push_without_reading_the_reviews(
+    tmp_path: Path,
+) -> None:
+    """A budget of 0 is decided by the constant, so a push spends no paginated
+    GraphQL walk to reach an answer that cannot depend on it."""
+    _, run, argv = _run(tmp_path, "synchronize", max_reviews="0")
+    assert run == "false"
+    assert "graphql" not in argv, argv
 
 
 def test_the_budget_must_be_passed_in(tmp_path: Path) -> None:

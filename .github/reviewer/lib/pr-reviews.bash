@@ -92,6 +92,23 @@ real_reviewer_reviews() {
       'select((.body // "") | contains($marker) | not)'
 }
 
+# require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.
+# REQUIRED, with no default: review.yaml's `max-reviews-per-pr` input owns the
+# number, and a per-script default is a copy that drifts out of sight of the
+# caller. Both consumers call this, so neither can read the value the other's
+# rejects.
+#
+# The pattern refuses a LEADING ZERO, which `^[0-9]+$` admits: `[[ -lt ]]` reads
+# `08` as octal, errors on the invalid digit, and evaluates FALSE. Off that one
+# value decide would never review and the recheck always would.
+require_review_budget() {
+  MAX_REVIEWS_PER_PR="${MAX_REVIEWS_PER_PR:?MAX_REVIEWS_PER_PR required — review.yaml passes its max-reviews-per-pr input}"
+  [[ "$MAX_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    echo "max-reviews-per-pr must be a whole number with no leading zero, not '$MAX_REVIEWS_PER_PR'" >&2
+    exit 1
+  }
+}
+
 # latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON
 # object, or NOTHING when there are none, which a caller reads with `[[ -n … ]]`.
 #
