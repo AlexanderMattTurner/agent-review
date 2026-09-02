@@ -127,9 +127,13 @@ def test_both_post_paths_stamp_the_review_that_records_the_read(tmp_path):
     push buys the whole read again — the same defect the degraded path closes, by
     another route. Both paths post exactly one review, and it is the one stamped."""
     for refuse in (False, True):
-        with FakeReviewPoster(tmp_path / f"refuse-{refuse}") as github:
+        server_dir = tmp_path / f"refuse-{refuse}"
+        input_dir = tmp_path / f"in-{refuse}"
+        server_dir.mkdir()
+        input_dir.mkdir()
+        with FakeReviewPoster(server_dir) as github:
             github.refuse_structured = refuse
-            proc = _run(github, _pr_input(tmp_path / f"in-{refuse}"))
+            proc = _run(github, _pr_input(input_dir))
             assert proc.returncode == 0, proc.stderr
             reviews = github.of_kind("review")
             assert len(reviews) == 1
