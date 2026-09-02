@@ -49,6 +49,9 @@ source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 # because the number bounds what one PR costs. A caller that wants no automatic
 # read at all passes 0.
 require_review_budget
+# Written once: both arms that short-circuit on a budget of 0 say the same thing,
+# and a reader greps the decision line to find where it was made.
+NO_BUDGET="max-reviews-per-pr is 0, so no automatic review runs on this PR"
 REPO="${REPO:?REPO (owner/name) required}"
 owner="${REPO%%/*}"
 name="${REPO##*/}"
@@ -67,7 +70,7 @@ opened)
   # GitHub fires `opened` exactly once per PR, so no review can exist yet and the
   # count is 0 by construction — the cap is read here, never the review list.
   if [[ "$MAX_REVIEWS_PER_PR" -eq 0 ]]; then
-    emit false "max-reviews-per-pr is 0, so no automatic review runs on this PR"
+    emit false "$NO_BUDGET"
   else
     emit true "first review on opened"
   fi
@@ -116,7 +119,7 @@ fi
 # A budget of 0 is decided by the constant alone, so this arm pays no paginated read
 # either — the same short-circuit the `opened` arm takes for the same reason.
 if [[ "$MAX_REVIEWS_PER_PR" -eq 0 ]]; then
-  emit false "max-reviews-per-pr is 0, so no automatic review runs on this PR"
+  emit false "$NO_BUDGET"
   exit 0
 fi
 

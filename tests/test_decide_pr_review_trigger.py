@@ -722,8 +722,9 @@ def test_an_empty_body_bot_review_still_owes_the_first_pass(tmp_path: Path) -> N
 
 def test_a_higher_budget_counts_real_reviews_across_pages(tmp_path: Path) -> None:
     """The count runs through the library's OWN per-page --jq, one page at a
-    time, so a fold that counted within a page would answer 1 here and buy a
-    third read the budget of two does not cover."""
+    time, against real jq rather than the stub the other budget cases use. The
+    per-page fold it guards against could only live inside that --jq, so this
+    case adds the real-jq path, not a comparison the stub cases miss."""
     run, decision = _run_real_jq(
         tmp_path,
         reviews_pages=[[_bot_review("COMMENTED")], [_bot_review("APPROVED")]],
@@ -837,11 +838,27 @@ def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
     assert "no leading zero" in proc.stderr, proc.stderr
 
 
+def test_a_budget_past_the_arithmetic_range_is_refused(tmp_path: Path) -> None:
+    """Bash arithmetic is 64-bit and WRAPS: `[[ 0 -lt 9223372036854775808 ]]` is
+    false, so a budget past that range would review nothing while decide stayed
+    green. The refusal is what keeps every admitted value comparable."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "MAX_REVIEWS_PER_PR": "9223372036854775808"},
+    )
+    assert proc.returncode != 0
+    assert "from 0 to 999" in proc.stderr, proc.stderr
+
+
 def test_a_zero_budget_decides_a_push_without_reading_the_reviews(
     tmp_path: Path,
 ) -> None:
     """A budget of 0 is decided by the constant, so a push spends no paginated
-    GraphQL walk to reach an answer that cannot depend on it."""
+    GraphQL walk to reach an answer that cannot depend on it. The absent walk is
+    what this test pins: `run == "false"` also holds with the short-circuit gone,
+    because a count of 0 is not less than a budget of 0."""
     _, run, argv = _run(tmp_path, "synchronize", max_reviews="0")
     assert run == "false"
     assert "graphql" not in argv, argv

@@ -10,7 +10,14 @@
 # races the sharded path, and an earlier run of this workflow with a live
 # shard/synthesis job on this PR also counts as a read being spent — that job, not
 # the umbrella run around it. Fails toward REVIEWING: an exhausted query emits
-# skip=false — losing a PR's only read is worse than one duplicate.
+# skip=false — losing a read the PR still owes is worse than one duplicate.
+#
+# CALLER CONTRACT — review.yaml runs this ONLY on decide's budget arm, which is
+# the sole arm that emits recheck=true. This script judges the BUDGET alone, so
+# it answers skip=true whenever the spent reads already fill it; at
+# `max-reviews-per-pr: 0` that is every PR. Widening the step's `if:` to the
+# `[opus-review]` keyword or the review label would therefore cancel exactly the
+# two reads that are meant to fire whatever the count says.
 #
 # Env: GH_TOKEN, REPO, PR, GITHUB_RUN_ID, GITHUB_WORKFLOW_REF,
 #      MAX_REVIEWS_PER_PR.
@@ -46,7 +53,7 @@ spent="$(real_reviewer_reviews "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" |
 # jq failure leaves the count as unknown as a failed walk does.
 [[ "$reviews_rc" -ne 0 ]] || count="$(jq -rs 'length' <<<"$spent")" || reviews_rc=$?
 if [[ "$reviews_rc" -ne 0 ]]; then
-  emit false "could not read $REPO#$PR reviews (exhausted the retry ladder, rc=$reviews_rc) — reviewing rather than risking the PR's only read"
+  emit false "could not read $REPO#$PR reviews (exhausted the retry ladder, rc=$reviews_rc) — reviewing rather than risking a read the PR still owes"
   exit 0
 fi
 if [[ "$count" -ge "$MAX_REVIEWS_PER_PR" ]]; then
@@ -77,7 +84,7 @@ candidates="$(
         | .id'
 )" || runs_rc=$?
 if [[ "$runs_rc" -ne 0 ]]; then
-  emit false "could not read $REPO in-flight runs (exhausted the retry ladder, rc=$runs_rc) — reviewing rather than risking the PR's only read"
+  emit false "could not read $REPO in-flight runs (exhausted the retry ladder, rc=$runs_rc) — reviewing rather than risking a read the PR still owes"
   exit 0
 fi
 

@@ -1,7 +1,7 @@
 """Behavioral tests for .github/reviewer/recheck-pr-head-current.sh — the review
 job's last freshness look before the paid model read. Fail direction: an
-unanswerable query emits stale=false, because losing a possibly-unreviewed PR's
-only read is worse than one duplicate."""
+unanswerable query emits stale=false, because losing a read a possibly-unreviewed PR
+still owes is worse than one duplicate."""
 
 import subprocess
 from pathlib import Path

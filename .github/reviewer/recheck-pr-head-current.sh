@@ -9,8 +9,8 @@
 # per-PR concurrency group — owns the read; if it never arrives, the findings
 # gate stays red on the new head, the same fail-closed-and-visible outcome the
 # review job's concurrency comment already accepts. Fails toward REVIEWING: an
-# unanswerable query emits stale=false — losing a PR's only read is worse than
-# one duplicate.
+# unanswerable query emits stale=false — losing a read the PR still owes is worse
+# than one duplicate.
 #
 # Env: GH_TOKEN, REPO, PR, EVENT_HEAD_SHA.
 set -euo pipefail
@@ -34,9 +34,9 @@ live_rc=0
 # already spends. Same answer, a bucket that is not the exhausted one.
 live="$(retry_stdout gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)" || live_rc=$?
 if [[ "$live_rc" -ne 0 ]]; then
-  emit false "could not read $REPO#$PR's live head (exhausted the retry ladder, rc=$live_rc) — reviewing rather than risking the PR's only read"
+  emit false "could not read $REPO#$PR's live head (exhausted the retry ladder, rc=$live_rc) — reviewing rather than risking a read the PR still owes"
 elif [[ -z "$live" ]]; then
-  emit false "the live-head read succeeded but returned nothing — reviewing rather than risking the PR's only read"
+  emit false "the live-head read succeeded but returned nothing — reviewing rather than risking a read the PR still owes"
 elif [[ "$live" != "$EVENT_HEAD_SHA" ]]; then
   emit true "the head moved ($EVENT_HEAD_SHA -> $live) — the synchronize run queued behind this group reviews the live head"
 else

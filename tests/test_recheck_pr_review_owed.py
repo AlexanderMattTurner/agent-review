@@ -1,7 +1,7 @@
 """Behavioral tests for .github/reviewer/recheck-pr-review-owed.sh — the second
 look the review job takes, inside its concurrency group, before spending a
 whole-diff read. Fail direction: an unanswerable query emits skip=false, because
-losing a possibly-unreviewed PR's only read is worse than one duplicate."""
+losing a read a possibly-unreviewed PR still owes is worse than one duplicate."""
 
 import json
 import subprocess
@@ -348,7 +348,7 @@ def test_our_own_run_and_other_prs_runs_do_not_count(tmp_path: Path) -> None:
 def test_an_unreadable_query_still_reviews(tmp_path: Path, kwargs: dict) -> None:
     """Both queries fail toward reviewing — the OPPOSITE of decide's fail-safe:
     the spend is already decided, and an API blip that skipped here would cost a
-    possibly review-less PR its only read."""
+    possibly review-less PR a read it still owes."""
     proc, skip, _ = _run(tmp_path, **kwargs)
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
@@ -381,7 +381,12 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
     )
     steps = _review_job()["steps"]
     recheck = next(s for s in steps if s.get("id") == "recheck")
-    assert recheck["if"] == "needs.decide.outputs.recheck == 'true'"
+    assert recheck["if"] == "needs.decide.outputs.recheck == 'true'", (
+        "only decide's budget arm may reach the re-check: that script judges the "
+        "budget alone and answers skip=true whenever the spent reads fill it, so a "
+        "condition widened to the keyword or the label arm would cancel exactly the "
+        "two reads that fire whatever the count says"
+    )
     gated = {
         s.get("id") or str(s.get("uses", "")).split("@")[0]
         for s in steps

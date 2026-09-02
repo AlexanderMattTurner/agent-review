@@ -60,8 +60,9 @@ reviewed. Write `review.json` with the file-edit tools directly.
      documentation alone does not make a dangerous choice safe.
 
    Keep the confidence bar high — but the bar governs what you FILE,
-   never what you READ. You run ONCE per PR; there is no later delta pass to
-   catch what this read misses. So sweep, don't sample:
+   never what you READ. This is one of at most `max-reviews-per-pr` reads, one
+   by default; assume no later pass catches what this read misses. So sweep,
+   don't sample:
    - Enumerate every file and hunk in the diff before judging anything; that list
      is your coverage ledger, and an early finding never shortens the rest of it.
    - Run each lens (correctness, security, tests, conventions, design) as its own

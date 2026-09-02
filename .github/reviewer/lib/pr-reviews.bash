@@ -88,7 +88,7 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # whether a review EXISTS for the ruleset, and the stand-in is exactly that.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
-    jq -r --arg marker "$AUTO_APPROVAL_MARKER" \
+    jq -rc --arg marker "$AUTO_APPROVAL_MARKER" \
       'select((.body // "") | contains($marker) | not)'
 }
 
@@ -98,13 +98,16 @@ real_reviewer_reviews() {
 # caller. Both consumers call this, so neither can read the value the other's
 # rejects.
 #
-# The pattern refuses a LEADING ZERO, which `^[0-9]+$` admits: `[[ -lt ]]` reads
-# `08` as octal, errors on the invalid digit, and evaluates FALSE. Off that one
-# value decide would never review and the recheck always would.
+# The pattern refuses every spelling `[[ -lt ]]` reads as something other than
+# the number written. A LEADING ZERO, which `^[0-9]+$` admits, is read as octal:
+# `08` errors on the invalid digit and evaluates FALSE. A value past 63 bits
+# wraps NEGATIVE: `[[ 0 -lt 9223372036854775808 ]]` is false, so decide would
+# never review with a green job and no notice. Three digits is the ceiling,
+# which is far past any budget a PR can spend.
 require_review_budget() {
   MAX_REVIEWS_PER_PR="${MAX_REVIEWS_PER_PR:?MAX_REVIEWS_PER_PR required — review.yaml passes its max-reviews-per-pr input}"
-  [[ "$MAX_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]*)$ ]] || {
-    echo "max-reviews-per-pr must be a whole number with no leading zero, not '$MAX_REVIEWS_PER_PR'" >&2
+  [[ "$MAX_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+    echo "max-reviews-per-pr must be a whole number from 0 to 999 with no leading zero, not '$MAX_REVIEWS_PER_PR'" >&2
     exit 1
   }
 }
