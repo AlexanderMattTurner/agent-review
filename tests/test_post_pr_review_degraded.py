@@ -65,17 +65,21 @@ REVIEW = {
 }
 
 
-def _pr_input(tmp_path: Path) -> Path:
+def _pr_input(tmp_path: Path, review: dict | None = None) -> Path:
     """The reviewer's output dir, as the review job leaves it."""
     pr_dir = tmp_path / "pr-input"
     pr_dir.mkdir(exist_ok=True)
-    (pr_dir / "review.json").write_text(json.dumps(REVIEW), encoding="utf-8")
+    (pr_dir / "review.json").write_text(json.dumps(review or REVIEW), encoding="utf-8")
     (pr_dir / "diff.txt").write_text(DIFF, encoding="utf-8")
     return pr_dir
 
 
 def _run(
-    github: FakeReviewPoster, pr_dir: Path, *, head_sha: str | None = HEAD_SHA
+    github: FakeReviewPoster,
+    pr_dir: Path,
+    *,
+    head_sha: str | None = HEAD_SHA,
+    salvage_body_limit: int | None = None,
 ) -> subprocess.CompletedProcess:
     env = {
         **github.env,
@@ -84,6 +88,8 @@ def _run(
         "PR_INPUT_DIR": str(pr_dir),
         "RETRY_BASE_DELAY": "0",  # a refused POST must not sleep out the backoff
     }
+    if salvage_body_limit is not None:
+        env["SALVAGE_BODY_LIMIT"] = str(salvage_body_limit)
     if head_sha is not None:
         env["HEAD_SHA"] = head_sha
     return subprocess.run(
@@ -234,3 +240,134 @@ def test_a_second_run_re_posts_nothing_once_a_degraded_run_completed(tmp_path):
         proc = _run(github, _pr_input(tmp_path))
         assert proc.returncode == 0, proc.stderr
         assert github.posted == first
+
+
+def _salvaged(github: FakeReviewPoster) -> list[dict]:
+    """The PR comments carrying the refused findings' own text."""
+    return github.of_kind("issue_comment")
+
+
+def test_a_refused_findings_text_reaches_the_pr_not_only_the_log(tmp_path):
+    # The run log ages out and needs an Actions reader, so a hold that points
+    # only there loses the finding on the day someone comes to read it.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        salvaged = _salvaged(github)
+        assert len(salvaged) == 1
+        body = salvaged[0]["body"]
+        assert "src/b.py" in body
+        assert "lock it" in body  # the finding's own text, not a summary of it
+        assert "src/a.py" not in body  # the finding that DID get a thread
+
+
+def test_the_hold_links_the_salvaged_text(tmp_path):
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        _run(github, _pr_input(tmp_path))
+        assert "#issuecomment-" in _holds(github)[0]["body"]
+
+
+def test_no_lost_finding_salvages_nothing(tmp_path):
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        _run(github, _pr_input(tmp_path))
+        assert _salvaged(github) == []
+
+
+def test_a_refused_salvage_still_records_the_read(tmp_path):
+    # The salvage is a courtesy; the summary review is what stops the next push
+    # buying the whole read again. Losing the first must never cost the second.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        github.refuse_salvage = True
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        assert len(github.of_kind("review")) == 1
+        hold = _holds(github)[0]["body"]
+        assert "run log" in hold  # no link to offer, so say where to look
+
+
+def test_the_salvage_packs_into_parts_when_one_comment_would_overflow(tmp_path):
+    # The fixture cannot reach the real 60000-byte limit, so the limit comes down
+    # instead: without this every run takes the single-part path and the packing
+    # loop — the most intricate code here — is never executed at all.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/a.py", "src/b.py")
+        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        assert proc.returncode == 0, proc.stderr
+        bodies = [c["body"] for c in _salvaged(github)]
+        assert len(bodies) == 2, bodies
+        # Each finding lands in exactly one part, in the order the payload had them.
+        assert [i for i, b in enumerate(bodies) if "close it" in b] == [0]
+        assert [i for i, b in enumerate(bodies) if "lock it" in b] == [1]
+        assert "[truncated" not in "".join(bodies)  # neither finding is over the limit
+        hold = _holds(github)[0]["body"]
+        for part in range(1, len(bodies) + 1):
+            assert f"#issuecomment-{part}" in hold
+
+
+def test_a_refused_part_says_so_rather_than_passing_for_posted(tmp_path):
+    # The hold links what landed. A part GitHub refuses must be loud where it
+    # happens, or the reader gets a list that looks complete and is not.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/a.py", "src/b.py")
+        github.refuse_salvage = True
+        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr.count("GitHub refused salvage part") == 2, proc.stderr
+        assert len(github.of_kind("review")) == 1
+
+
+def test_a_finding_over_the_limit_is_marked_where_it_was_cut(tmp_path):
+    # Truncating beats dropping, but a body that just stops mid-sentence gives the
+    # reader no cue that the rest is in the run log.
+    long_finding = {
+        "summary": "One long finding.",
+        "findings": [
+            {
+                "path": "src/a.py",
+                "line": 1,
+                "severity": "blocking",
+                "title": "a leaks",
+                # Line-broken: the cut drops the last line, so a single-line body
+                # would leave nothing but the marker.
+                "body": "\n".join(["close it — 🔴 " + "x" * 60] * 40),
+            }
+        ],
+    }
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/a.py",)
+        proc = _run(
+            github,
+            _pr_input(tmp_path, long_finding),
+            salvage_body_limit=1000,
+        )
+        assert proc.returncode == 0, proc.stderr
+        body = _salvaged(github)[0]["body"]
+        assert "[truncated" in body
+        assert "src/a.py" in body  # the reader still learns which finding it is
+        assert len(body.encode()) < 1200  # cut, not the whole 3000-byte finding
+
+
+def test_a_partly_refused_salvage_keeps_the_run_log_fallback(tmp_path):
+    # The links read as the complete set. When one part was refused, the hold has
+    # to say so, or the human it stops reads a list that looks whole and is not.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/a.py", "src/b.py")
+        github.refuse_salvage_parts = (1,)
+        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        assert proc.returncode == 0, proc.stderr
+        salvaged = _salvaged(github)
+        assert len(salvaged) == 1  # part 2; part 1 was refused
+        hold = _holds(github)[0]["body"]
+        assert "#issuecomment-" in hold  # the part that landed is still linked
+        assert "run log only" in hold  # and the refused one is not passed off as posted
