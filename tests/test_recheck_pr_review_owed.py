@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT, workflow_jobs
+from tests._helpers import REPO_ROOT, reviewer_marker, workflow_jobs
+
+#: What makes a fixture review count against MAX_REVIEWS_PER_PR.
+READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "recheck-pr-review-owed.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
@@ -37,7 +40,7 @@ def _run(
     gh = tmp_path / "gh"
     nodes = "".join(
         "printf '"
-        f'{{"state":"{state}","body":"read {n}",'
+        f'{{"state":"{state}","body":"read {n} {READ_MARKER}",'
         f'"submittedAt":"2024-01-{n + 1:02d}T00:00:00Z",'
         f'"reviewId":"{n + 1}","reviewedSha":"c0ffee"}}'
         "\\n' ; "

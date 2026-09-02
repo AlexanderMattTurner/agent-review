@@ -49,7 +49,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, reviewer_marker
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "decide-pr-review-trigger.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
@@ -93,7 +93,7 @@ def _fake_gh(
     # fold reports the LAST entry and its count reports how many were posted.
     nodes = "".join(
         "printf '"
-        f'{{"state":"{state}","body":"read {n}",'
+        f'{{"state":"{state}","body":"read {n} {READ_MARKER}",'
         f'"submittedAt":"2024-01-{n + 1:02d}T00:00:00Z",'
         f'"reviewId":"{n + 1}","reviewedSha":"{REVIEWED_SHA}"}}'
         "\\n' ; "
@@ -655,12 +655,20 @@ def _run_real_jq(
     return run, decision
 
 
+# The marker post-pr-review.sh stamps on the review that records a read. It is what
+# makes a review spend the PR's budget, so a fixture without it is not a read.
+READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
+
+
 def _bot_review(
-    state: str, body: str = "Automated review.", oid: str = REVIEWED_SHA
+    state: str,
+    body: str = f"Automated review.\n\n{READ_MARKER}",
+    oid: str = REVIEWED_SHA,
 ) -> dict:
-    """A REAL reviewer review: the body is non-empty because the reviewer never
-    posts an empty one (post-pr-review.mjs falls back to "Automated review."),
-    and the shared read filters empty-bodied reviews out as synthesized shells."""
+    """A REAL reviewer review: the body carries the whole-diff-read marker
+    post-pr-review.sh stamps, which is what makes it spend the PR's budget. A body
+    without it is a review some other automation posted under the same bot login,
+    and the shared read leaves those uncounted."""
     return {
         "author": {"login": "github-actions"},
         "state": state,

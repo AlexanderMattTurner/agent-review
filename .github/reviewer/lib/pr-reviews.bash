@@ -64,12 +64,22 @@ reviewer_reviews_ndjson() {
              reviewedSha: (.commit.oid // "")}'
 }
 
-# The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
-# body. It is the SSOT for that string: the producer sources this file for it, and
-# `real_reviewer_reviews` below drops any review carrying it.
+# The markers that say a review SPENT this PR's read budget. Both are stamped by
+# the producer and read back here, so the string has one home. HTML comments, so
+# GitHub renders nothing and a human reading the review sees the prose alone.
 #
-# An HTML comment, so GitHub renders nothing and a human reading the review sees the
-# prose alone.
+# WHOLE_DIFF_READ_MARKER goes on the summary review post-pr-review.sh posts once
+# the agent has read the diff — on the structured payload and on the degraded
+# path alike. OVERSIZED_REVIEW_MARKER goes on the notice post-oversized-review.sh
+# posts for a diff too large to read; that run still spent a job, so it still
+# spends budget, and its notice is stamped per head for the same reason.
+WHOLE_DIFF_READ_MARKER='<!-- whole-diff-read -->'
+OVERSIZED_REVIEW_MARKER='<!-- oversized-review -->'
+
+# The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
+# body. It is the SSOT for that string, and it is now informational: `real_reviewer_reviews`
+# selects the two markers above IN, so an unmarked review is already excluded.
+# shellcheck disable=SC2034 # read by auto-approve-skipped-pr.sh, which sources this file
 AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 
 # real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's
@@ -78,18 +88,20 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # locally, so two questions cost one paginated walk. Non-zero only once the retry
 # ladder is exhausted.
 #
-# The stand-in approval is excluded HERE, because every consumer asks the same
-# question: how many whole-diff reads has this PR spent? That approval is posted by
-# a job that skipped the read, under the reviewer's identity because it posts with
-# GITHUB_TOKEN. Counted as a read it latches the PR permanently unread — the
-# `needs-auto-review` label then buys a run whose own decide answers "already
-# reviewed", and a PR that leaves the skip class never gets its first pass.
-# `reviewer_reviews_ndjson` above keeps counting it: the review-findings gate asks
-# whether a review EXISTS for the ruleset, and the stand-in is exactly that.
+# The filter SELECTS IN rather than excluding known non-reads, and the direction is
+# the point: a consumer repository posts reviews under this same bot identity that
+# no reviewer run produced — an approval once a hold clears, a stand-in approval on
+# a skipped PR — and this reviewer cannot enumerate them. Counted as reads they eat
+# a budget the caller paid for, silently, and a PR at `max-reviews-per-pr: 2` gets
+# one read. Selecting in makes an unknown review cost nothing.
+#
+# `reviewer_reviews_ndjson` above keeps returning everything: the review-findings
+# gate asks whether a review EXISTS for the ruleset, and a stand-in approval is
+# exactly that.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
-    jq -rc --arg marker "$AUTO_APPROVAL_MARKER" \
-      'select((.body // "") | contains($marker) | not)'
+    jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
+      'select((.body // "") as $b | ($b | contains($read)) or ($b | contains($oversized)))'
 }
 
 # require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.

@@ -33,6 +33,10 @@ SCRIPT = REPO_ROOT / ".github" / "reviewer" / "post-oversized-review.sh"
 
 HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
 OVERSIZED_MARKER = "<!-- oversized-review -->"
+# The notice review is idempotent per HEAD, not per PR: an oversized run spends the
+# PR's read budget, so one notice per PR would pin that count at 1 and let every later
+# push re-run the whole job forever.
+HEAD_MARKER = f"<!-- oversized-head: {HEAD_SHA} -->"
 NOTICE = "This PR's diff is too large for the automated reviewer to read."
 
 _FAKE_GH = r"""#!/usr/bin/env python3
@@ -233,7 +237,26 @@ def test_first_run_posts_the_notice_review_and_the_finding_thread(
     assert review["event"] == "COMMENT"
     assert NOTICE in review["body"]
     assert OVERSIZED_MARKER in review["body"]
+    assert HEAD_MARKER in review["body"]
     _assert_finding_comment(posted[1])
+
+
+def test_a_notice_from_an_earlier_head_does_not_suppress_this_one(
+    tmp_path: Path,
+) -> None:
+    # The notice is what makes an oversized run spend a read. Suppressed on a NEW
+    # head, the count stays at 1 forever, so `max-reviews-per-pr: 2` decides "budget
+    # not spent" on every push and re-runs the checkout, the Node setup and the
+    # sanitizer install with nothing to show for it. One notice per head is what
+    # lets the budget bound that loop.
+    stale = f"{NOTICE}\n\n{OVERSIZED_MARKER}\n<!-- oversized-head: {'0' * 40} -->\n"
+    proc, posted = _run(tmp_path, reviews=[_rest_review(stale)], threads=[])
+    assert proc.returncode == 0, proc.stderr
+    assert [p["path"] for p in posted] == [
+        "repos/o/r/pulls/5/reviews",
+        "repos/o/r/pulls/5/comments",
+    ]
+    assert HEAD_MARKER in posted[0]["fields"]["body"]
 
 
 def test_rerun_with_both_surfaces_live_posts_nothing(tmp_path: Path) -> None:
@@ -242,7 +265,7 @@ def test_rerun_with_both_surfaces_live_posts_nothing(tmp_path: Path) -> None:
     # duplicate review and a duplicate thread on the PR.
     proc, posted = _run(
         tmp_path,
-        reviews=[_rest_review(f"{NOTICE}\n\n{OVERSIZED_MARKER}\n")],
+        reviews=[_rest_review(f"{NOTICE}\n\n{OVERSIZED_MARKER}\n{HEAD_MARKER}\n")],
         threads=[_finding_thread(resolved=False)],
     )
     assert proc.returncode == 0, proc.stderr
@@ -254,7 +277,7 @@ def test_rerun_after_a_resolve_re_raises_only_the_thread(tmp_path: Path) -> None
     # FRESH finding thread for the new head — but never a second notice review.
     proc, posted = _run(
         tmp_path,
-        reviews=[_rest_review(f"{NOTICE}\n\n{OVERSIZED_MARKER}\n")],
+        reviews=[_rest_review(f"{NOTICE}\n\n{OVERSIZED_MARKER}\n{HEAD_MARKER}\n")],
         threads=[_finding_thread(resolved=True)],
     )
     assert proc.returncode == 0, proc.stderr

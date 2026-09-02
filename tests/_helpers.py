@@ -163,3 +163,18 @@ def workflow_jobs(workflow_path: Path) -> dict:
 def current_path() -> str:
     """The live PATH, so a hermetic test env can still resolve git/bash."""
     return os.environ.get("PATH", "/usr/bin:/bin")
+
+
+def reviewer_marker(name: str) -> str:
+    """A marker string out of .github/reviewer/lib/pr-reviews.bash, which is the one
+    home for it. Read through bash rather than copied here, so a rename reds the
+    tests that assert on the marker instead of silently splitting them from it."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf %s "${!2}"', "_", str(lib), name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout, f"pr-reviews.bash defines no {name}"
+    return proc.stdout

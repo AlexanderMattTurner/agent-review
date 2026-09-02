@@ -113,10 +113,10 @@ def test_the_fold_picks_the_latest_by_submitted_at_across_pages(github):
     """gh emits one page's --jq output after another, so the newest review is on
     the LAST page and a fold picking by array order would answer the oldest.
     The submittedAt order here is deliberately not the page order."""
-    github.add_review(body="oldest", submitted_at="2026-07-01T00:00:00Z")
-    github.add_review(body="newest", submitted_at="2026-07-09T00:00:00Z")
-    github.add_review(body="middle", submitted_at="2026-07-05T00:00:00Z")
-    assert json.loads(_latest(github))["body"] == "newest"
+    github.add_review(body=_read("oldest"), submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(body=_read("newest"), submitted_at="2026-07-09T00:00:00Z")
+    github.add_review(body=_read("middle"), submitted_at="2026-07-05T00:00:00Z")
+    assert json.loads(_latest(github))["body"].startswith("newest")
 
 
 def test_a_body_less_review_comment_is_not_a_review(github):
@@ -152,8 +152,8 @@ def test_a_dismissed_review_is_still_a_spent_read(github):
 def test_the_count_grows_with_every_real_review(github):
     """`max-reviews-per-pr` above 1 is a comparison against this count, so the
     count has to rise per review rather than saturate at "some review exists"."""
-    github.add_review(body="one", submitted_at="2026-07-01T00:00:00Z")
-    github.add_review(body="two", submitted_at="2026-07-02T00:00:00Z")
+    github.add_review(body=_read("one"), submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(body=_read("two"), submitted_at="2026-07-02T00:00:00Z")
     github.add_review(**SYNTHESIZED, submitted_at="2026-07-03T00:00:00Z")
     assert _spent(github) == 2
 
@@ -185,15 +185,25 @@ def test_a_failed_read_is_non_zero_once_the_ladder_is_exhausted(github):
 # The exact body auto-approve-skipped-pr.sh posts, read out of the ONE definition
 # both it and the read share, so a renamed marker reds here rather than silently
 # splitting producer from consumer.
-def _marker() -> str:
+def _lib_marker(name: str) -> str:
     proc = subprocess.run(
-        ["bash", "-c", 'source "$1"; printf %s "$AUTO_APPROVAL_MARKER"', "_", str(LIB)],
+        ["bash", "-c", f'source "$1"; printf %s "${name}"', "_", str(LIB)],
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout, "the library must define AUTO_APPROVAL_MARKER"
+    assert proc.stdout, f"the library must define {name}"
     return proc.stdout
+
+
+def _marker() -> str:
+    return _lib_marker("AUTO_APPROVAL_MARKER")
+
+
+def _read(body: str) -> str:
+    """A review body stamped as a whole-diff read, the way post-pr-review.sh stamps
+    it. Read out of the library so a renamed marker reds here."""
+    return f"{body}\n\n{_lib_marker('WHOLE_DIFF_READ_MARKER')}"
 
 
 def test_the_stand_in_approval_does_not_spend_the_one_read(github):
@@ -229,6 +239,36 @@ def test_a_real_review_after_a_stand_in_approval_still_spends_the_read(github):
         submitted_at="2026-07-01T00:00:00Z",
     )
     github.add_review(
-        state="COMMENTED", body="the real read", submitted_at="2026-07-02T00:00:00Z"
+        state="COMMENTED",
+        body=_read("the real read"),
+        submitted_at="2026-07-02T00:00:00Z",
     )
-    assert json.loads(_latest(github))["body"] == "the real read"
+    assert json.loads(_latest(github))["body"].startswith("the real read")
+
+
+def test_an_unmarked_bot_review_spends_no_read(github):
+    """The filter SELECTS the read marker IN, so a review this bot posted without
+    reading a diff costs nothing. A consumer repository posts several under the same
+    identity — an approval once the reviewer's hold clears is the one that bites, and
+    it carries no marker of its own for this reviewer to exclude. Counted as a read
+    it eats one of the reads `max-reviews-per-pr: 2` paid for, silently."""
+    github.add_review(
+        state="APPROVED",
+        body="Automated approval: the reviewer's hold is clear.",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _spent(github) == 0
+    assert _latest(github) == ""
+
+
+def test_the_oversized_notice_spends_a_read(github):
+    """A run that found the diff too large to read still spent the job — the
+    checkout, the Node setup, the sanitizer install and the diff fetch. Excluded
+    from the count it would re-run on every push forever, because the notice adds
+    nothing the next decide can see."""
+    github.add_review(
+        state="COMMENTED",
+        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _spent(github) == 1

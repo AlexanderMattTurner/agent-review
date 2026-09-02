@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 from tests._fake_github import FakeReviewPoster
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, reviewer_marker
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "post-pr-review.sh"
 
@@ -102,6 +102,10 @@ def _run(
     )
 
 
+#: What makes a posted review count against MAX_REVIEWS_PER_PR.
+READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
+
+
 def _holds(github: FakeReviewPoster) -> list[dict]:
     """The needs-a-human finding threads — file-level, so no line can refuse them."""
     return [c for c in github.of_kind("comment") if c.get("subject_type") == "file"]
@@ -115,6 +119,21 @@ def test_an_accepted_review_posts_once_and_degrades_to_nothing(tmp_path):
         assert len(reviews) == 1
         assert [c["path"] for c in reviews[0]["comments"]] == ["src/a.py", "src/b.py"]
         assert github.of_kind("comment") == []
+
+
+def test_both_post_paths_stamp_the_review_that_records_the_read(tmp_path):
+    """The marker is what makes this review spend one of `max-reviews-per-pr`'s
+    reads. Missing it, decide-pr-review-trigger.sh counts the PR unread and the next
+    push buys the whole read again — the same defect the degraded path closes, by
+    another route. Both paths post exactly one review, and it is the one stamped."""
+    for refuse in (False, True):
+        with FakeReviewPoster(tmp_path / f"refuse-{refuse}") as github:
+            github.refuse_structured = refuse
+            proc = _run(github, _pr_input(tmp_path / f"in-{refuse}"))
+            assert proc.returncode == 0, proc.stderr
+            reviews = github.of_kind("review")
+            assert len(reviews) == 1
+            assert READ_MARKER in reviews[0]["body"]
 
 
 def test_a_refused_review_posts_every_finding_as_its_own_comment(tmp_path):
