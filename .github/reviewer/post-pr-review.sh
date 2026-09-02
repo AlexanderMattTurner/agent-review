@@ -61,10 +61,12 @@ SALVAGE_BODY_LIMIT="${SALVAGE_BODY_LIMIT:-60000}"
 SALVAGE_MARKER="<!-- salvaged-review-findings -->"
 
 # Post the refused findings' text as PR comments — an issue comment carries no anchor, so nothing
-# in the diff can refuse it. Prints each comment's URL on stdout for the hold to link. The gate
-# reads review THREADS, so these comments gate nothing on their own; the hold is what holds.
+# in the diff can refuse it. Prints each comment's URL on stdout for the hold to link, and appends
+# the number of each part GitHub refused to LOST_PARTS, so the hold can keep the run-log fallback
+# for a PARTIAL loss — links alone would read as the complete set. The gate reads review THREADS,
+# so these comments gate nothing on their own; the hold is what holds.
 post_salvaged_findings() {
-  local dir="$1" lost="$2" chunk part=0 size=0 file file_size
+  local dir="$1" lost="$2" lost_parts="$3" chunk part=0 size=0 file file_size
   chunk="$(mktemp)"
   : >"$chunk"
   for file in "$dir"/*; do
@@ -72,7 +74,7 @@ post_salvaged_findings() {
     file_size="$(wc -c <"$file")"
     if ((size > 0 && size + file_size > SALVAGE_BODY_LIMIT)); then
       part=$((part + 1))
-      _post_one_salvage_comment "$chunk" "$part" "$lost"
+      _post_one_salvage_comment "$chunk" "$part" "$lost" "$lost_parts"
       : >"$chunk"
       size=0
     fi
@@ -91,13 +93,13 @@ post_salvaged_findings() {
   done
   if ((size > 0)); then
     part=$((part + 1))
-    _post_one_salvage_comment "$chunk" "$part" "$lost"
+    _post_one_salvage_comment "$chunk" "$part" "$lost" "$lost_parts"
   fi
   rm -f "$chunk"
 }
 
 _post_one_salvage_comment() {
-  local findings="$1" part="$2" lost="$3" body
+  local findings="$1" part="$2" lost="$3" lost_parts="$4" body
   body="$(mktemp)"
   {
     printf '%s\n\n' "$SALVAGE_MARKER"
@@ -110,7 +112,10 @@ _post_one_salvage_comment() {
   # echo-fallback-ok: the warning goes to stderr, so no URL list is fed a benign string
   retry_stdout gh api -X POST "repos/${GH_REPO}/issues/${PR}/comments" \
     -F body=@"$body" --jq '.html_url' ||
-    echo "::warning::GitHub refused salvage part ${part}; those findings survive only in the run log above, and the hold does not link them" >&2
+    {
+      echo "::warning::GitHub refused salvage part ${part}; those findings survive only in the run log above" >&2
+      echo "$part" >>"$lost_parts"
+    }
   rm -f "$body"
 }
 
@@ -119,7 +124,7 @@ _post_one_salvage_comment() {
 # gate, another read) rather than reviewed with its findings missing (green gate, nobody holding the
 # merge).
 post_review_comment_by_comment() {
-  local one salvage_dir salvage_links url total=0 failed=0 comment payload_comments
+  local one salvage_dir salvage_links salvage_lost url total=0 failed=0 comment payload_comments
   if degraded_review_already_posted; then
     echo "degraded review already posted for PR ${PR}; not re-posting" >&2
     return 0
@@ -167,7 +172,9 @@ post_review_comment_by_comment() {
   # looking. Never fatal: losing the salvage must not cost the summary review below, which is what
   # records that the read happened at all.
   salvage_links=""
-  ((failed == 0)) || salvage_links="$(post_salvaged_findings "$salvage_dir" "$failed")" ||
+  salvage_lost="$(mktemp)"
+  ((failed == 0)) ||
+    salvage_links="$(post_salvaged_findings "$salvage_dir" "$failed" "$salvage_lost")" ||
     salvage_links=""
   rm -rf "$salvage_dir"
 
@@ -184,13 +191,20 @@ post_review_comment_by_comment() {
       if [[ -n "$salvage_links" ]]; then
         printf 'Their full text is on this PR:\n\n'
         while IFS= read -r url; do printf -- '- %s\n' "$url"; done <<<"$salvage_links"
-      else
+      fi
+      # A PARTIAL loss still needs the fallback: the links above would otherwise read as the whole
+      # set while the refused part's findings are in the run log alone.
+      if [[ -s "$salvage_lost" ]]; then
+        printf '\nGitHub refused %s of those comments, so the findings they carried are in the run log only.\n' \
+          "$(wc -l <"$salvage_lost" | tr -d ' ')"
+      elif [[ -z "$salvage_links" ]]; then
         printf 'Read the run log for what they said.\n'
       fi
     } >"$prose"
     raise_human_review_finding "$DEGRADED_REVIEW_MARKER" "$prose"
     rm -f "$prose"
   fi
+  rm -f "$salvage_lost"
 
   # The summary review carries no comments, so nothing in it can be refused for a bad anchor: this
   # is the post that MUST succeed, and a failure here is a hard red — an unrecorded read is one the

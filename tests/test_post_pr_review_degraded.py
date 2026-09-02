@@ -289,7 +289,7 @@ def test_a_refused_salvage_still_records_the_read(tmp_path):
         assert proc.returncode == 0, proc.stderr
         assert len(github.of_kind("review")) == 1
         hold = _holds(github)[0]["body"]
-        assert "Read the run log" in hold  # no link to offer, so say where to look
+        assert "run log" in hold  # no link to offer, so say where to look
 
 
 def test_the_salvage_packs_into_parts_when_one_comment_would_overflow(tmp_path):
@@ -355,3 +355,19 @@ def test_a_finding_over_the_limit_is_marked_where_it_was_cut(tmp_path):
         assert "[truncated" in body
         assert "src/a.py" in body  # the reader still learns which finding it is
         assert len(body.encode()) < 1200  # cut, not the whole 3000-byte finding
+
+
+def test_a_partly_refused_salvage_keeps_the_run_log_fallback(tmp_path):
+    # The links read as the complete set. When one part was refused, the hold has
+    # to say so, or the human it stops reads a list that looks whole and is not.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/a.py", "src/b.py")
+        github.refuse_salvage_parts = (1,)
+        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        assert proc.returncode == 0, proc.stderr
+        salvaged = _salvaged(github)
+        assert len(salvaged) == 1  # part 2; part 1 was refused
+        hold = _holds(github)[0]["body"]
+        assert "#issuecomment-" in hold  # the part that landed is still linked
+        assert "run log only" in hold  # and the refused one is not passed off as posted

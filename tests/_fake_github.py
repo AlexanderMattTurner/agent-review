@@ -536,6 +536,9 @@ class FakeReviewPoster(_LocalGitHub):
         self.refuse_comment_paths: tuple[str, ...] = ()
         # A salvage post GitHub will not take: the summary review must still land.
         self.refuse_salvage = False
+        # The 1-based salvage parts to refuse, for a PARTIAL loss — the case where
+        # the hold links what landed and must still name the run log for the rest.
+        self.refuse_salvage_parts: tuple[int, ...] = ()
         self.files = [{"filename": "src/first.py"}]
         # Every accepted POST, in order — the order is the assertion that a
         # lost finding's hold lands before the review that greens the gate.
@@ -561,7 +564,11 @@ class FakeReviewPoster(_LocalGitHub):
         if method == "POST" and path == issues:
             # An issue comment carries no anchor, so the diff cannot refuse it —
             # which is why the refused findings' text is salvaged here.
-            if self.refuse_salvage:
+            # Keyed on the part the body names, not on call order: the poster
+            # retries a refused part, so a counter would let the retry through.
+            part = re.search(r"— part (?P<part>\d+)\.", body.get("body", ""))
+            refused_part = part and int(part.group("part")) in self.refuse_salvage_parts
+            if self.refuse_salvage or refused_part:
                 return self._refused()
             self.posted.append(("issue_comment", body))
             return 201, {
