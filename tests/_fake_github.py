@@ -513,6 +513,7 @@ class FakeReviewPoster(_LocalGitHub):
       POST /api/v3/repos/{o}/{r}/pulls/{n}/reviews   (the review, whole or summary)
       GET  /api/v3/repos/{o}/{r}/pulls/{n}/reviews   (the degraded path's re-post read)
       POST /api/v3/repos/{o}/{r}/pulls/{n}/comments  (one finding's own thread)
+      POST /api/v3/repos/{o}/{r}/issues/{n}/comments (the refused findings' text)
       GET  /api/v3/repos/{o}/{r}/pulls/{n}/files     (the hold's anchor file)
       POST /api/graphql                              (the hold's idempotence read)
 
@@ -533,6 +534,8 @@ class FakeReviewPoster(_LocalGitHub):
         self.pr = pr
         self.refuse_structured = False
         self.refuse_comment_paths: tuple[str, ...] = ()
+        # A salvage post GitHub will not take: the summary review must still land.
+        self.refuse_salvage = False
         self.files = [{"filename": "src/first.py"}]
         # Every accepted POST, in order — the order is the assertion that a
         # lost finding's hold lands before the review that greens the gate.
@@ -554,6 +557,18 @@ class FakeReviewPoster(_LocalGitHub):
                 return self._refused()
             self.posted.append(("comment", body))
             return 201, {"id": len(self.posted)}
+        issues = f"/api/v3/repos/{self.repo}/issues/{self.pr}/comments"
+        if method == "POST" and path == issues:
+            # An issue comment carries no anchor, so the diff cannot refuse it —
+            # which is why the refused findings' text is salvaged here.
+            if self.refuse_salvage:
+                return self._refused()
+            self.posted.append(("issue_comment", body))
+            return 201, {
+                "id": len(self.posted),
+                "html_url": f"https://github.example/{self.repo}"
+                f"/pull/{self.pr}#issuecomment-{len(self.posted)}",
+            }
         if method == "GET" and path == f"{prefix}/reviews":
             # The reviewer posts with the workflow token, so GitHub attributes
             # its reviews to the app bot — and returns that login WITH the REST

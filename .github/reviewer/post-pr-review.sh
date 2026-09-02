@@ -54,12 +54,59 @@ degraded_review_already_posted() {
   [[ -n "${reviews%%$'\n'*}" ]]
 }
 
+# GitHub refuses an issue-comment body over 65536 characters, and one comment per finding would
+# send a notification per finding, so the salvaged text is packed into as few comments as fit.
+SALVAGE_BODY_LIMIT=60000
+SALVAGE_MARKER="<!-- salvaged-review-findings -->"
+
+# Post the refused findings' text as PR comments — an issue comment carries no anchor, so nothing
+# in the diff can refuse it. Prints each comment's URL on stdout for the hold to link. The gate
+# reads review THREADS, so these comments gate nothing on their own; the hold is what holds.
+post_salvaged_findings() {
+  local dir="$1" lost="$2" chunk part=0 size=0 file file_size
+  chunk="$(mktemp)"
+  : >"$chunk"
+  for file in "$dir"/*; do
+    [[ -e "$file" ]] || break
+    file_size="$(wc -c <"$file")"
+    if ((size > 0 && size + file_size > SALVAGE_BODY_LIMIT)); then
+      part=$((part + 1))
+      _post_one_salvage_comment "$chunk" "$part" "$lost"
+      : >"$chunk"
+      size=0
+    fi
+    # A single finding over the limit is truncated rather than dropped: GitHub refuses the whole
+    # comment on the overflow, and half a finding still names which one to go read in the log.
+    head -c "$SALVAGE_BODY_LIMIT" "$file" >>"$chunk"
+    size=$((size + file_size))
+  done
+  if ((size > 0)); then
+    part=$((part + 1))
+    _post_one_salvage_comment "$chunk" "$part" "$lost"
+  fi
+  rm -f "$chunk"
+}
+
+_post_one_salvage_comment() {
+  local findings="$1" part="$2" lost="$3" body
+  body="$(mktemp)"
+  {
+    printf '%s\n\n' "$SALVAGE_MARKER"
+    printf '🔴 **%d finding(s) GitHub would not anchor to this diff — part %d.**\n\n' "$lost" "$part"
+    printf '<sub>These have no review thread of their own. The needs-a-human hold on this PR stays red until someone reads them.</sub>\n\n'
+    cat "$findings"
+  } >"$body"
+  retry_stdout gh api -X POST "repos/${GH_REPO}/issues/${PR}/comments" \
+    -F body=@"$body" --jq '.html_url'
+  rm -f "$body"
+}
+
 # Post every finding as its own review comment, then the summary as the COMMENT review that records
 # the read. Comments go FIRST: a crash between the two halves must leave the PR unreviewed (red
 # gate, another read) rather than reviewed with its findings missing (green gate, nobody holding the
 # merge).
 post_review_comment_by_comment() {
-  local one total=0 failed=0 comment payload_comments
+  local one salvage_dir salvage_links url total=0 failed=0 comment payload_comments
   if degraded_review_already_posted; then
     echo "degraded review already posted for PR ${PR}; not re-posting" >&2
     return 0
@@ -72,6 +119,7 @@ post_review_comment_by_comment() {
     return 1
   }
   one="$(mktemp)"
+  salvage_dir="$(mktemp -d)"
   # An empty capture is zero findings, but a here-string feeds one empty LINE.
   [[ -z "$payload_comments" ]] || while IFS= read -r comment; do
     total=$((total + 1))
@@ -86,15 +134,25 @@ post_review_comment_by_comment() {
     gh api -X POST "repos/${GH_REPO}/pulls/${PR}/comments" --input "$one" \
       >/dev/null </dev/null || {
       failed=$((failed + 1))
-      # INVARIANT: a refused finding has no thread, and review-payload.json is written after every
-      # upload-artifact step and dies with the runner — so this log line is the only surviving copy
-      # of what it said, and the hold below sends a human here to read it.
+      # A refused finding has no thread, so its text has to survive somewhere else: this log line,
+      # which dies with the run, and the salvage comment below, which does not.
       echo "::warning::GitHub refused this finding; its text survives only here:" >&2
       cat "$one" >&2
+      jq -r '"#### `" + .path + "`" + (if .line then ":" + (.line | tostring) else "" end)
+             + "\n\n" + .body + "\n"' "$one" \
+        >"${salvage_dir}/$(printf '%05d' "$failed")" || true
     }
   done <<<"$payload_comments"
   rm -f "$one"
   echo "posted $((total - failed)) of ${total} findings as individual review comments" >&2
+
+  # The refused findings' own text, onto the PR, before the hold that points at it. A run log ages
+  # out and needs an Actions reader; a PR comment is where the person the hold stops is already
+  # looking. Never fatal: losing the salvage must not cost the summary review below, which is what
+  # records that the read happened at all.
+  salvage_links=""
+  ((failed == 0)) || salvage_links="$(post_salvaged_findings "$salvage_dir" "$failed" || true)"
+  rm -rf "$salvage_dir"
 
   # Before the summary review: the review greens the gate's reviewed-at-all leg, so a lost finding
   # must already have its hold by the time it lands. ANY lost finding raises it — which severities
@@ -105,7 +163,13 @@ post_review_comment_by_comment() {
     prose="$(mktemp)"
     {
       printf '🔴 %d of this review'"'"'s %d findings could not be posted — this PR needs a HUMAN read of them.\n\n' "$failed" "$total"
-      printf 'GitHub refused the review as one payload and then refused these comments individually, so they have no thread of their own. Read the run log for what they said, address them, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
+      printf 'GitHub refused the review as one payload and then refused these comments individually, so they have no thread of their own. Address them, then resolve this thread; the review-findings gate stays red until it is resolved.\n\n'
+      if [[ -n "$salvage_links" ]]; then
+        printf 'Their full text is on this PR:\n\n'
+        while IFS= read -r url; do printf -- '- %s\n' "$url"; done <<<"$salvage_links"
+      else
+        printf 'Read the run log for what they said.\n'
+      fi
     } >"$prose"
     raise_human_review_finding "$DEGRADED_REVIEW_MARKER" "$prose"
     rm -f "$prose"

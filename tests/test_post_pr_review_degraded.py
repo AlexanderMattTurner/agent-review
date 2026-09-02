@@ -234,3 +234,53 @@ def test_a_second_run_re_posts_nothing_once_a_degraded_run_completed(tmp_path):
         proc = _run(github, _pr_input(tmp_path))
         assert proc.returncode == 0, proc.stderr
         assert github.posted == first
+
+
+def _salvaged(github: FakeReviewPoster) -> list[dict]:
+    """The PR comments carrying the refused findings' own text."""
+    return github.of_kind("issue_comment")
+
+
+def test_a_refused_findings_text_reaches_the_pr_not_only_the_log(tmp_path):
+    # The run log ages out and needs an Actions reader, so a hold that points
+    # only there loses the finding on the day someone comes to read it.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        salvaged = _salvaged(github)
+        assert len(salvaged) == 1
+        body = salvaged[0]["body"]
+        assert "src/b.py" in body
+        assert "lock it" in body  # the finding's own text, not a summary of it
+        assert "src/a.py" not in body  # the finding that DID get a thread
+
+
+def test_the_hold_links_the_salvaged_text(tmp_path):
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        _run(github, _pr_input(tmp_path))
+        assert "#issuecomment-" in _holds(github)[0]["body"]
+
+
+def test_no_lost_finding_salvages_nothing(tmp_path):
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        _run(github, _pr_input(tmp_path))
+        assert _salvaged(github) == []
+
+
+def test_a_refused_salvage_still_records_the_read(tmp_path):
+    # The salvage is a courtesy; the summary review is what stops the next push
+    # buying the whole read again. Losing the first must never cost the second.
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        github.refuse_salvage = True
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        assert len(github.of_kind("review")) == 1
+        hold = _holds(github)[0]["body"]
+        assert "Read the run log" in hold  # no link to offer, so say where to look
