@@ -49,6 +49,11 @@ on:
         required: false
         default: "needs-auto-review"
         type: string
+      reads-marked-from:
+        description: "RFC3339 timestamp of the moment THIS caller started running a reviewer that stamps a review as a whole-diff read. Every review older than it counts as a read although it carries no stamp, so bumping your pin does not hand each already-reviewed pull request a fresh budget and a second paid read on its next push. Set it to a moment after the last review your older reviewer posted. Empty trusts the stamp alone. Remove it once no open pull request predates the date."
+        required: false
+        default: ""
+        type: string
       max-reviews-per-pr:
         description: "How many whole-diff reads one pull request may spend, across its whole life, from 0 to 999. A run that finds the diff too large to read spends one too — it still paid for the job, and counting it is what stops an oversized pull request re-running on every push. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
         required: false
@@ -201,6 +206,7 @@ jobs:
           LABEL: ${{ github.event.label.name }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
 
   review:
@@ -274,6 +280,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/recheck-pr-review-owed.sh"
 
       - name: Set up Node and the input sanitizer

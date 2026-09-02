@@ -98,10 +98,21 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # `reviewer_reviews_ndjson` above keeps returning everything: the review-findings
 # gate asks whether a review EXISTS for the ruleset, and a stand-in approval is
 # exactly that.
+#
+# READS_MARKED_FROM is the caller's own history, as an RFC3339 timestamp: the moment
+# it started running a reviewer that stamps these markers. A review older than it was
+# posted by a reviewer that stamped nothing, so the markers alone report that pull
+# request as never read — and its next push buys a second whole-diff read. Every open
+# pull request a consumer has would buy one the day it bumps its pin. Empty (the
+# default) trusts the markers alone, which is right for a consumer with no such
+# history. A review with no submittedAt counts as a read, the same fail-safe direction.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
     jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
-      'select((.body // "") as $b | ($b | contains($read)) or ($b | contains($oversized)))'
+      --arg marked_from "${READS_MARKED_FROM:-}" \
+      'select((.body // "") as $b
+              | ($b | contains($read)) or ($b | contains($oversized))
+                or ($marked_from != "" and ((.submittedAt // "") < $marked_from)))'
 }
 
 # require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.

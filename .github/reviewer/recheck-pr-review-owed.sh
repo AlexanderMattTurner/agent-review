@@ -20,7 +20,7 @@
 # two reads that are meant to fire whatever the count says.
 #
 # Env: GH_TOKEN, REPO, PR, GITHUB_RUN_ID, GITHUB_WORKFLOW_REF,
-#      MAX_REVIEWS_PER_PR.
+#      MAX_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

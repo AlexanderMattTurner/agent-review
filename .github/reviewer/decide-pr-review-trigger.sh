@@ -28,7 +28,7 @@
 # checked out or executed, and matched only as fixed DATA strings (never eval).
 #
 # Env: GH_TOKEN, ACTION, REPO, HEAD_SHA, PR, LABEL, REVIEW_LABEL,
-#      MAX_REVIEWS_PER_PR.
+#      MAX_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
 set -euo pipefail
 
 KEYWORD="[opus-review]"
