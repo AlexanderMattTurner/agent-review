@@ -92,9 +92,7 @@ def _latest(server: FakePRReviews) -> str:
 def _spent(server: FakePRReviews, **env: str) -> int:
     """How many reads the PR has spent — the count decide-pr-review-trigger.sh
     compares against `max-reviews-per-pr`."""
-    proc = _call(
-        server, 'real_reviewer_reviews "$2" "$3" "$4" | jq -rs length', **env
-    )
+    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | jq -rs length', **env)
     assert proc.returncode == 0, proc.stderr
     return int(proc.stdout.strip())
 
