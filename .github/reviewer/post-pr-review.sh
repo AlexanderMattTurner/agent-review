@@ -56,7 +56,8 @@ degraded_review_already_posted() {
 
 # GitHub refuses an issue-comment body over 65536 characters, and one comment per finding would
 # send a notification per finding, so the salvaged text is packed into as few comments as fit.
-SALVAGE_BODY_LIMIT=60000
+# Overridable so a test can reach the multi-part path without an absurd review.json.
+SALVAGE_BODY_LIMIT="${SALVAGE_BODY_LIMIT:-60000}"
 SALVAGE_MARKER="<!-- salvaged-review-findings -->"
 
 # Post the refused findings' text as PR comments — an issue comment carries no anchor, so nothing
@@ -75,9 +76,17 @@ post_salvaged_findings() {
       : >"$chunk"
       size=0
     fi
-    # A single finding over the limit is truncated rather than dropped: GitHub refuses the whole
-    # comment on the overflow, and half a finding still names which one to go read in the log.
-    head -c "$SALVAGE_BODY_LIMIT" "$file" >>"$chunk"
+    if ((file_size > SALVAGE_BODY_LIMIT)); then
+      # A finding over the limit is truncated rather than dropped: GitHub refuses the whole comment
+      # on the overflow, and half a finding still names which one to go read in the log. The cut
+      # drops the last line, so it never ends the body on the partial UTF-8 sequence a byte cut can
+      # leave — an invalid byte is what gets the comment refused, which is what this path avoids.
+      # A tenth of the limit is held back for the marker, so the cut body plus it still fits.
+      head -c "$((SALVAGE_BODY_LIMIT - SALVAGE_BODY_LIMIT / 10))" "$file" | head -n -1 >>"$chunk"
+      printf '\n<sub>[truncated — this finding is in full in the run log]</sub>\n\n' >>"$chunk"
+    else
+      cat "$file" >>"$chunk"
+    fi
     size=$((size + file_size))
   done
   if ((size > 0)); then
@@ -96,8 +105,12 @@ _post_one_salvage_comment() {
     printf '<sub>These have no review thread of their own. The needs-a-human hold on this PR stays red until someone reads them.</sub>\n\n'
     cat "$findings"
   } >"$body"
+  # A refused part must not stop the parts after it, and must not pass for posted either: the hold
+  # links what landed, so a silent loss leaves a reader a list that looks complete and is not.
+  # echo-fallback-ok: the warning goes to stderr, so no URL list is fed a benign string
   retry_stdout gh api -X POST "repos/${GH_REPO}/issues/${PR}/comments" \
-    -F body=@"$body" --jq '.html_url'
+    -F body=@"$body" --jq '.html_url' ||
+    echo "::warning::GitHub refused salvage part ${part}; those findings survive only in the run log above, and the hold does not link them" >&2
   rm -f "$body"
 }
 
@@ -154,7 +167,8 @@ post_review_comment_by_comment() {
   # looking. Never fatal: losing the salvage must not cost the summary review below, which is what
   # records that the read happened at all.
   salvage_links=""
-  ((failed == 0)) || salvage_links="$(post_salvaged_findings "$salvage_dir" "$failed" || true)"
+  ((failed == 0)) || salvage_links="$(post_salvaged_findings "$salvage_dir" "$failed")" ||
+    salvage_links=""
   rm -rf "$salvage_dir"
 
   # Before the summary review: the review greens the gate's reviewed-at-all leg, so a lost finding
