@@ -68,17 +68,18 @@ def _fake_gh(
     tmp_path: Path,
     *,
     message: str = "",
-    review_state: str = "",
+    review_states: tuple[str, ...] = (),
     fail: bool = False,
     commits_fail: bool = False,
 ) -> None:
     """A `gh` stub that records each call's argv (appended to $GH_ARGV_FILE) and
     answers the API reads the script makes by branching on the request path:
     `.../commits/<sha>` echoes the head commit `message`, and the `graphql`
-    reviews query emits `review_state`
-    as the one NDJSON node `latest_reviewer_review`'s per-page filter would have
-    emitted (nothing at all when the state is empty, which is how "never
-    reviewed" reaches the script). Exits non-zero for every call when `fail`.
+    reviews query emits ONE NDJSON node per entry in `review_states`, oldest
+    first, exactly as `real_reviewer_reviews`' per-page filter would emit them
+    (nothing at all for an empty tuple, which is how "never reviewed" reaches the
+    script). The count is what the script compares against MAX_REVIEWS_PER_PR, so
+    a test spends a read per entry. Exits non-zero for every call when `fail`.
 
     `commits_fail` refuses the commit read ALONE, the way the real gh refuses one:
     the HTTP error body goes to STDOUT and the exit status is non-zero. That
@@ -86,15 +87,16 @@ def _fake_gh(
     that keeps it on failure searches the error text for the opt-in keyword."""
     gh = tmp_path / "gh"
     msg = message.replace("\\", "\\\\").replace('"', '\\"')
-    state = review_state.replace("\\", "\\\\").replace('"', '\\"')
-    node = (
-        ""
-        if not review_state
-        else (
-            "printf '"
-            f'{{"state":"{state}","body":"","submittedAt":"2024-01-01T00:00:00Z",'
-            f'"reviewId":"1","reviewedSha":"{REVIEWED_SHA}"}}'
-            "\\n'"
+    # One line per state, dated in order, so the script's latest-by-submittedAt
+    # fold reports the LAST entry and its count reports how many were posted.
+    nodes = "".join(
+        "printf '"
+        f'{{"state":"{state}","body":"read {n}",'
+        f'"submittedAt":"2024-01-{n + 1:02d}T00:00:00Z",'
+        f'"reviewId":"{n + 1}","reviewedSha":"{REVIEWED_SHA}"}}'
+        "\\n' ; "
+        for n, state in enumerate(
+            st.replace("\\", "\\\\").replace('"', '\\"') for st in review_states
         )
     )
     body = (
@@ -102,7 +104,7 @@ def _fake_gh(
         if fail
         else (
             'case "$*" in\n'
-            f"*graphql*) {node} ;;\n"
+            f"*graphql*) {nodes} ;;\n"
             f'*/commits/*) printf "%s" "{msg}" ; exit {7 if commits_fail else 0} ;;\n'
             "*) ;;\n"
             "esac\n"
@@ -120,7 +122,7 @@ def _run(
     action: str,
     *,
     message: str = "",
-    review_state: str = "",
+    review_states: tuple[str, ...] = (),
     fail: bool = False,
     head_sha: str = HEAD_SHA,
     expect_recheck: str | None = None,
@@ -128,6 +130,7 @@ def _run(
     commits_fail: bool = False,
     label: str = "",
     review_label: str | None = None,
+    max_reviews: str = "1",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Run the script with the fake gh on PATH; return (proc, run, argv).
     `expect_recheck` pins the emitted `recheck` — the flag that asks the review
@@ -137,7 +140,7 @@ def _run(
     _fake_gh(
         tmp_path,
         message=message,
-        review_state=review_state,
+        review_states=review_states,
         fail=fail,
         commits_fail=commits_fail,
     )
@@ -168,6 +171,10 @@ def _run(
         "BASE_REF": base_ref,
         "GITHUB_BASE_REF": base_ref,
         "LABEL": label,
+        # The script takes no default of its own — review.yaml's input owns the
+        # number — so every run names one, and the shipped default is pinned
+        # against that input by test_the_workflow_owns_the_read_budget.
+        "MAX_REVIEWS_PER_PR": max_reviews,
         # The shared reviews read retries; only the delay is test-tuned, so the
         # fail-safe test still exercises the real "ladder exhausted" path.
         "RETRY_BASE_DELAY": "0",
@@ -207,7 +214,7 @@ def test_opened_reviews_even_when_a_verdict_already_exists(tmp_path: Path) -> No
     """`opened` stays unconditional. GitHub fires it once per pull request, so it
     cannot be spent twice — and gating it on the reviews read would put a live
     API call in front of the one event every PR depends on for its first look."""
-    _, run, argv = _run(tmp_path, "opened", review_state="APPROVED")
+    _, run, argv = _run(tmp_path, "opened", review_states=("APPROVED",))
     assert run == "true"
     assert "graphql" not in argv
 
@@ -224,7 +231,7 @@ def test_a_draft_ready_toggle_after_a_verdict_is_not_re_read(
     toggle re-fires this workflow on the SAME head. PR #3437 paid for three
     whole-diff Opus reads against its one-read budget ($0.79 + $0.74 + $1.19 =
     $2.72) because two `ready_for_review` toggles each emitted run=true."""
-    proc, run, argv = _run(tmp_path, "ready_for_review", review_state=state)
+    proc, run, argv = _run(tmp_path, "ready_for_review", review_states=(state,))
     assert proc.returncode == 0, proc.stderr
     assert run == "false"
     assert "graphql" in argv, "the toggle must consult the reviews it claims to check"
@@ -237,7 +244,7 @@ def test_a_draft_opened_pr_is_reviewed_on_ready_for_review(tmp_path: Path) -> No
     proc, run, argv = _run(
         tmp_path,
         "ready_for_review",
-        review_state="",
+        review_states=(),
         # The same race the never-reviewed push path has: a review still being
         # generated is submitted-review-invisible, so the review job re-asks from
         # inside its concurrency group.
@@ -263,7 +270,7 @@ def test_a_tagged_toggle_never_buys_a_read(tmp_path: Path, head_sha: str) -> Non
         tmp_path,
         "ready_for_review",
         message="[opus-review] big rework",
-        review_state="APPROVED",
+        review_states=("APPROVED",),
         head_sha=head_sha,
     )
     assert run == "false"
@@ -299,7 +306,7 @@ def test_every_repeatable_subscribed_action_respects_the_spent_read(
             work,
             action,
             message="fix(ci): an ordinary follow-up, no opt-in",
-            review_state="COMMENTED",
+            review_states=("COMMENTED",),
         )
         assert run == "false", f"{action} re-read a PR whose one read is spent"
 
@@ -313,7 +320,7 @@ def test_the_opt_in_label_buys_a_read_the_callers_own_guard_would_skip(
     is filtered the same way. A review already on the PR does not spend it —
     a human asked for this read."""
     _, run, _ = _run(
-        tmp_path, "labeled", label="needs-auto-review", review_state="COMMENTED"
+        tmp_path, "labeled", label="needs-auto-review", review_states=("COMMENTED",)
     )
     assert run == "true"
 
@@ -372,7 +379,7 @@ def test_a_push_after_any_verdict_is_not_re_read(tmp_path: Path, state: str) -> 
         tmp_path,
         "synchronize",
         message="fix(ci): address review",
-        review_state=state,
+        review_states=(state,),
     )
     assert proc.returncode == 0, proc.stderr
     assert run == "false"
@@ -388,7 +395,7 @@ def test_synchronize_keyword_wins_over_a_spent_review(tmp_path: Path) -> None:
         tmp_path,
         "synchronize",
         message="[opus-review] big rework",
-        review_state="CHANGES_REQUESTED",
+        review_states=("CHANGES_REQUESTED",),
     )
     assert run == "true"
 
@@ -412,7 +419,7 @@ def test_a_merged_stacked_child_does_not_buy_a_fresh_read(
         tmp_path,
         "synchronize",
         message=message,
-        review_state="COMMENTED",
+        review_states=("COMMENTED",),
     )
     assert run == "false"
 
@@ -437,7 +444,7 @@ def test_a_base_branch_merge_does_not_buy_a_fresh_read(
         tmp_path,
         "synchronize",
         message=message,
-        review_state="COMMENTED",
+        review_states=("COMMENTED",),
     )
     assert run == "false"
 
@@ -465,7 +472,7 @@ def test_a_never_reviewed_push_on_a_feature_branch_base_still_reviews(
         tmp_path,
         "synchronize",
         message="fix: ordinary push, no opt-in",
-        review_state="",
+        review_states=(),
         base_ref="claude/ct-guest-app-name-resolution",
         expect_recheck="true",
     )
@@ -490,7 +497,7 @@ def test_synchronize_runs_the_first_pass_when_no_review_exists(tmp_path: Path) -
         tmp_path,
         "synchronize",
         message="fix: ordinary push, no opt-in",
-        review_state="",
+        review_states=(),
         # This read can race a review that is still generating, so the review job
         # is asked to re-read once its concurrency group has serialized it behind
         # the run that may be producing one.
@@ -513,7 +520,7 @@ def test_synchronize_ignores_keyword_in_body_only(tmp_path: Path) -> None:
         tmp_path,
         "synchronize",
         message="refactor: tidy things\n\nfollow-up [opus-review] later",
-        review_state="APPROVED",
+        review_states=("APPROVED",),
     )
     assert run == "false"
 
@@ -532,7 +539,7 @@ def test_a_refused_commit_read_is_discarded_rather_than_searched(
         tmp_path,
         "synchronize",
         message='{"message":"[opus-review] is not permitted","status":"403"}',
-        review_state="APPROVED",
+        review_states=("APPROVED",),
         commits_fail=True,
     )
     assert run == "false"
@@ -604,7 +611,7 @@ esac
 
 
 def _run_real_jq(
-    tmp_path: Path, *, reviews_pages: list, message: str = ""
+    tmp_path: Path, *, reviews_pages: list, message: str = "", max_reviews: str = "1"
 ) -> tuple[str, str]:
     """Run the real script with a gh stub that applies its --jq once per page of a
     canned payload (a list of per-page review-NODE arrays), as gh --paginate does.
@@ -636,6 +643,7 @@ def _run_real_jq(
             "RETRY_BASE_DELAY": "0",
             "REVIEWS_JSON": str(reviews_json),
             "HEAD_MSG": message,
+            "MAX_REVIEWS_PER_PR": max_reviews,
         },
     )
     assert proc.returncode == 0, proc.stderr
@@ -681,7 +689,7 @@ def test_a_reviewer_verdict_in_the_payload_reads_as_spent(tmp_path: Path) -> Non
         tmp_path, reviews_pages=[[_bot_review("CHANGES_REQUESTED")]]
     )
     assert run == "false", "a push after a verdict is not re-read"
-    assert "already reviewed" in decision, decision
+    assert "spent all 1 read(s)" in decision, decision
 
 
 def test_a_reviewer_verdict_on_a_LATER_page_still_counts(tmp_path: Path) -> None:
@@ -693,7 +701,7 @@ def test_a_reviewer_verdict_on_a_LATER_page_still_counts(tmp_path: Path) -> None
         reviews_pages=[[_human_review("COMMENTED")], [_bot_review("APPROVED")]],
     )
     assert run == "false", "the reviewer's verdict on page 2 is still a verdict"
-    assert "already reviewed" in decision, decision
+    assert "spent all 1 read(s)" in decision, decision
 
 
 def test_an_empty_body_bot_review_still_owes_the_first_pass(tmp_path: Path) -> None:
@@ -707,7 +715,7 @@ def test_an_empty_body_bot_review_still_owes_the_first_pass(tmp_path: Path) -> N
         tmp_path, reviews_pages=[[_bot_review("COMMENTED", body="")]]
     )
     assert run == "true", "an empty-body review is a synthesized shell, not a read"
-    assert "never reviewed" in decision, decision
+    assert "spent 0 of 1 read(s)" in decision, decision
 
 
 def test_only_other_peoples_reviews_still_owes_the_first_pass(tmp_path: Path) -> None:
@@ -717,6 +725,98 @@ def test_only_other_peoples_reviews_still_owes_the_first_pass(tmp_path: Path) ->
         tmp_path, reviews_pages=[[_human_review("CHANGES_REQUESTED")]]
     )
     assert run == "true", "no reviewer verdict exists — the first pass is still owed"
+
+
+def test_a_higher_budget_buys_the_next_read(tmp_path: Path) -> None:
+    """The budget is a COUNT, not a has-been-reviewed flag: a caller that sets
+    max-reviews-per-pr to 2 gets a second whole-diff read on the next push."""
+    proc, run, _ = _run(
+        tmp_path,
+        "synchronize",
+        review_states=("COMMENTED",),
+        max_reviews="2",
+        expect_recheck="true",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert run == "true"
+
+
+def test_the_budget_stops_the_read_once_every_one_is_spent(tmp_path: Path) -> None:
+    """Two reads against a budget of two is spent, so the third push buys
+    nothing. A comparison that only asked whether ANY review exists would give
+    the same answer here as the one-read budget and hide the counting entirely."""
+    proc, run, _ = _run(
+        tmp_path,
+        "synchronize",
+        review_states=("COMMENTED", "CHANGES_REQUESTED"),
+        max_reviews="2",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert run == "false"
+
+
+def test_a_zero_budget_leaves_even_opened_unreviewed(tmp_path: Path) -> None:
+    """0 is how a caller turns the automatic reviewer off for every PR. `opened`
+    is the arm that would otherwise fire unconditionally, so it reads the budget
+    rather than the review list — no review can exist on a PR being opened."""
+    proc, run, argv = _run(tmp_path, "opened", max_reviews="0")
+    assert proc.returncode == 0, proc.stderr
+    assert run == "false"
+    assert argv.splitlines() == [], "the count is 0 by construction, not by query"
+
+
+def test_the_head_commit_opt_in_outranks_a_spent_budget(tmp_path: Path) -> None:
+    """[opus-review] sits ABOVE the budget: it is an explicit request for one
+    more read. Under the budget it would be unreachable exactly when a human
+    asks for a re-read, which is the case it exists for."""
+    _, run, _ = _run(
+        tmp_path,
+        "synchronize",
+        message="fix(gate): rework the closure [opus-review]",
+        review_states=("APPROVED",),
+        max_reviews="0",
+    )
+    assert run == "true"
+
+
+def test_the_review_label_outranks_a_spent_budget(tmp_path: Path) -> None:
+    """The label is the other explicit request, so it outranks the budget too —
+    a human adding it has asked for this PR to be read."""
+    _, run, _ = _run(
+        tmp_path,
+        "labeled",
+        label="needs-auto-review",
+        review_states=("APPROVED",),
+        max_reviews="0",
+    )
+    assert run == "true"
+
+
+def test_an_unreadable_budget_is_refused_rather_than_compared(tmp_path: Path) -> None:
+    """`[[ x -lt y ]]` evaluates its operands arithmetically, and a bare word
+    that names no variable is 0 there. So an unvalidated typo would compare
+    against 0 and silently review NEVER, with a green decide job and no notice."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "MAX_REVIEWS_PER_PR": "one"},
+    )
+    assert proc.returncode != 0
+    assert "must be a whole number" in proc.stderr, proc.stderr
+
+
+def test_the_budget_must_be_passed_in(tmp_path: Path) -> None:
+    """No default in the script: review.yaml's input owns the number, and a
+    second default here is a copy that drifts out of sight of the caller."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert proc.returncode != 0
+    assert "MAX_REVIEWS_PER_PR required" in proc.stderr, proc.stderr
 
 
 def _workflow() -> dict:
@@ -754,6 +854,27 @@ def test_no_auto_approve_job() -> None:
     so nothing blind-approves a skipped class. Pin its absence so it can't creep
     back."""
     assert "auto-approve-skipped" not in _workflow()["jobs"]
+
+
+def test_the_workflow_owns_the_read_budget() -> None:
+    """Both scripts refuse to run without MAX_REVIEWS_PER_PR, so the workflow is
+    the one place the number is written. Both steps must read the SAME input: a
+    recheck on a different budget would cancel a read decide had just approved,
+    and the PR would go unreviewed with both jobs green."""
+    # `on` is YAML 1.1's boolean true, so the parsed key is True, not the string.
+    budget = _workflow()[True]["workflow_call"]["inputs"]["max-reviews-per-pr"]
+    assert budget["default"] == 1, "one whole-diff read per PR is the shipped budget"
+    assert budget["type"] == "number"
+    steps = [
+        *_workflow()["jobs"]["decide"]["steps"],
+        *_workflow()["jobs"]["review"]["steps"],
+    ]
+    readers = [
+        s["env"]["MAX_REVIEWS_PER_PR"]
+        for s in steps
+        if "max-reviews-per-pr" in str(s.get("env", {}))
+    ]
+    assert readers == ["${{ inputs.max-reviews-per-pr }}"] * 2, readers
 
 
 def test_decide_step_passes_the_pr_number() -> None:
@@ -812,7 +933,7 @@ def test_the_decision_never_asks_whether_the_pr_is_a_draft(
     cap drafts most PRs within seconds of `opened`, so a script that asked and
     deferred would hold the reviewer's feedback until the work was finished.
     """
-    _, run, argv = _run(tmp_path, action, review_state="")
+    _, run, argv = _run(tmp_path, action, review_states=())
     assert run == "true"
     assert "pulls/42" not in argv, argv
 
@@ -891,4 +1012,4 @@ def test_the_stand_in_approval_leaves_the_first_pass_owed(tmp_path: Path) -> Non
         ],
     )
     assert run == "true", "an approval nobody read leaves the first pass owed"
-    assert "never reviewed" in decision, decision
+    assert "spent 0 of 1 read(s)" in decision, decision

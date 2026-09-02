@@ -3,15 +3,17 @@
 #   script as `bash <script>` against stubbed CLIs on PATH, so the branches are asserted but
 #   no run is ever traced.
 # Re-ask, from inside the review job's per-PR concurrency group, whether this PR
-# still owes its one whole-diff review; emits skip=true/false to GITHUB_OUTPUT.
+# still owes a whole-diff review under `max-reviews-per-pr`; emits
+# skip=true/false to GITHUB_OUTPUT.
 # The group serializes review JOBS only, and a sharded review is posted later by
 # review_synthesis (its own group) — so a submitted-reviews read alone still
 # races the sharded path, and an earlier run of this workflow with a live
-# shard/synthesis job on this PR also counts as the read being spent — that job,
-# not the umbrella run around it. Fails toward REVIEWING: an exhausted
-# query emits skip=false — losing a PR's only read is worse than one duplicate.
+# shard/synthesis job on this PR also counts as a read being spent — that job, not
+# the umbrella run around it. Fails toward REVIEWING: an exhausted query emits
+# skip=false — losing a PR's only read is worse than one duplicate.
 #
-# Env: GH_TOKEN, REPO, PR, GITHUB_RUN_ID, GITHUB_WORKFLOW_REF.
+# Env: GH_TOKEN, REPO, PR, GITHUB_RUN_ID, GITHUB_WORKFLOW_REF,
+#      MAX_REVIEWS_PER_PR.
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +29,15 @@ WORKFLOW_FILE="${WORKFLOW_FILE%%@*}"
 WORKFLOW_FILE="${WORKFLOW_FILE##*/}"
 # GraphQL omits the REST `[bot]` suffix; the shared read's jq reads this from env.
 export REVIEWER_LOGIN_BARE="github-actions"
+# The same cap decide-pr-review-trigger.sh reads, from the same review.yaml
+# input, so the two cannot disagree about whether this PR still owes a read.
+# Required rather than defaulted, for the reason that script's own read gives.
+MAX_REVIEWS_PER_PR="${MAX_REVIEWS_PER_PR:?MAX_REVIEWS_PER_PR required — review.yaml passes its max-reviews-per-pr input}"
+[[ "$MAX_REVIEWS_PER_PR" =~ ^[0-9]+$ ]] ||
+  {
+    echo "max-reviews-per-pr must be a whole number, not '$MAX_REVIEWS_PER_PR'" >&2
+    exit 1
+  }
 
 emit() {
   # $1 skip, $2 reason
@@ -35,15 +46,16 @@ emit() {
 }
 
 reviews_rc=0
-latest="$(latest_reviewer_review "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
-state="$(jq -r '.state // ""' <<<"$latest")"
+spent="$(real_reviewer_reviews "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
+count="$(jq -rs 'length' <<<"$spent")"
+state="$(latest_of_reviews <<<"$spent" | jq -r '.state // ""')"
 if [[ "$reviews_rc" -ne 0 ]]; then
   emit false "could not read $REPO#$PR reviews (exhausted the retry ladder, rc=$reviews_rc) — reviewing rather than risking the PR's only read"
   exit 0
 fi
-if [[ -n "$state" ]]; then
+if [[ "$count" -ge "$MAX_REVIEWS_PER_PR" ]]; then
   # Any state — including DISMISSED — counts as spent, matching decide's trigger 2.
-  emit true "a review landed while this run waited for the concurrency slot (latest: $state) — the one whole-diff read is spent"
+  emit true "a review landed while this run waited for the concurrency slot (latest: $state) — all $MAX_REVIEWS_PER_PR read(s) are spent"
   exit 0
 fi
 
@@ -102,7 +114,7 @@ while IFS= read -r run; do
 done <<<"$candidates"
 
 if [[ "$inflight" -gt 0 ]]; then
-  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — its review is the one whole-diff read"
+  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — its review is this event's whole-diff read"
 else
-  emit false "still no review on $REPO#$PR — running the first pass"
+  emit false "$REPO#$PR has spent $count of $MAX_REVIEWS_PER_PR read(s) and nothing is in flight — running this one"
 fi

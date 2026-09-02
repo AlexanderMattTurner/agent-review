@@ -20,28 +20,28 @@ OWN_RUN_ID = 111
 def _run(
     tmp_path: Path,
     *,
-    review_state: str = "",
+    review_states: tuple[str, ...] = (),
     runs: list[dict] | None = None,
     jobs: list[dict] | None = None,
     fail: bool = False,
     fail_runs: bool = False,
     fail_jobs: bool = False,
+    max_reviews: str = "1",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Drive the REAL script with a `gh` stub answering the shared reviews query
-    with one NDJSON node (nothing when the state is empty — how "never reviewed"
-    reaches the script), the workflow-runs listing with `runs`, and every
-    per-run jobs listing with `jobs` (the script's own jq does the filtering).
-    Returns (proc, skip, argv)."""
+    with one NDJSON node per entry in `review_states`, oldest first (nothing at
+    all for an empty tuple — how "never reviewed" reaches the script), the
+    workflow-runs listing with `runs`, and every per-run jobs listing with `jobs`
+    (the script's own jq does the filtering). The number of entries is what the
+    script compares against MAX_REVIEWS_PER_PR. Returns (proc, skip, argv)."""
     gh = tmp_path / "gh"
-    node = (
-        ""
-        if not review_state
-        else (
-            "printf '"
-            f'{{"state":"{review_state}","body":"Automated review.",'
-            '"submittedAt":"2024-01-01T00:00:00Z","reviewId":"1","reviewedSha":"c0ffee"}'
-            "\\n'"
-        )
+    nodes = "".join(
+        "printf '"
+        f'{{"state":"{state}","body":"read {n}",'
+        f'"submittedAt":"2024-01-{n + 1:02d}T00:00:00Z",'
+        f'"reviewId":"{n + 1}","reviewedSha":"c0ffee"}}'
+        "\\n' ; "
+        for n, state in enumerate(review_states)
     )
     runs_arm = "exit 7" if fail_runs else 'cat "$RUNS_JSON_FILE"'
     jobs_arm = "exit 7" if fail_jobs else 'cat "$JOBS_JSON_FILE"'
@@ -51,7 +51,7 @@ def _run(
             "exit 7\n"
             if fail
             else (
-                f'case "$*" in\n*graphql*) {node} ;;\n'
+                f'case "$*" in\n*graphql*) {nodes} ;;\n'
                 f"*/jobs*) {jobs_arm} ;;\n"
                 f"*actions/workflows*) {runs_arm} ;;\n*) ;;\nesac\n"
             )
@@ -87,6 +87,9 @@ def _run(
             # Only the delay is test-tuned, so the fail cases still exercise the
             # real "ladder exhausted" path.
             "RETRY_BASE_DELAY": "0",
+            # The script takes no default of its own — review.yaml's input owns
+            # the number — so every run names one.
+            "MAX_REVIEWS_PER_PR": max_reviews,
         },
     )
     skips = [
@@ -106,7 +109,7 @@ def test_a_review_that_landed_while_we_queued_cancels_the_read(
 ) -> None:
     """Any submitted state counts — the budget is one whole-diff read, not one
     of a particular verdict (DISMISSED is spent too, matching decide)."""
-    proc, skip, argv = _run(tmp_path, review_state=state)
+    proc, skip, argv = _run(tmp_path, review_states=(state,))
     assert proc.returncode == 0, proc.stderr
     assert skip == "true"
     assert "--paginate" in argv, "a PR can have more reviews than one page holds"
@@ -118,6 +121,46 @@ def test_still_unreviewed_runs_the_first_pass(tmp_path: Path) -> None:
     proc, skip, _ = _run(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
+
+
+def test_a_higher_budget_still_owes_a_read_after_one_landed(tmp_path: Path) -> None:
+    """This script must count the same way decide does. Reading "some review
+    exists" instead would cancel a read decide had just approved, and the PR
+    would go unreviewed with decide and the review job both green."""
+    proc, skip, _ = _run(tmp_path, review_states=("COMMENTED",), max_reviews="2")
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "false"
+
+
+def test_the_budget_cancels_the_read_once_every_one_is_spent(tmp_path: Path) -> None:
+    """The other side of the same count: two reads against a budget of two means
+    the reviews that landed while this run queued spent the whole budget."""
+    proc, skip, _ = _run(
+        tmp_path, review_states=("COMMENTED", "APPROVED"), max_reviews="2"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert skip == "true"
+
+
+def test_the_budget_must_be_passed_in(tmp_path: Path) -> None:
+    """No default here either: review.yaml's input owns the number, and a
+    default in this script could disagree with decide's on the same event."""
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        # Everything else the script requires, so the budget is the only thing
+        # missing and its own refusal is what this asserts.
+        env={
+            "PATH": "/usr/bin:/bin",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "GITHUB_RUN_ID": str(OWN_RUN_ID),
+            "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/review.yaml@main",
+        },
+    )
+    assert proc.returncode != 0
+    assert "MAX_REVIEWS_PER_PR required" in proc.stderr, proc.stderr
 
 
 SHARD_JOB = {"name": "Claude PR review (shard 2)", "status": "in_progress"}

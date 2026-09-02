@@ -71,12 +71,13 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `elide-command`         | none                  | A command that drops generated files from the raw diff before the reviewer reads it. The reviewer's budget is diff lines, so a generated file spends budget on code nobody wrote. Name one if your diffs are mostly build files. |
 | `post-review-command`   | none                  | Run after the review step, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set. It asks a required check to re-evaluate its gate. It runs after a failed review too, so the check reports the missing review.                        |
 | `log-redactor`          | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                                                                                                            |
+| `max-reviews-per-pr`    | `1`                   | How many whole-diff reads the automatic triggers may spend on one pull request. `[opus-review]` and the review label sit above it. `0` turns the automatic reviewer off.                                                         |
 | `max-diff-lines`        | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                             |
 | `max-shardable-lines`   | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                            |
 
 ## Budget
 
-Each pull request gets ONE whole-diff read. A later push is not re-read, because the threads the first read opened are what hold the merge. Push a commit whose title carries `[opus-review]` to buy another read.
+Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. A later push is not re-read once they are spent, because the threads the first read opened are what hold the merge. Two things buy a read past the budget: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Both are somebody asking for this pull request to be read, so `max-reviews-per-pr: 0` still leaves them working while no push starts a review on its own.
 
 ## What the reviewer never does
 

@@ -66,35 +66,38 @@ reviewer_reviews_ndjson() {
 
 # The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
 # body. It is the SSOT for that string: the producer sources this file for it, and
-# `latest_reviewer_review` below drops any review carrying it.
+# `real_reviewer_reviews` below drops any review carrying it.
 #
 # An HTML comment, so GitHub renders nothing and a human reading the review sees the
 # prose alone.
 AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 
-# latest_reviewer_review <owner> <name> <pr>
+# real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's
+# read budget, as NDJSON, one object per line, oldest page first. A caller that
+# wants both a COUNT and the latest verdict reads this once and folds the result
+# locally, so two questions cost one paginated walk. Non-zero only once the retry
+# ladder is exhausted.
 #
-# The reviewer's most recent REAL review as a single JSON object {state, body,
-# submittedAt, reviewId, reviewedSha} on stdout — or NOTHING at all when the
-# reviewer never actually read this PR, which the caller distinguishes with
-# `[[ -n … ]]`.
-#
-# The stand-in approval is excluded HERE, because both consumers ask the same
-# question: has the one whole-diff read been spent? That approval is posted by a job
-# that skipped the read, under the reviewer's identity because it posts with
-# GITHUB_TOKEN. Counted as a review it latches the PR permanently unread — the
+# The stand-in approval is excluded HERE, because every consumer asks the same
+# question: how many whole-diff reads has this PR spent? That approval is posted by
+# a job that skipped the read, under the reviewer's identity because it posts with
+# GITHUB_TOKEN. Counted as a read it latches the PR permanently unread — the
 # `needs-auto-review` label then buys a run whose own decide answers "already
 # reviewed", and a PR that leaves the skip class never gets its first pass.
 # `reviewer_reviews_ndjson` above keeps counting it: the review-findings gate asks
 # whether a review EXISTS for the ruleset, and the stand-in is exactly that.
-#
-# The per-page --jq emits the reviewer's reviews as NDJSON and the slurp picks the
-# globally latest by submittedAt — the fold has to span pages, because gh emits
-# one page's jq output after another and the newest review is on the LAST page.
-# Non-zero only once the retry ladder is exhausted.
-latest_reviewer_review() {
+real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
-    jq -rs --arg marker "$AUTO_APPROVAL_MARKER" \
-      'map(select((.body // "") | contains($marker) | not))
-       | if length == 0 then empty else (sort_by(.submittedAt) | last) end'
+    jq -r --arg marker "$AUTO_APPROVAL_MARKER" \
+      'select((.body // "") | contains($marker) | not)'
+}
+
+# latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON
+# object, or NOTHING when there are none, which a caller reads with `[[ -n … ]]`.
+#
+# The fold spans the whole walk rather than one page: gh emits each page's --jq
+# output after the last, and page one of `reviews` is the OLDEST, so a fold that
+# picked by array order would answer with the first review ever posted.
+latest_of_reviews() {
+  jq -rs 'if length == 0 then empty else (sort_by(.submittedAt) | last) end'
 }

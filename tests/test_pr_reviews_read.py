@@ -42,14 +42,15 @@ def github(tmp_path):
         yield server
 
 
-def _call(server: FakePRReviews, helper: str) -> subprocess.CompletedProcess:
-    """Run one helper against the reviews this server holds."""
+def _call(server: FakePRReviews, snippet: str) -> subprocess.CompletedProcess:
+    """Run one read against the reviews this server holds. The snippet gets the
+    owner, name and PR number as "$2", "$3" and "$4"."""
     owner, name = server.repo.split("/")
     return subprocess.run(
         [
             "bash",
             "-c",
-            f'set -euo pipefail; source "$1"; {helper} "$2" "$3" "$4"',
+            f'set -euo pipefail; source "$1"; {snippet}',
             "_",
             str(LIB),
             owner,
@@ -70,15 +71,26 @@ def _call(server: FakePRReviews, helper: str) -> subprocess.CompletedProcess:
 
 
 def _ndjson(server: FakePRReviews) -> list[dict]:
-    proc = _call(server, "reviewer_reviews_ndjson")
+    proc = _call(server, 'reviewer_reviews_ndjson "$2" "$3" "$4"')
     assert proc.returncode == 0, proc.stderr
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _latest(server: FakePRReviews) -> str:
-    proc = _call(server, "latest_reviewer_review")
+    """What both consumers compute: the budget-spending reads, folded to the
+    newest one. `real_reviewer_reviews` and `latest_of_reviews` are separate so a
+    caller can count the same walk it folds."""
+    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | latest_of_reviews')
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
+
+
+def _spent(server: FakePRReviews) -> int:
+    """How many reads the PR has spent — the count decide-pr-review-trigger.sh
+    compares against `max-reviews-per-pr`."""
+    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | jq -rs length')
+    assert proc.returncode == 0, proc.stderr
+    return int(proc.stdout.strip())
 
 
 def test_the_read_walks_every_page_of_the_shared_query(github):
@@ -137,6 +149,15 @@ def test_a_dismissed_review_is_still_a_spent_read(github):
     assert [r["state"] for r in _ndjson(github)] == ["DISMISSED"]
 
 
+def test_the_count_grows_with_every_real_review(github):
+    """`max-reviews-per-pr` above 1 is a comparison against this count, so the
+    count has to rise per review rather than saturate at "some review exists"."""
+    github.add_review(body="one", submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(body="two", submitted_at="2026-07-02T00:00:00Z")
+    github.add_review(**SYNTHESIZED, submitted_at="2026-07-03T00:00:00Z")
+    assert _spent(github) == 2
+
+
 def test_the_review_id_survives_as_a_string(github):
     """Review database ids exceed Int32, which GraphQL's Int-typed databaseId
     errors on — so the query reads fullDatabaseId and the read stringifies it."""
@@ -158,7 +179,7 @@ def test_a_failed_read_is_non_zero_once_the_ladder_is_exhausted(github):
     empty on an outage would report an unreviewed PR for a reviewed one."""
     github.add_review()
     github.fail_reads = True
-    assert _call(github, "reviewer_reviews_ndjson").returncode != 0
+    assert _call(github, 'reviewer_reviews_ndjson "$2" "$3" "$4"').returncode != 0
 
 
 # The exact body auto-approve-skipped-pr.sh posts, read out of the ONE definition
