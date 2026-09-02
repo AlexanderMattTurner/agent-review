@@ -138,9 +138,12 @@ post_review_comment_by_comment() {
       # which dies with the run, and the salvage comment below, which does not.
       echo "::warning::GitHub refused this finding; its text survives only here:" >&2
       cat "$one" >&2
+      # A rendering jq cannot do falls back to the raw payload: the text is what must survive,
+      # and a half-formatted finding still names itself.
       jq -r '"#### `" + .path + "`" + (if .line then ":" + (.line | tostring) else "" end)
              + "\n\n" + .body + "\n"' "$one" \
-        >"${salvage_dir}/$(printf '%05d' "$failed")" || true
+        >"${salvage_dir}/$(printf '%05d' "$failed")" ||
+        cp "$one" "${salvage_dir}/$(printf '%05d' "$failed")"
     }
   done <<<"$payload_comments"
   rm -f "$one"
