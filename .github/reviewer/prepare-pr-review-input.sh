@@ -205,7 +205,11 @@ python3 "$here/shard-pr-diff.py" \
   --diff "${PR_INPUT_DIR}/diff.txt" \
   --out-dir "${PR_INPUT_DIR}/shards" \
   --max-lines "$SHARD_MAX_LINES" \
-  --max-shards "$MAX_SHARDS" || shard_rc=$?
+  --max-shards "$MAX_SHARDS" \
+  --model "${MODEL:-}" \
+  --model-low "${MODEL_LOW:-}" \
+  --low-tier-paths "${LOW_TIER_PATHS:-}" \
+  --bulk-lines "${BULK_DIFF_LINES:-0}" || shard_rc=$?
 
 # 3 is the sharder's over-budget refusal; any other non-zero stays a red job.
 if ((shard_rc == 3)); then
