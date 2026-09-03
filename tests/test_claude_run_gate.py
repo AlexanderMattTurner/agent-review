@@ -193,19 +193,35 @@ def test_the_reviewer_calls_the_model_from_more_than_one_job() -> None:
     assert len(_model_jobs()) >= 2, f"found model jobs: {[n for n, _ in _model_jobs()]}"
 
 
+def _gated_pairs(job) -> list[tuple[dict, dict | None]]:
+    """Every ladder step in `job`, each with the gate that reads ITS OWN log.
+
+    Paired by the step id the gate names, never by position: a shard leg runs the
+    ladder twice — the cheap read and the escalated one — and pairing by order
+    would call a gate on the first log a gate on the second.
+    """
+    gates = _steps_running(job, REVIEWER_GATE)
+    by_log = {str((g.get("env") or {}).get("EXECUTION_FILE")): g for g in gates}
+    return [
+        (m, by_log.get("${{ steps.%s.outputs.execution_file }}" % m["id"]))
+        for m in _steps_running(job, LADDER)
+    ]
+
+
 def test_every_reviewer_model_call_is_gated() -> None:
-    """The choke-point property at the reviewer's call shape: every job that
-    runs the credential ladder also runs the execution-log gate, and the gate
-    reads that ladder step's own log."""
+    """The choke-point property at the reviewer's call shape: EVERY ladder step
+    runs the execution-log gate, and each gate reads the log of the step it
+    belongs to. Counting the steps instead would admit a second model call whose
+    own failure nothing reads — a paid read that errored on every rung, and a
+    green job over it."""
     for name, job in _model_jobs():
-        model_steps = _steps_running(job, LADDER)
-        assert len(model_steps) == 1, f"{name} runs the ladder {len(model_steps)} times"
-        gates = _steps_running(job, REVIEWER_GATE)
-        assert len(gates) == 1, f"{name} has {len(gates)} gate steps, expected 1"
-        model, gate = model_steps[0], gates[0]
-        assert gate["env"]["EXECUTION_FILE"] == (
-            "${{ steps.%s.outputs.execution_file }}" % model["id"]
-        ), f"{name}'s gate reads a log its own model step did not write"
+        pairs = _gated_pairs(job)
+        assert pairs, f"{name} runs the ladder in no step this can pair"
+        for model, gate in pairs:
+            assert gate is not None, (
+                f"{name}'s `{model.get('name')}` calls the model with no gate "
+                "reading its own execution log"
+            )
 
 
 def test_no_reviewer_gate_is_narrowed_past_its_model_step() -> None:
@@ -213,12 +229,12 @@ def test_no_reviewer_gate_is_narrowed_past_its_model_step() -> None:
     be skipped while the model still ran — the silent green this exists to
     prevent."""
     for name, job in _model_jobs():
-        model = _steps_running(job, LADDER)[0]
-        gate = _steps_running(job, REVIEWER_GATE)[0]
-        assert gate.get("if") == model.get("if"), (
-            f"{name}: gate `if:` {gate.get('if')!r} does not match the model "
-            f"step's {model.get('if')!r}"
-        )
+        for model, gate in _gated_pairs(job):
+            assert gate is not None, f"{name}: `{model.get('name')}` has no gate"
+            assert gate.get("if") == model.get("if"), (
+                f"{name}: gate `if:` {gate.get('if')!r} does not match the model "
+                f"step's {model.get('if')!r}"
+            )
 
 
 def test_the_review_credentials_reach_only_the_steps_that_run_the_model() -> None:

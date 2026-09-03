@@ -665,6 +665,18 @@ jobs:
             echo "ESCALATION_KEPT=false" >>"$GITHUB_ENV"
           fi
 
+      - name: Fail loud if every escalated credential attempt errored
+        # Same gate as the cheap read's, on the escalated read's own log, and
+        # continue-on-error because the shard MUST still publish: the step above
+        # restored the cheap verdict, and a red job here would skip the upload and
+        # cost the whole review its shard. The red step is the loud part.
+        if: steps.escalate.outputs.escalate == 'true'
+        continue-on-error: true
+        env:
+          EXECUTION_FILE: ${{ steps.escalated_review.outputs.execution_file }}
+          CONTEXT: Escalated Claude PR review shard ${{ matrix.shard }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/checks/claude-execution.py"
+
       - name: Record this shard's review cost
         # The number only — the execution log stays on the runner and reaches an
         # artifact solely through the redacting upload below.
