@@ -43,7 +43,9 @@ review="${PR_INPUT_DIR}/review.json"
 # Absorbing it here is what lets the restore below publish the cheap verdict.
 rc=0
 /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py" || rc=$?
-((rc == 0)) || echo "the escalated read exited ${rc}; the gate step reports why" >&2
+if ((rc != 0)); then
+  echo "the escalated read exited ${rc}; the gate step reports why" >&2
+fi
 
 if [[ ! -s "$review" ]]; then
   if [[ ! -s "$cheap" ]]; then
