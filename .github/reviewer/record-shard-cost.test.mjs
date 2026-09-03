@@ -88,6 +88,16 @@ describe("record-shard-cost, on a shard that escalated", () => {
     assert.deepEqual(got, { cost: 2, model: "high-1" });
   });
 
+  it("drops the price when one of the two reads left no readable cost", () => {
+    // Half a sum renders exactly like a whole one: ~40% of what the review cost,
+    // with nothing in the footer marking it partial.
+    const got = recordEscalated(
+      [{ total_cost_usd: 0.4, model: "low-1" }],
+      [{ model: "high-1" }],
+    );
+    assert.equal(got.cost, null);
+  });
+
   it("credits the cheap model when the escalated read died and was discarded", () => {
     const got = recordEscalated(
       [{ total_cost_usd: 0.4, model: "low-1" }],

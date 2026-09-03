@@ -95,6 +95,41 @@ def test_an_unreadable_review_escalates(
     assert _decide(tmp_path, "{ not json", monkeypatch=monkeypatch)
 
 
+def _shard_steps() -> list[dict]:
+    import yaml  # local: only this test reads the workflow
+
+    doc = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "review.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return doc["jobs"]["review_shard"]["steps"]
+
+
+def test_the_two_reads_cannot_share_an_execution_log() -> None:
+    """The ladder names each attempt's log by RUNG alone, so a second read in the
+    same job truncates the first's and both steps report ONE path. The recorder
+    then prices the shard from that log twice and credits the wrong model — and
+    every unit test passes, because they hand it two paths production never makes.
+    The re-read must run under its own RUNNER_TEMP."""
+    escalated = next(s for s in _shard_steps() if s.get("id") == "escalated_review")
+    body = str(escalated.get("run", ""))
+    assert "export RUNNER_TEMP=" in body, body
+    recorder = next(
+        s for s in _shard_steps() if "record-shard-cost.mjs" in str(s.get("run", ""))
+    )
+    env = recorder["env"]
+    assert env["EXECUTION_FILE"] != env["EXECUTION_FILE_ESCALATED"]
+
+
+def test_the_escalated_transcript_is_published_like_the_first() -> None:
+    """A paid read of the untrusted diff whose transcript nothing stages is a
+    transcript nobody can audit."""
+    stage = next(s for s in _shard_steps() if s.get("id") == "stage_logs")
+    assert "escalated_review" in str(stage["env"]["LOGS_PATH_ESCALATED"])
+    assert "LOGS_PATH_ESCALATED" in str(stage["run"])
+
+
 def test_the_script_is_the_one_the_workflow_runs() -> None:
     """The step names this path; a rename that misses the workflow leaves the
     escalation silently unwired, and every shard reads cheap with a green job."""
