@@ -75,6 +75,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `model-low`             | none                  | A cheaper model for the shards of a sharded read. Empty reads every shard with `model`.                                                                                                                                          |
 | `low-tier-paths`        | none                  | Regex a path must match for its shard to take `model-low`. Every file in the shard must match.                                                                                                                                   |
 | `bulk-diff-lines`       | `0`                   | Diff lines past which every shard takes `model-low`. `0` never does.                                                                                                                                                             |
+| `escalate-blocking`     | `false`               | Re-read a shard with `model` when the cheap read's own verdict or a finding is `blocking`.                                                                                                                                       |
 | `max-reviews-per-pr`    | `1`                   | How many whole-diff reads one pull request may spend, from 0 to 999. It bounds the automatic triggers; `[opus-review]` and the review label fire whatever the count says. `0` turns the automatic reviewer off.                  |
 | `max-diff-lines`        | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                             |
 | `max-shardable-lines`   | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                            |
@@ -88,6 +89,12 @@ Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default
 A read is priced by the model that runs it, so the reviewer lets one pull request use two. `model` reads everything by default. `model-low`, once you name one, reads the shards you declare low-risk by path and every shard of a diff past `bulk-diff-lines` — the mechanical sweep, where the read is still worth having and the top model's price is not. Both are off until you set them, and a shard takes the cheaper model only when EVERY file in it qualifies, so a source file bundled with a doc change keeps the full-price read.
 
 Sizing it: one 136,480-line sweep read with `claude-opus-5` cost $103.84. Claude Sonnet 5 is priced 2.5x under Opus 5 on both input and output, so the same read on the low model costs about $42.
+
+`escalate-blocking` sends one claim back up. A shard the cheap model read, whose own output holds the merge — verdict `blocking`, or a finding of severity `blocking` — is read again by `model`, and that second read is the one that posts. Warnings, nits and a `needs_changes` verdict stay as the cheap model wrote them: they are the bulk of what a review says, and escalating them buys the diff at full price twice.
+
+It confirms a claim; it cannot find one nobody made. What the cheap read never noticed, the full-price read never sees, so a path whose misses are expensive belongs on `model` from the start rather than in the cheap tier with escalation behind it.
+
+The arithmetic: a shard that escalates pays both reads. With the low model at 40% of the high one, a review escalating a fraction k of its shards costs `0.4 + k` of the untiered price — cheaper while under 60% of shards escalate, and 1.4x in the worst case, where every shard is blocking.
 
 ## What the reviewer never does
 
