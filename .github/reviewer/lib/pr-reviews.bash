@@ -77,9 +77,9 @@ WHOLE_DIFF_READ_MARKER='<!-- whole-diff-read -->'
 OVERSIZED_REVIEW_MARKER='<!-- oversized-review -->'
 
 # The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
-# body. It is the SSOT for that string, and it is now informational: `real_reviewer_reviews`
-# selects the two markers above IN, so an unmarked review is already excluded.
-# shellcheck disable=SC2034 # read by auto-approve-skipped-pr.sh, which sources this file
+# body. It is the SSOT for that string, and the one non-read this library can name:
+# `real_reviewer_reviews` excludes it on the dated path, where selecting IN by the two
+# markers above is not what decides.
 AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 
 # real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's
@@ -106,13 +106,17 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # pull request a consumer has would buy one the day it bumps its pin. Empty (the
 # default) trusts the markers alone, which is right for a consumer with no such
 # history. A review with no submittedAt counts as a read, the same fail-safe direction.
+# The stand-in approval is excluded even before the cutover: it is the one non-read
+# this library can name, and counting it latches a skipped pull request unread — its
+# `synchronize` never buys the first pass once it leaves the skip class.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
     jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
-      --arg marked_from "${READS_MARKED_FROM:-}" \
+      --arg marked_from "${READS_MARKED_FROM:-}" --arg approval "$AUTO_APPROVAL_MARKER" \
       'select((.body // "") as $b
               | ($b | contains($read)) or ($b | contains($oversized))
-                or ($marked_from != "" and ((.submittedAt // "") < $marked_from)))'
+                or ($marked_from != "" and (($b | contains($approval)) | not)
+                    and ((.submittedAt // "") < $marked_from)))'
 }
 
 # require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.
@@ -133,6 +137,25 @@ require_review_budget() {
     echo "max-reviews-per-pr must be a whole number from 0 to 999 with no leading zero, not '$MAX_REVIEWS_PER_PR'" >&2
     exit 1
   }
+}
+
+# require_reads_marked_from — bind READS_MARKED_FROM, or refuse. Empty is the
+# default and means no cutover. The comparison in `real_reviewer_reviews` is a
+# STRING compare, which orders RFC3339 correctly only in UTC with no fraction, so
+# this is what makes that ordering true. A malformed value fails in both
+# directions and both are silent: `yesterday` sorts above every timestamp, so
+# every reviewer review reads as a spent read and the pull request is never
+# reviewed again; `26-09-10` sorts below, so the caller's double-read stays open.
+# Called by both consumers, and never from inside `real_reviewer_reviews`: both
+# call that under `$(…)`, where an `exit` kills only the subshell and surfaces as
+# the retry ladder's own message.
+require_reads_marked_from() {
+  READS_MARKED_FROM="${READS_MARKED_FROM:-}"
+  [[ -z "$READS_MARKED_FROM" ]] ||
+    [[ "$READS_MARKED_FROM" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+      echo "reads-marked-from must be an RFC3339 UTC timestamp like 2026-09-10T00:00:00Z, not '$READS_MARKED_FROM'" >&2
+      exit 1
+    }
 }
 
 # latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON

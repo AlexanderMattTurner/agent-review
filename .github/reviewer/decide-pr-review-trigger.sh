@@ -49,6 +49,8 @@ source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 # because the number bounds what one PR costs. A caller that wants no automatic
 # read at all passes 0.
 require_review_budget
+# The cutover date the count is read against; empty means the stamp alone decides.
+require_reads_marked_from
 # Written once: both arms that short-circuit on a budget of 0 say the same thing,
 # and a reader greps the decision line to find where it was made.
 NO_BUDGET="max-reviews-per-pr is 0, so no automatic review runs on this PR"

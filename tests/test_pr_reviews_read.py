@@ -80,11 +80,13 @@ def _ndjson(server: FakePRReviews) -> list[dict]:
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _latest(server: FakePRReviews) -> str:
+def _latest(server: FakePRReviews, **env: str) -> str:
     """What both consumers compute: the budget-spending reads, folded to the
     newest one. `real_reviewer_reviews` and `latest_of_reviews` are separate so a
     caller can count the same walk it folds."""
-    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | latest_of_reviews')
+    proc = _call(
+        server, 'real_reviewer_reviews "$2" "$3" "$4" | latest_of_reviews', **env
+    )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
@@ -303,3 +305,38 @@ def test_a_review_after_the_cutover_still_needs_its_stamp(github):
         submitted_at="2026-09-11T00:00:00Z",
     )
     assert _spent(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == 0
+
+
+def test_a_pre_cutover_stand_in_approval_still_spends_no_read(github):
+    """The cutover says an unstamped review was a read, and the stand-in approval is
+    the one unstamped review this library knows was NOT. Counted, it latches a
+    skipped PR unread: its `synchronize` never buys the first pass once the PR
+    leaves the skip class, silently and with a green job."""
+    github.add_review(
+        state="APPROVED",
+        body=f"{_marker()}\nAutomated approval: this PR type isn't Claude-reviewed.",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _spent(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == 0
+    assert _latest(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == ""
+
+
+@pytest.mark.parametrize(
+    "value", ["yesterday", "09/10/2026", "26-09-10", "2026-09-10T00:00:00+02:00"]
+)
+def test_a_cutover_that_is_not_an_rfc3339_utc_timestamp_is_refused(github, value):
+    """The compare is lexicographic, so only UTC with no fraction orders correctly.
+    Both malformed directions are silent: a value sorting high marks every review
+    read (never reviewed again), one sorting low is a no-op the caller believes in."""
+    proc = _call(
+        github,
+        'require_reads_marked_from; real_reviewer_reviews "$2" "$3" "$4"',
+        READS_MARKED_FROM=value,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert value in proc.stderr
+
+
+def test_an_empty_cutover_passes_the_check_it_opts_out_of(github):
+    proc = _call(github, "require_reads_marked_from", READS_MARKED_FROM="")
+    assert proc.returncode == 0, proc.stderr
