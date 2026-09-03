@@ -32,8 +32,10 @@ class Result:
     stderr: str
 
 
-def _argv(diff: Path, out: Path, max_lines: int, max_shards: int) -> list[str]:
-    return [
+def _argv(
+    diff: Path, out: Path, max_lines: int, max_shards: int, **tier: str
+) -> list[str]:
+    argv = [
         str(SHARDER),
         "--diff",
         str(diff),
@@ -44,10 +46,20 @@ def _argv(diff: Path, out: Path, max_lines: int, max_shards: int) -> list[str]:
         "--max-shards",
         str(max_shards),
     ]
+    # Off unless a case asks: the flags default to no tiering, and the cases that
+    # predate them must keep exercising that default.
+    for flag, value in tier.items():
+        argv += [f"--{flag.replace('_', '-')}", value]
+    return argv
 
 
 def _run(
-    diff: Path, out: Path, max_lines: int = 8000, max_shards: int = 0, **env_extra: str
+    diff: Path,
+    out: Path,
+    max_lines: int = 8000,
+    max_shards: int = 0,
+    tier: dict[str, str] | None = None,
+    **env_extra: str,
 ) -> Result:
     """Drive the sharder's own ``main`` in this interpreter.
 
@@ -59,7 +71,9 @@ def _run(
     env = {"PATH": os.environ.get("PATH", ""), **env_extra}
     code = 0
     with (
-        mock.patch.object(sys, "argv", _argv(diff, out, max_lines, max_shards)),
+        mock.patch.object(
+            sys, "argv", _argv(diff, out, max_lines, max_shards, **(tier or {}))
+        ),
         mock.patch.dict(os.environ, env, clear=True),
         # contextlib's own redirects: scoped to this `with`, restored on exit,
         # and the suite runs these cases in one thread.
@@ -406,3 +420,73 @@ def test_against_a_real_oversized_git_diff(tmp_path: Path, max_lines: int) -> No
     assert len(listed) == manifest["total_files"] == len(set(listed))
     # The non-uniform shapes survived the split as whole, distinct files.
     assert {"renamed-to.py", "deleted.py", "mode.sh", "blob.bin"} <= set(listed)
+
+
+# The model each shard is read with. The tier exists to spend the top model where
+# a mistake is expensive, so every case here asserts which side of that line a
+# shard lands on — never merely that some model was written.
+
+
+def test_no_low_model_leaves_every_shard_on_the_callers_model(tmp_path: Path) -> None:
+    """The default, and the whole behaviour of a caller that never opts in."""
+    diff = tmp_path / "d.diff"
+    diff.write_text(_file_section("docs/a.md", 5) + _file_section("bin/run.py", 5))
+    out = tmp_path / "out"
+    assert _run(diff, out, max_lines=8, tier={"model": "high-1"}).returncode == 0
+    assert {s["model"] for s in _manifest(out)["shards"]} == {"high-1"}
+
+
+def test_a_shard_is_low_only_when_every_file_in_it_qualifies(tmp_path: Path) -> None:
+    """A shard packs whole files, so one source file rides along with a doc change.
+    Downgrading that shard would read the source file at the cheaper price without
+    anything saying so."""
+    diff = tmp_path / "d.diff"
+    diff.write_text(
+        _file_section("docs/a.md", 5)
+        + _file_section("docs/b.md", 5)
+        + _file_section("sandbox-policy/egress.py", 5)
+    )
+    out = tmp_path / "out"
+    # max_lines forces one file per shard, then a mixed shard is built by hand below.
+    tier = {"model": "high-1", "model_low": "low-1", "low_tier_paths": r"^docs/"}
+    assert _run(diff, out, max_lines=8, tier=tier).returncode == 0
+    by_file = {s["files"][0]: s["model"] for s in _manifest(out)["shards"]}
+    assert by_file == {
+        "docs/a.md": "low-1",
+        "docs/b.md": "low-1",
+        "sandbox-policy/egress.py": "high-1",
+    }
+    # The mixed shard, through the same function the manifest is written from.
+    assert (
+        mod.model_for(
+            ["docs/a.md", "sandbox-policy/egress.py"],
+            ("high-1", "low-1"),
+            r"^docs/",
+            False,
+        )
+        == "high-1"
+    )
+
+
+def test_a_bulk_diff_reads_every_shard_with_the_low_model(tmp_path: Path) -> None:
+    """The mechanical sweep: 136,480 lines of it cost $103.84 to read at the top
+    model's price. Past the caller's bulk threshold the read still happens, at the
+    cheaper price, whatever the paths say."""
+    diff = tmp_path / "d.diff"
+    diff.write_text(_file_section("sandbox-policy/egress.py", 20))
+    out = tmp_path / "out"
+    tier = {
+        "model": "high-1",
+        "model_low": "low-1",
+        "low_tier_paths": r"^docs/",
+        "bulk_lines": "5",
+    }
+    assert _run(diff, out, max_lines=8000, tier=tier).returncode == 0
+    assert {s["model"] for s in _manifest(out)["shards"]} == {"low-1"}
+    # And below the threshold the same diff keeps the full-price read.
+    out2 = tmp_path / "out2"
+    assert (
+        _run(diff, out2, max_lines=8000, tier={**tier, "bulk_lines": "500"}).returncode
+        == 0
+    )
+    assert {s["model"] for s in _manifest(out2)["shards"]} == {"high-1"}

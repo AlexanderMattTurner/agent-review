@@ -941,6 +941,15 @@ def test_the_workflow_owns_the_read_budget() -> None:
         if "max-reviews-per-pr" in str(s.get("env", {}))
     ]
     assert readers == ["${{ inputs.max-reviews-per-pr }}"] * 2, readers
+    # The cutover date feeds the same count and carries the identical hazard: a
+    # recheck reading a different date answers a different question about the same
+    # PR, so both steps must take it from the one input.
+    dated = [
+        s["env"]["READS_MARKED_FROM"]
+        for s in steps
+        if "reads-marked-from" in str(s.get("env", {}))
+    ]
+    assert dated == ["${{ inputs.reads-marked-from }}"] * 2, dated
 
 
 def test_decide_step_passes_the_pr_number() -> None:

@@ -42,9 +42,12 @@ def github(tmp_path):
         yield server
 
 
-def _call(server: FakePRReviews, snippet: str) -> subprocess.CompletedProcess:
+def _call(
+    server: FakePRReviews, snippet: str, **env: str
+) -> subprocess.CompletedProcess:
     """Run one read against the reviews this server holds. The snippet gets the
-    owner, name and PR number as "$2", "$3" and "$4"."""
+    owner, name and PR number as "$2", "$3" and "$4"; `env` adds environment the
+    library reads, such as READS_MARKED_FROM."""
     owner, name = server.repo.split("/")
     return subprocess.run(
         [
@@ -66,6 +69,7 @@ def _call(server: FakePRReviews, snippet: str) -> subprocess.CompletedProcess:
             # itself still runs, so the exhausted-ladder path is the one
             # exercised.
             "RETRY_BASE_DELAY": "0",
+            **env,
         },
     )
 
@@ -76,19 +80,21 @@ def _ndjson(server: FakePRReviews) -> list[dict]:
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _latest(server: FakePRReviews) -> str:
+def _latest(server: FakePRReviews, **env: str) -> str:
     """What both consumers compute: the budget-spending reads, folded to the
     newest one. `real_reviewer_reviews` and `latest_of_reviews` are separate so a
     caller can count the same walk it folds."""
-    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | latest_of_reviews')
+    proc = _call(
+        server, 'real_reviewer_reviews "$2" "$3" "$4" | latest_of_reviews', **env
+    )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
 
-def _spent(server: FakePRReviews) -> int:
+def _spent(server: FakePRReviews, **env: str) -> int:
     """How many reads the PR has spent — the count decide-pr-review-trigger.sh
     compares against `max-reviews-per-pr`."""
-    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | jq -rs length')
+    proc = _call(server, 'real_reviewer_reviews "$2" "$3" "$4" | jq -rs length', **env)
     assert proc.returncode == 0, proc.stderr
     return int(proc.stdout.strip())
 
@@ -272,3 +278,65 @@ def test_the_oversized_notice_spends_a_read(github):
         submitted_at="2026-07-01T00:00:00Z",
     )
     assert _spent(github) == 1
+
+
+def test_a_review_older_than_the_caller_s_cutover_spends_a_read(github):
+    """A consumer that has just bumped its pin holds pull requests reviewed by the
+    OLDER reviewer, which stamped nothing. On the stamp alone each of them reads as
+    never reviewed, and the next push buys a second whole-diff read — the largest
+    single cost this reviewer can incur, and one the caller already paid once.
+    READS_MARKED_FROM is that caller's cutover moment."""
+    github.add_review(
+        state="COMMENTED",
+        body="## Review\n\nfindings from the reviewer that stamped nothing",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _spent(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == 1
+    assert _spent(github) == 0, "the term is the caller's to set, never a default"
+
+
+def test_a_review_after_the_cutover_still_needs_its_stamp(github):
+    """The term retires itself: past the cutover the stamp decides again, so the
+    stand-in approval a consumer posts under this same bot identity keeps costing
+    nothing."""
+    github.add_review(
+        state="APPROVED",
+        body=f"{_marker()}\nAutomated approval.",
+        submitted_at="2026-09-11T00:00:00Z",
+    )
+    assert _spent(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == 0
+
+
+def test_a_pre_cutover_stand_in_approval_still_spends_no_read(github):
+    """The cutover says an unstamped review was a read, and the stand-in approval is
+    the one unstamped review this library knows was NOT. Counted, it latches a
+    skipped PR unread: its `synchronize` never buys the first pass once the PR
+    leaves the skip class, silently and with a green job."""
+    github.add_review(
+        state="APPROVED",
+        body=f"{_marker()}\nAutomated approval: this PR type isn't Claude-reviewed.",
+        submitted_at="2026-07-01T00:00:00Z",
+    )
+    assert _spent(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == 0
+    assert _latest(github, READS_MARKED_FROM="2026-09-10T00:00:00Z") == ""
+
+
+@pytest.mark.parametrize(
+    "value", ["yesterday", "09/10/2026", "26-09-10", "2026-09-10T00:00:00+02:00"]
+)
+def test_a_cutover_that_is_not_an_rfc3339_utc_timestamp_is_refused(github, value):
+    """The compare is lexicographic, so only UTC with no fraction orders correctly.
+    Both malformed directions are silent: a value sorting high marks every review
+    read (never reviewed again), one sorting low is a no-op the caller believes in."""
+    proc = _call(
+        github,
+        'require_reads_marked_from; real_reviewer_reviews "$2" "$3" "$4"',
+        READS_MARKED_FROM=value,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert value in proc.stderr
+
+
+def test_an_empty_cutover_passes_the_check_it_opts_out_of(github):
+    proc = _call(github, "require_reads_marked_from", READS_MARKED_FROM="")
+    assert proc.returncode == 0, proc.stderr

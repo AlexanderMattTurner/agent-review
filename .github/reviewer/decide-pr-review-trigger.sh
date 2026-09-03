@@ -28,7 +28,7 @@
 # checked out or executed, and matched only as fixed DATA strings (never eval).
 #
 # Env: GH_TOKEN, ACTION, REPO, HEAD_SHA, PR, LABEL, REVIEW_LABEL,
-#      MAX_REVIEWS_PER_PR.
+#      MAX_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
 set -euo pipefail
 
 KEYWORD="[opus-review]"
@@ -49,6 +49,8 @@ source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 # because the number bounds what one PR costs. A caller that wants no automatic
 # read at all passes 0.
 require_review_budget
+# The cutover date the count is read against; empty means the stamp alone decides.
+require_reads_marked_from
 # Written once: both arms that short-circuit on a budget of 0 say the same thing,
 # and a reader greps the decision line to find where it was made.
 NO_BUDGET="max-reviews-per-pr is 0, so no automatic review runs on this PR"

@@ -39,6 +39,21 @@ on:
         required: false
         default: "claude-opus-5"
         type: string
+      model-low:
+        description: "A cheaper model for the shards of a big pull request that do not need the top one. Empty (the default) reads every shard with `model`. It applies to a SHARDED read only: a pull request small enough for one read is already the cheap case. A shard takes it when every file in it matches `low-tier-paths`, or when the whole diff is over `bulk-diff-lines`."
+        required: false
+        default: ""
+        type: string
+      low-tier-paths:
+        description: "A regular expression (Python `re`) a file path must match for its shard to read with `model-low`. Every file in the shard must match, so a source file bundled with documentation keeps the full-price read. Empty matches nothing. A pattern that does not compile reds the job."
+        required: false
+        default: ""
+        type: string
+      bulk-diff-lines:
+        description: "Diff lines past which EVERY shard reads with `model-low`, whatever its paths — the mechanical sweep whose read is worth having but not at the top model's price. 0 (the default) never does this. It has no effect without `model-low`."
+        required: false
+        default: 0
+        type: number
       review-prompt:
         description: "Repo-relative path IN THE CALLING repository to the review instructions. Empty uses this reviewer's own prompts/claude-pr-review.md, which is generic; name your own to add the conventions a reviewer of your tree should hold it to."
         required: false
@@ -48,6 +63,11 @@ on:
         description: "The label that asks for a review on a pull request the CALLER's own `if:` skips — a low-risk title, a bot author. The caller must also list `labeled` in its `pull_request_target` types, or GitHub fires no run for the label."
         required: false
         default: "needs-auto-review"
+        type: string
+      reads-marked-from:
+        description: "RFC3339 timestamp of the moment THIS caller started running a reviewer that stamps a review as a whole-diff read. Every review older than it counts as a read although it carries no stamp, so bumping your pin does not hand each already-reviewed pull request a fresh budget and a second paid read on its next push. Set it to a moment after the last review your older reviewer posted. Empty trusts the stamp alone. Remove it once no open pull request predates the date."
+        required: false
+        default: ""
         type: string
       max-reviews-per-pr:
         description: "How many whole-diff reads one pull request may spend, across its whole life, from 0 to 999. A run that finds the diff too large to read spends one too — it still paid for the job, and counting it is what stops an oversized pull request re-running on every push. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
@@ -201,6 +221,7 @@ jobs:
           LABEL: ${{ github.event.label.name }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
 
   review:
@@ -274,6 +295,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/recheck-pr-review-owed.sh"
 
       - name: Set up Node and the input sanitizer
@@ -341,6 +363,12 @@ jobs:
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
           SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
           MAX_SHARDABLE_LINES: ${{ inputs.max-shardable-lines }}
+          # The sharder writes each shard's model into the manifest, so the tier is
+          # decided once and every leg reads the same answer back.
+          MODEL: ${{ inputs.model }}
+          MODEL_LOW: ${{ inputs.model-low }}
+          LOW_TIER_PATHS: ${{ inputs.low-tier-paths }}
+          BULK_DIFF_LINES: ${{ inputs.bulk-diff-lines }}
         run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
 
       - name: Post the oversized notice as a review plus a human-review thread
@@ -550,13 +578,21 @@ jobs:
           name: pr-review-input
           path: ${{ runner.temp }}/pr-input
 
-      - name: Narrow this leg's diff.txt to its shard
+      - name: Narrow this leg's diff.txt to its shard, and read its model
         # The ladder reads diff.txt by that name, so hand it the shard under that
-        # name rather than teaching the shared reader about sharding.
+        # name rather than teaching the shared reader about sharding. The model
+        # comes from the manifest the sharder already wrote: the tier is decided
+        # once, for every leg, by the one step that has the whole diff in hand.
         env:
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           SHARD: ${{ matrix.shard }}
-        run: cp "${PR_INPUT_DIR}/shards/${SHARD}" "${PR_INPUT_DIR}/diff.txt"
+        run: |
+          cp "${PR_INPUT_DIR}/shards/${SHARD}" "${PR_INPUT_DIR}/diff.txt"
+          model="$(jq -r --arg s "$SHARD" \
+            '.shards[] | select(.name == $s) | .model // ""' \
+            "${PR_INPUT_DIR}/shards/manifest.json")"
+          echo "SHARD_MODEL=${model}" >>"$GITHUB_ENV"
+          echo "shard ${SHARD} reads with ${model:-the model input}"
 
       - name: Review this shard with Claude
         id: claude_review
@@ -569,7 +605,9 @@ jobs:
           RUNG_6_TOKEN: ${{ secrets.rung_6 }}
           RUNG_7_TOKEN: ${{ secrets.rung_7 }}
           RUNG_8_TOKEN: ${{ secrets.rung_8 }}
-          MODEL: ${{ inputs.model }}
+          # The manifest's answer for THIS shard; the input is the fallback for a
+          # manifest written before the tier existed, and for an unset entry.
+          MODEL: ${{ env.SHARD_MODEL || inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
