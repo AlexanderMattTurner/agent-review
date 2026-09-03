@@ -113,8 +113,9 @@ def test_the_two_reads_cannot_share_an_execution_log() -> None:
     every unit test passes, because they hand it two paths production never makes.
     The re-read must run under its own RUNNER_TEMP."""
     escalated = next(s for s in _shard_steps() if s.get("id") == "escalated_review")
-    body = str(escalated.get("run", ""))
-    assert "export RUNNER_TEMP=" in body, body
+    script = REPO_ROOT / ".github" / "reviewer" / "escalated-read.sh"
+    assert script.name in str(escalated.get("run", "")), escalated.get("run")
+    assert "export RUNNER_TEMP=" in script.read_text(encoding="utf-8")
     recorder = next(
         s for s in _shard_steps() if "record-shard-cost.mjs" in str(s.get("run", ""))
     )

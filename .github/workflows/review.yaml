@@ -653,36 +653,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
-        # The ladder deletes review.json before each attempt, so the cheap read's
-        # verdict is kept aside and restored when the re-read produces none. A
-        # re-read that dies must cost this shard its findings, not its review.
-        #
-        # Its own RUNNER_TEMP: the ladder names each attempt's log by RUNG alone
-        # (`review-attempt-<n>.json`), so a second read in this job would truncate
-        # the cheap read's log and both steps would report the same path — the
-        # shard then priced from one log twice, and credited to the wrong model.
-        #
-        # The escalation trigger includes "the cheap read left no readable review",
-        # so neither copy may assume its source exists: a bare `cp` under `bash -e`
-        # reds the shard on exactly the case the re-read is here to rescue.
-        run: |
-          escalated_temp="${RUNNER_TEMP}/escalated"
-          mkdir -p "${escalated_temp}"
-          [[ -d "${escalated_temp}" ]] || exit 1
-          export RUNNER_TEMP="${escalated_temp}"
-          if [[ -s "${PR_INPUT_DIR}/review.json" ]]; then
-            cp "${PR_INPUT_DIR}/review.json" "${PR_INPUT_DIR}/review.cheap.json"
-          fi
-          /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py" || true
-          if [[ ! -s "${PR_INPUT_DIR}/review.json" ]]; then
-            if [[ ! -s "${PR_INPUT_DIR}/review.cheap.json" ]]; then
-              echo "::error::the escalated read produced no review and the cheap read left none to restore"
-              exit 1
-            fi
-            echo "::warning::the escalated read produced no review; keeping the cheap one"
-            cp "${PR_INPUT_DIR}/review.cheap.json" "${PR_INPUT_DIR}/review.json"
-            echo "ESCALATION_KEPT=false" >>"$GITHUB_ENV"
-          fi
+        # The re-read's own log directory, the guarded copies and the restore live
+        # in the script: this block was 17 lines, and substantial inline shell is
+        # invisible to shellcheck, shfmt and shellharden.
+        run: bash "${REVIEWER_DIR}/escalated-read.sh"
 
       - name: Fail loud if every escalated credential attempt errored
         # Same gate as the cheap read's, on the escalated read's own log, and
