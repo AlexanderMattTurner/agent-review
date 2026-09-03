@@ -38,6 +38,25 @@ function record(events) {
   return JSON.parse(readFileSync(out, "utf8"));
 }
 
+// The escalated shape: a cheap read, then a full-price re-read of the same shard.
+function recordEscalated(cheap, escalated, kept) {
+  const dir = mkdtempSync(join(tmpdir(), "rsc-"));
+  dirs.push(dir);
+  const out = join(dir, "shard-cost.json");
+  const env = { ...process.env, SHARD_COST_FILE: out };
+  delete env.RUNNER_TEMP;
+  const write = (name, events) => {
+    const log = join(dir, name);
+    writeFileSync(log, JSON.stringify(events));
+    return log;
+  };
+  env.EXECUTION_FILE = write("cheap.json", cheap);
+  env.EXECUTION_FILE_ESCALATED = write("escalated.json", escalated);
+  if (kept !== undefined) env.ESCALATION_KEPT = kept;
+  execFileSync("node", [SCRIPT], { env, stdio: "pipe" });
+  return JSON.parse(readFileSync(out, "utf8"));
+}
+
 describe("record-shard-cost", () => {
   it("records the cost and model from the shard's execution log", () => {
     const parsed = record([
@@ -55,5 +74,38 @@ describe("record-shard-cost", () => {
     const env = { ...process.env };
     delete env.SHARD_COST_FILE;
     assert.throws(() => execFileSync("node", [SCRIPT], { env, stdio: "pipe" }));
+  });
+});
+
+describe("record-shard-cost, on a shard that escalated", () => {
+  it("prices BOTH reads and credits the model whose findings post", () => {
+    const got = recordEscalated(
+      [{ total_cost_usd: 0.4, model: "low-1" }],
+      [{ total_cost_usd: 1.6, model: "high-1" }],
+    );
+    // The escalated read replaced the cheap verdict, so the cheap read is spend
+    // with no findings left — and the footer must still name what it cost.
+    assert.deepEqual(got, { cost: 2, model: "high-1" });
+  });
+
+  it("drops the price when one of the two reads left no readable cost", () => {
+    // Half a sum renders exactly like a whole one: ~40% of what the review cost,
+    // with nothing in the footer marking it partial.
+    const got = recordEscalated(
+      [{ total_cost_usd: 0.4, model: "low-1" }],
+      [{ model: "high-1" }],
+    );
+    assert.equal(got.cost, null);
+  });
+
+  it("credits the cheap model when the escalated read died and was discarded", () => {
+    const got = recordEscalated(
+      [{ total_cost_usd: 0.4, model: "low-1" }],
+      [{ total_cost_usd: 0.1, model: "high-1" }],
+      "false",
+    );
+    // Still both costs: the failed read spent real money. The published findings
+    // are the cheap read's, so that is the model this shard is credited to.
+    assert.deepEqual(got, { cost: 0.5, model: "low-1" });
   });
 });

@@ -44,6 +44,11 @@ on:
         required: false
         default: ""
         type: string
+      escalate-blocking:
+        description: "Re-read a shard with `model` when the cheaper model's own output holds the merge — verdict `blocking`, or a finding of severity `blocking`. It confirms an expensive claim; it cannot find what the cheap read missed, so a path whose misses are costly belongs in neither tier's cheap half. A shard that escalates pays both reads, so a pull request whose every shard is blocking costs 1.4x an untiered one. No effect without `model-low`."
+        required: false
+        default: false
+        type: boolean
       low-tier-paths:
         description: "A regular expression (Python `re`) a file path must match for its shard to read with `model-low`. Every file in the shard must match, so a source file bundled with documentation keeps the full-price read. Empty matches nothing. A pattern that does not compile reds the job."
         required: false
@@ -621,11 +626,63 @@ jobs:
           CONTEXT: Claude PR review shard ${{ matrix.shard }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/checks/claude-execution.py"
 
+      - name: Decide whether the cheap read's claim needs the full-price model
+        id: escalate
+        if: inputs.escalate-blocking
+        env:
+          REVIEW_JSON: ${{ runner.temp }}/pr-input/review.json
+          SHARD_MODEL: ${{ env.SHARD_MODEL }}
+          MODEL: ${{ inputs.model }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/decide-escalation.py"
+
+      - name: Re-read this shard with the full-price model
+        id: escalated_review
+        if: steps.escalate.outputs.escalate == 'true'
+        env:
+          RUNG_1_TOKEN: ${{ secrets.rung_1 }}
+          RUNG_2_TOKEN: ${{ secrets.rung_2 }}
+          RUNG_3_TOKEN: ${{ secrets.rung_3 }}
+          RUNG_4_TOKEN: ${{ secrets.rung_4 }}
+          RUNG_5_TOKEN: ${{ secrets.rung_5 }}
+          RUNG_6_TOKEN: ${{ secrets.rung_6 }}
+          RUNG_7_TOKEN: ${{ secrets.rung_7 }}
+          RUNG_8_TOKEN: ${{ secrets.rung_8 }}
+          MODEL: ${{ inputs.model }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
+        # The re-read's own log directory, the guarded copies and the restore live
+        # in the script: this block was 17 lines, and substantial inline shell is
+        # invisible to shellcheck, shfmt and shellharden.
+        run: bash "${REVIEWER_DIR}/escalated-read.sh"
+
+      - name: Fail loud if every escalated credential attempt errored
+        # Same gate as the cheap read's, on the escalated read's own log, and
+        # continue-on-error because the shard MUST still publish: the step above
+        # restored the cheap verdict, and a red job here would skip the upload and
+        # cost the whole review its shard. The red step is the loud part.
+        if: steps.escalate.outputs.escalate == 'true'
+        continue-on-error: true
+        env:
+          EXECUTION_FILE: ${{ steps.escalated_review.outputs.execution_file }}
+          CONTEXT: Escalated Claude PR review shard ${{ matrix.shard }}
+        run: /usr/bin/python3 "${REVIEWER_DIR}/checks/claude-execution.py"
+
       - name: Record this shard's review cost
         # The number only — the execution log stays on the runner and reaches an
         # artifact solely through the redacting upload below.
         env:
+          # BOTH reads when this shard escalated: the footer prices the review, and
+          # a shard that paid twice reported half its cost while the tier's whole
+          # point is what the review cost.
           EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
+          EXECUTION_FILE_ESCALATED: ${{ steps.escalated_review.outputs.execution_file }}
+          # `false` only when the escalated read died and the cheap verdict was
+          # restored: the shard still PAID for both, and the model it is credited
+          # to is the one whose findings actually post.
+          ESCALATION_KEPT: ${{ env.ESCALATION_KEPT }}
           SHARD_COST_FILE: ${{ runner.temp }}/pr-input/shard-cost.json
         run: node "${REVIEWER_DIR}/record-shard-cost.mjs"
 
@@ -644,6 +701,10 @@ jobs:
         timeout-minutes: 5
         env:
           LOGS_PATH: ${{ steps.claude_review.outputs.execution_file }}
+          # The escalated read is a second paid read of the same untrusted diff, so
+          # its transcript is published on the same fail-closed path as the first.
+          # Empty when this shard did not escalate.
+          LOGS_PATH_ESCALATED: ${{ steps.escalated_review.outputs.execution_file }}
           LOGS_OUT: ${{ runner.temp }}/agent-logs-upload/pr-review
           REDACTOR: ${{ github.workspace }}/${{ inputs.log-redactor }}
           REPO_ROOT: ${{ github.workspace }}
@@ -652,6 +713,11 @@ jobs:
         run: |
           mkdir -p "${LOGS_OUT}"
           bash "${REVIEWER_DIR}/stage-agent-logs.sh"
+          if [[ -n "${LOGS_PATH_ESCALATED}" ]]; then
+            mkdir -p "${LOGS_OUT}/escalated"
+            LOGS_PATH="${LOGS_PATH_ESCALATED}" LOGS_OUT="${LOGS_OUT}/escalated" \
+              bash "${REVIEWER_DIR}/stage-agent-logs.sh"
+          fi
 
       - name: Publish this leg's Claude logs
         # Keyed by the matrix value, or the legs collide and only one log survives.

@@ -15,6 +15,8 @@ These tests enumerate every call site on both paths, so a future one that opts
 out (or a refactor that drops the gate step) reds without being named here.
 """
 
+import re
+
 import yaml
 
 from tests._helpers import REPO_ROOT
@@ -170,13 +172,32 @@ def _steps_running(job, needle):
     return [s for s in job.get("steps") or [] if needle in str(s.get("run", ""))]
 
 
+# A step may reach the model through one of the reviewer's own scripts rather than
+# naming the ladder itself. Reading that script is what keeps every check below
+# honest: matched on the `run:` text alone, a one-line wrapper would take a step
+# out of the model-caller set while it still spends a credential and still calls
+# the model — the gate, the `if:` and the credential checks would all pass over it.
+_WRAPPER = re.compile(r"\$\{REVIEWER_DIR\}/(?P<script>[A-Za-z0-9_.-]+\.(?:sh|py))")
+
+
+def _runs_the_ladder(step) -> bool:
+    body = str(step.get("run", ""))
+    if LADDER in body:
+        return True
+    return any(
+        (script := REPO_ROOT / ".github" / "reviewer" / name).is_file()
+        and LADDER in script.read_text(encoding="utf-8")
+        for name in _WRAPPER.findall(body)
+    )
+
+
+def _model_steps(job):
+    return [s for s in job.get("steps") or [] if _runs_the_ladder(s)]
+
+
 def _model_jobs():
     """Every job in review.yaml that calls the model, as (name, job)."""
-    return [
-        (name, job)
-        for name, job in _review_jobs().items()
-        if _steps_running(job, LADDER)
-    ]
+    return [(name, job) for name, job in _review_jobs().items() if _model_steps(job)]
 
 
 def test_the_reviewer_gate_script_exists() -> None:
@@ -193,19 +214,35 @@ def test_the_reviewer_calls_the_model_from_more_than_one_job() -> None:
     assert len(_model_jobs()) >= 2, f"found model jobs: {[n for n, _ in _model_jobs()]}"
 
 
+def _gated_pairs(job) -> list[tuple[dict, dict | None]]:
+    """Every ladder step in `job`, each with the gate that reads ITS OWN log.
+
+    Paired by the step id the gate names, never by position: a shard leg runs the
+    ladder twice — the cheap read and the escalated one — and pairing by order
+    would call a gate on the first log a gate on the second.
+    """
+    gates = _steps_running(job, REVIEWER_GATE)
+    by_log = {str((g.get("env") or {}).get("EXECUTION_FILE")): g for g in gates}
+    return [
+        (m, by_log.get("${{ steps.%s.outputs.execution_file }}" % m["id"]))
+        for m in _model_steps(job)
+    ]
+
+
 def test_every_reviewer_model_call_is_gated() -> None:
-    """The choke-point property at the reviewer's call shape: every job that
-    runs the credential ladder also runs the execution-log gate, and the gate
-    reads that ladder step's own log."""
+    """The choke-point property at the reviewer's call shape: EVERY ladder step
+    runs the execution-log gate, and each gate reads the log of the step it
+    belongs to. Counting the steps instead would admit a second model call whose
+    own failure nothing reads — a paid read that errored on every rung, and a
+    green job over it."""
     for name, job in _model_jobs():
-        model_steps = _steps_running(job, LADDER)
-        assert len(model_steps) == 1, f"{name} runs the ladder {len(model_steps)} times"
-        gates = _steps_running(job, REVIEWER_GATE)
-        assert len(gates) == 1, f"{name} has {len(gates)} gate steps, expected 1"
-        model, gate = model_steps[0], gates[0]
-        assert gate["env"]["EXECUTION_FILE"] == (
-            "${{ steps.%s.outputs.execution_file }}" % model["id"]
-        ), f"{name}'s gate reads a log its own model step did not write"
+        pairs = _gated_pairs(job)
+        assert pairs, f"{name} runs the ladder in no step this can pair"
+        for model, gate in pairs:
+            assert gate is not None, (
+                f"{name}'s `{model.get('name')}` calls the model with no gate "
+                "reading its own execution log"
+            )
 
 
 def test_no_reviewer_gate_is_narrowed_past_its_model_step() -> None:
@@ -213,12 +250,12 @@ def test_no_reviewer_gate_is_narrowed_past_its_model_step() -> None:
     be skipped while the model still ran — the silent green this exists to
     prevent."""
     for name, job in _model_jobs():
-        model = _steps_running(job, LADDER)[0]
-        gate = _steps_running(job, REVIEWER_GATE)[0]
-        assert gate.get("if") == model.get("if"), (
-            f"{name}: gate `if:` {gate.get('if')!r} does not match the model "
-            f"step's {model.get('if')!r}"
-        )
+        for model, gate in _gated_pairs(job):
+            assert gate is not None, f"{name}: `{model.get('name')}` has no gate"
+            assert gate.get("if") == model.get("if"), (
+                f"{name}: gate `if:` {gate.get('if')!r} does not match the model "
+                f"step's {model.get('if')!r}"
+            )
 
 
 def test_the_review_credentials_reach_only_the_steps_that_run_the_model() -> None:
@@ -232,7 +269,7 @@ def test_the_review_credentials_reach_only_the_steps_that_run_the_model() -> Non
             label = f"{name}:{step.get('name')}"
             if "secrets.rung_" in yaml.safe_dump(step.get("env") or {}):
                 holders.append(label)
-            if LADDER in str(step.get("run", "")):
+            if _runs_the_ladder(step):
                 callers.append(label)
     assert sorted(holders) == sorted(callers), (
         f"credential holders {sorted(holders)} != model callers {sorted(callers)}"
@@ -248,12 +285,18 @@ def test_every_rung_reaches_the_model_step() -> None:
     # block is under `True` and not under the string.
     declared = set(doc[True]["workflow_call"]["secrets"])
     for name, job in _model_jobs():
-        env = _steps_running(job, LADDER)[0]["env"]
-        forwarded = {
-            rung
-            for rung in declared
-            if any(
-                f"secrets.{rung} " in f"{value} " for value in map(str, env.values())
+        # EVERY model step, not the first: a second read that forwards fewer rungs
+        # dies on a dead credential the first read would have walked past.
+        for step in _model_steps(job):
+            env = step["env"]
+            forwarded = {
+                rung
+                for rung in declared
+                if any(
+                    f"secrets.{rung} " in f"{value} "
+                    for value in map(str, env.values())
+                )
+            }
+            assert forwarded == declared, (
+                f"{name}'s `{step.get('name')}` drops rung(s): {declared - forwarded}"
             )
-        }
-        assert forwarded == declared, f"{name} drops rung(s): {declared - forwarded}"
