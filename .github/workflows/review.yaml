@@ -592,7 +592,7 @@ jobs:
             '.shards[] | select(.name == $s) | .model // ""' \
             "${PR_INPUT_DIR}/shards/manifest.json")"
           echo "SHARD_MODEL=${model}" >>"$GITHUB_ENV"
-          echo "shard ${SHARD} reads with ${model:-the caller's model input}"
+          echo "shard ${SHARD} reads with ${model:-the model input}"
 
       - name: Review this shard with Claude
         id: claude_review
