@@ -177,7 +177,7 @@ def _steps_running(job, needle):
 # honest: matched on the `run:` text alone, a one-line wrapper would take a step
 # out of the model-caller set while it still spends a credential and still calls
 # the model — the gate, the `if:` and the credential checks would all pass over it.
-_WRAPPER = re.compile(r"\$\{REVIEWER_DIR\}/([A-Za-z0-9_.-]+\.(?:sh|py))")
+_WRAPPER = re.compile(r"\$\{REVIEWER_DIR\}/(?P<script>[A-Za-z0-9_.-]+\.(?:sh|py))")
 
 
 def _runs_the_ladder(step) -> bool:

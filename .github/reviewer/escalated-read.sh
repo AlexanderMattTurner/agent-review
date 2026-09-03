@@ -38,7 +38,12 @@ review="${PR_INPUT_DIR}/review.json"
 # is that test's then-branch — an absent review is the escalate-on-unreadable case.
 [[ ! -s "$review" ]] || cp "$review" "$cheap"
 
-/usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py" || true
+# The status is kept, not suppressed: the next step runs the execution gate on
+# THIS read's log, which is where a failed read is reported and its spend billed.
+# Absorbing it here is what lets the restore below publish the cheap verdict.
+rc=0
+/usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py" || rc=$?
+((rc == 0)) || echo "the escalated read exited ${rc}; the gate step reports why" >&2
 
 if [[ ! -s "$review" ]]; then
   if [[ ! -s "$cheap" ]]; then
