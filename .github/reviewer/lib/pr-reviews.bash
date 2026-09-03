@@ -153,9 +153,9 @@ require_reads_marked_from() {
   READS_MARKED_FROM="${READS_MARKED_FROM:-}"
   [[ -z "$READS_MARKED_FROM" ]] ||
     [[ "$READS_MARKED_FROM" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
-      echo "reads-marked-from must be an RFC3339 UTC timestamp like 2026-09-10T00:00:00Z, not '$READS_MARKED_FROM'" >&2
-      exit 1
-    }
+    echo "reads-marked-from must be an RFC3339 UTC timestamp like 2026-09-10T00:00:00Z, not '$READS_MARKED_FROM'" >&2
+    exit 1
+  }
 }
 
 # latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON
