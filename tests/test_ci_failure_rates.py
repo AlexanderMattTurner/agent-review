@@ -352,6 +352,72 @@ def test_fetch_dedupes_the_window_boundary_run():
     assert len(records) == n  # exactly n, no double-count at the seam
 
 
+def test_fetch_counts_a_startup_failure_run_under_its_workflow_name():
+    # A run that dies before any job starts lists no jobs, so a job-name-only
+    # aggregation drops it and the workflow reads as zero failures. The run's own
+    # `startup_failure` conclusion must be counted, under a key suffixed to keep
+    # it off the job-name rows a successful run of the same workflow feeds, and
+    # its (necessarily empty) jobs endpoint must not be fetched at all.
+    runs = [
+        {"id": 0, "created_at": "0002", "name": "Lint", "conclusion": "success"},
+        {
+            "id": 1,
+            "created_at": "0001",
+            "name": "Hook lifecycle",
+            "conclusion": "startup_failure",
+        },
+    ]
+    calls: list[str] = []
+
+    def getter(url: str) -> dict:
+        calls.append(url)
+        if "/actions/runs?" in url:
+            return {"workflow_runs": runs}
+        return {"jobs": [_rec("lint", "success")]}
+
+    records = fetch_job_records("o/r", "tok", max_runs=100, get_json=getter)
+    assert records == [
+        _rec("Hook lifecycle (workflow startup)", "startup_failure"),
+        _rec("lint", "success"),
+    ]
+    # Only run 0's jobs are fetched; run 1 has none to fetch.
+    assert [c for c in calls if "/jobs?" in c] == [
+        f"{mod.API_ROOT}/repos/o/r/actions/runs/0/jobs?per_page={PER_PAGE}&page=1"
+    ]
+
+
+def test_startup_failure_gets_its_own_row_beside_the_job_rows():
+    # End-to-end through the aggregator: the startup_failure record is both a run
+    # and a failure, and it sits on its own row — the workflow's successful runs
+    # report under their JOB names, so folding the two together would claim a
+    # denominator the startup key never sees.
+    records = [
+        _rec("Hook lifecycle (workflow startup)", "startup_failure"),
+        _rec("hook-lifecycle", "success"),
+    ]
+    assert build_report(records) == (
+        "# CI failure-rate report (RFC)\n"
+        "\n"
+        "| Check | Runs | Failures | Failure rate |\n"
+        "| :-- | --: | --: | --: |\n"
+        "| Hook lifecycle (workflow startup) | 1 | 1 | 100.0% |\n"
+        "| hook-lifecycle | 1 | 0 | 0.0% |\n"
+    )
+
+
+def test_action_required_counts_as_a_failed_run():
+    # A job parked on a manual approval gate reached a verdict the report counts,
+    # per the documented counting rule.
+    records = [_rec("deploy", "action_required"), _rec("deploy", "success")]
+    assert build_report(records) == (
+        "# CI failure-rate report (RFC)\n"
+        "\n"
+        "| Check | Runs | Failures | Failure rate |\n"
+        "| :-- | --: | --: | --: |\n"
+        "| deploy | 2 | 1 | 50.0% |\n"
+    )
+
+
 def test_rate_limit_wait_honors_secondary_retry_after():
     # A secondary (abuse) limit carries Retry-After — wait exactly that long.
     err = _http_error(403, {"Retry-After": "30"})
