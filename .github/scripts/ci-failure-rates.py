@@ -21,13 +21,18 @@ a small worker pool and Retry-After backoff rather than more parallelism.
 
 Counting rule (documented so the number means something):
   - denominator ("runs") counts only jobs that actually ran to a verdict:
-    conclusions `success`, `failure`, `timed_out`.
-  - numerator ("failures") counts `failure` and `timed_out`.
+    conclusions `success`, `failure`, `timed_out`, `action_required`,
+    `startup_failure`.
+  - numerator ("failures") counts every counted conclusion except `success`.
   - `cancelled` and `skipped` are EXCLUDED from both — a cancelled job is almost
     always supersession noise (a newer push cancelling an older run, per the
     repo's concurrency rules), and a skipped job is a decide-gate no-op; neither
     is evidence the check is flaky or slow, so folding them in would dilute the
     signal this report exists to surface.
+  - a run that dies with `startup_failure` lists NO jobs, so it is counted once
+    under its WORKFLOW name (see fetch_job_records). Without that, the run that
+    never started reads as zero failures — a workflow broken at startup is the
+    one this report most needs to name.
 
 The aggregator (`build_report`) is PURE — it takes an already-fetched list of
 job records (plain dicts with `name` and `conclusion`) and returns the Markdown
@@ -205,8 +210,8 @@ def _get_json_retry(url: str, token: str, *, attempts: int = 6) -> dict:
     raise SystemExit(f"unreachable: exhausted retries for {url}")  # pragma: no cover
 
 
-def _run_ids(repo: str, get: Getter, *, max_runs: int) -> list[int]:
-    """Up to MAX_RUNS most-recent completed-main run ids, sliding past the 1000 cap.
+def _run_summaries(repo: str, get: Getter, *, max_runs: int) -> list[dict]:
+    """Up to MAX_RUNS most-recent completed-main runs, sliding past the 1000 cap.
 
     GitHub returns at most 1000 runs per query, so a request for more history is
     served as a sequence of `created:<=<oldest-seen>` windows: page a window up to
@@ -215,11 +220,11 @@ def _run_ids(repo: str, get: Getter, *, max_runs: int) -> list[int]:
     the ceiling is the end of history — stop. A window that adds no new id (all
     duplicates) also stops, so a cluster of same-timestamp runs can't loop.
     """
-    ids: list[int] = []
+    summaries: list[dict] = []
     seen: set[int] = set()
     before: str | None = None
-    while len(ids) < max_runs:
-        start = len(ids)
+    while len(summaries) < max_runs:
+        start = len(summaries)
         oldest: str | None = None
         fetched = 0
         for page in range(1, API_MAX_PAGE + 1):
@@ -234,15 +239,15 @@ def _run_ids(repo: str, get: Getter, *, max_runs: int) -> list[int]:
             for run in runs:
                 if run["id"] not in seen:
                     seen.add(run["id"])
-                    ids.append(run["id"])
+                    summaries.append(run)
                 oldest = run["created_at"]
-            if len(runs) < PER_PAGE or len(ids) >= max_runs:
+            if len(runs) < PER_PAGE or len(summaries) >= max_runs:
                 break
         # End of history (window under the cap), or no forward progress → done.
-        if oldest is None or fetched < LISTING_CAP or len(ids) == start:
+        if oldest is None or fetched < LISTING_CAP or len(summaries) == start:
             break
         before = oldest
-    return ids[:max_runs]
+    return summaries[:max_runs]
 
 
 def fetch_job_records(
@@ -266,7 +271,19 @@ def fetch_job_records(
 
         fetch = _default_fetch
 
-    ids = _run_ids(repo, fetch, max_runs=max_runs)
+    runs = _run_summaries(repo, fetch, max_runs=max_runs)
+    # A run that dies before any job starts — a caller granting fewer permissions
+    # than the reusable workflow it calls, an unresolvable `uses:`, invalid YAML —
+    # reports `startup_failure` and lists ZERO jobs. Aggregating by job name alone
+    # therefore drops it, and a workflow that never starts reads as no failures at
+    # all. Count the run itself under its workflow name, and skip the jobs call
+    # that can only come back empty.
+    startup_failures = [
+        {"name": run.get("name", ""), "conclusion": "startup_failure"}
+        for run in runs
+        if run.get("conclusion") == "startup_failure"
+    ]
+    ids = [run["id"] for run in runs if run.get("conclusion") != "startup_failure"]
 
     def jobs_for(run_id: int) -> list[dict]:
         # The jobs endpoint is also per_page-capped at 100, and this repo's runs
@@ -290,7 +307,7 @@ def fetch_job_records(
             for job in collected
         ]
 
-    records: list[dict] = []
+    records: list[dict] = list(startup_failures)
     with ThreadPoolExecutor(max_workers=JOB_FETCH_WORKERS) as pool:
         for run_records in pool.map(jobs_for, ids):
             records.extend(run_records)
