@@ -355,7 +355,8 @@ def test_fetch_dedupes_the_window_boundary_run():
 def test_fetch_counts_a_startup_failure_run_under_its_workflow_name():
     # A run that dies before any job starts lists no jobs, so a job-name-only
     # aggregation drops it and the workflow reads as zero failures. The run's own
-    # `startup_failure` conclusion must be counted under its workflow name, and
+    # `startup_failure` conclusion must be counted, under a key suffixed to keep
+    # it off the job-name rows a successful run of the same workflow feeds, and
     # its (necessarily empty) jobs endpoint must not be fetched at all.
     runs = [
         {"id": 0, "created_at": "0002", "name": "Lint", "conclusion": "success"},
@@ -376,7 +377,7 @@ def test_fetch_counts_a_startup_failure_run_under_its_workflow_name():
 
     records = fetch_job_records("o/r", "tok", max_runs=100, get_json=getter)
     assert records == [
-        _rec("Hook lifecycle", "startup_failure"),
+        _rec("Hook lifecycle (workflow startup)", "startup_failure"),
         _rec("lint", "success"),
     ]
     # Only run 0's jobs are fetched; run 1 has none to fetch.
@@ -385,19 +386,22 @@ def test_fetch_counts_a_startup_failure_run_under_its_workflow_name():
     ]
 
 
-def test_startup_failure_counts_as_a_failed_run_in_the_report():
+def test_startup_failure_gets_its_own_row_beside_the_job_rows():
     # End-to-end through the aggregator: the startup_failure record is both a run
-    # and a failure, so the workflow that never started shows 100%, not 0%.
+    # and a failure, and it sits on its own row — the workflow's successful runs
+    # report under their JOB names, so folding the two together would claim a
+    # denominator the startup key never sees.
     records = [
-        _rec("Hook lifecycle", "startup_failure"),
-        _rec("Hook lifecycle", "success"),
+        _rec("Hook lifecycle (workflow startup)", "startup_failure"),
+        _rec("hook-lifecycle", "success"),
     ]
     assert build_report(records) == (
         "# CI failure-rate report (RFC)\n"
         "\n"
         "| Check | Runs | Failures | Failure rate |\n"
         "| :-- | --: | --: | --: |\n"
-        "| Hook lifecycle | 2 | 1 | 50.0% |\n"
+        "| Hook lifecycle (workflow startup) | 1 | 1 | 100.0% |\n"
+        "| hook-lifecycle | 1 | 0 | 0.0% |\n"
     )
 
 

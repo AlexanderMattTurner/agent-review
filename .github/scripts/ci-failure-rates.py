@@ -30,9 +30,9 @@ Counting rule (documented so the number means something):
     is evidence the check is flaky or slow, so folding them in would dilute the
     signal this report exists to surface.
   - a run that dies with `startup_failure` lists NO jobs, so it is counted once
-    under its WORKFLOW name (see fetch_job_records). Without that, the run that
-    never started reads as zero failures — a workflow broken at startup is the
-    one this report most needs to name.
+    under `<workflow name> (workflow startup)` (see fetch_job_records). Without
+    that, the run that never started reads as zero failures — a workflow broken
+    at startup is the one this report most needs to name.
 
 The aggregator (`build_report`) is PURE — it takes an already-fetched list of
 job records (plain dicts with `name` and `conclusion`) and returns the Markdown
@@ -276,10 +276,16 @@ def fetch_job_records(
     # than the reusable workflow it calls, an unresolvable `uses:`, invalid YAML —
     # reports `startup_failure` and lists ZERO jobs. Aggregating by job name alone
     # therefore drops it, and a workflow that never starts reads as no failures at
-    # all. Count the run itself under its workflow name, and skip the jobs call
-    # that can only come back empty.
+    # all. Count the run itself, and skip the jobs call that can only come back
+    # empty. The key is the WORKFLOW name plus a suffix, because every other row
+    # is keyed by JOB name: a successful run of the same workflow contributes
+    # `hook-lifecycle`, never `Hook lifecycle`, so keying on the bare workflow
+    # name would build a denominator that no success can ever reach.
     startup_failures = [
-        {"name": run.get("name", ""), "conclusion": "startup_failure"}
+        {
+            "name": f"{run.get('name', '')} (workflow startup)",
+            "conclusion": "startup_failure",
+        }
         for run in runs
         if run.get("conclusion") == "startup_failure"
     ]
