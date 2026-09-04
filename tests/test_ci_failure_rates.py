@@ -375,18 +375,10 @@ def test_fetch_counts_a_startup_failure_run_under_its_workflow_name():
         return {"jobs": [_rec("lint", "success")]}
 
     records = fetch_job_records("o/r", "tok", max_runs=100, get_json=getter)
-    assert sorted(map(tuple, (r.items() for r in records))) == sorted(
-        map(
-            tuple,
-            (
-                r.items()
-                for r in [
-                    _rec("lint", "success"),
-                    _rec("Hook lifecycle", "startup_failure"),
-                ]
-            ),
-        )
-    )
+    assert records == [
+        _rec("Hook lifecycle", "startup_failure"),
+        _rec("lint", "success"),
+    ]
     # Only run 0's jobs are fetched; run 1 has none to fetch.
     assert [c for c in calls if "/jobs?" in c] == [
         f"{mod.API_ROOT}/repos/o/r/actions/runs/0/jobs?per_page={PER_PAGE}&page=1"

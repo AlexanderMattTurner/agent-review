@@ -12,7 +12,7 @@ failure rate over the window, and emits a Markdown table sorted by failure count
 Sampling 5000 runs is one jobs-API call per run, so the window is paged and the
 per-run job fetches run concurrently. GitHub caps the runs listing at 1000
 results per query, so deeper history is reached by sliding a `created:<=` upper
-bound (see _run_ids) — not just paging. Note the fan-out: many workflows run per
+bound (see _run_summaries) — not just paging. Note the fan-out: many workflows run per
 push to main, so 5000 runs spans only ~100-odd pushes, not 5000. Two rate limits
 bound the sweep: the PRIMARY hourly budget (GITHUB_TOKEN gets only ~1000/hour per
 repo, so a full 5000-run sweep in CI needs a PAT; the workflow lowers its window
@@ -78,7 +78,7 @@ MAX_BACKOFF_SECONDS = 120
 # The runs listing is ALSO hard-capped at 1000 results per query (page 11 of 100
 # returns empty) regardless of total_count. To sample deeper history we slide a
 # `created:<=` upper bound: once a query fills all 1000, we re-query for runs at
-# or before the oldest one seen and dedupe by id. See _run_ids.
+# or before the oldest one seen and dedupe by id. See _run_summaries.
 API_MAX_PAGE = 10
 LISTING_CAP = API_MAX_PAGE * PER_PAGE
 
