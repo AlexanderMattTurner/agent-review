@@ -17,12 +17,11 @@ set -uo pipefail
 
 : "${GH_TOKEN:?GH_TOKEN must be set}"
 : "${REPO:?REPO must be set (owner/repo)}"
+export REPO  # jq expressions read it as env.REPO; export makes it visible to the subprocess
 GITHUB_ENV="${GITHUB_ENV:-/dev/null}"
 REPORT_PATH="${REPORT_PATH:-/tmp/security-report.md}"
 
-# Append a section heading + `gh api` result to the report. The jq expressions
-# use env.REPO to read $REPO from the environment — gh api does not forward
-# --arg to jq, so callers must not pass it.
+# Append a section heading + `gh api` result to the report.
 # echo-fallback-ok: this is a best-effort, per-section aggregator — one alert
 # source failing must not abort the whole report. The fallback text names the
 # failure explicitly ("could not fetch ... check repo permissions") rather than
