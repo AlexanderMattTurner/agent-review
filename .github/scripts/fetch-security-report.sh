@@ -17,7 +17,7 @@ set -uo pipefail
 
 : "${GH_TOKEN:?GH_TOKEN must be set}"
 : "${REPO:?REPO must be set (owner/repo)}"
-export REPO  # jq expressions read it as env.REPO; export makes it visible to the subprocess
+export REPO # jq expressions read it as env.REPO; export makes it visible to the subprocess
 GITHUB_ENV="${GITHUB_ENV:-/dev/null}"
 REPORT_PATH="${REPORT_PATH:-/tmp/security-report.md}"
 
