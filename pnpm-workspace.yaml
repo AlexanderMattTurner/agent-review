@@ -11,3 +11,6 @@ minimumReleaseAge: 4320
 # packages published from this repo's own GitHub owner.
 minimumReleaseAgeExclude:
   - agent-control-plane-core
+
+overrides:
+  smol-toml: ">=1.7.1"
