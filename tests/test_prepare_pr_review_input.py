@@ -98,6 +98,7 @@ def _fake_bins(
     bundle_lines: int = 0,
     flaky_budget: int = 0,
     escape_byte: bool = False,
+    quoted_file: bool = False,
     live_head: str = HEAD_SHA,
     compare: dict | None = None,
 ) -> None:
@@ -143,6 +144,16 @@ def _fake_bins(
             '  echo "diff --git a/escape.txt b/escape.txt"\n'
             '  echo "@@ -0,0 +1,1 @@"\n'
             '  printf "+escaped \x1b[31mred\x1b[0m line\\n"\n'
+        )
+    # Git's own header for a path holding a non-ASCII byte: the whole side is
+    # quoted and the bytes are written as octal escapes. Verified against
+    # `git diff` on a file named f<U+00E9>.py.
+    quoted = ""
+    if quoted_file:
+        quoted = (
+            '  echo \'diff --git "a/f\\303\\251.py" "b/f\\303\\251.py"\'\n'
+            '  echo "@@ -0,0 +1,1 @@"\n'
+            '  echo "+accented"\n'
         )
     gh = tmp_path / "gh"
     gh.write_text(
@@ -191,6 +202,7 @@ def _fake_bins(
         "  done\n"
         f"{bundle}"
         f"{escape}"
+        f"{quoted}"
         'elif [[ "$2" == "view" ]]; then\n'
         # Two different `pr view` reads, told apart by the fields they ask for:
         # the metadata the sanitizer renders, and the live head the staleness
@@ -230,6 +242,7 @@ def _run(
     flaky_budget: int = 0,
     retry_max: int | None = None,
     escape_byte: bool = False,
+    quoted_file: bool = False,
     elide: bool = False,
     live_head: str = HEAD_SHA,
     env: dict[str, str] | None = None,
@@ -249,6 +262,7 @@ def _run(
         bundle_lines=bundle_lines,
         flaky_budget=flaky_budget,
         escape_byte=escape_byte,
+        quoted_file=quoted_file,
         live_head=live_head,
         compare=compare,
     )
@@ -643,12 +657,13 @@ def test_the_base_tree_context_is_written_beside_the_diff(tmp_path: Path) -> Non
 SINCE = "5555555555555555555555555555555555555555"
 
 
-def _delta(tmp_path: Path, compare: dict, files: int = 3):
+def _delta(tmp_path: Path, compare: dict, files: int = 3, quoted_file: bool = False):
     return _run(
         tmp_path,
         files=files,
         max_diff_lines=100,
         compare=compare,
+        quoted_file=quoted_file,
         env={"READ": "delta", "SINCE": SINCE},
     )
 
@@ -717,3 +732,22 @@ def test_a_narrowing_that_keeps_no_file_re_reads_the_whole_diff(
     coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["scope"] == "whole"
     assert "no file changed since" in proc.stderr
+
+
+def test_a_delta_keeps_the_section_of_a_file_git_quotes(tmp_path: Path) -> None:
+    """Git writes a path holding a non-ASCII byte as `"b/f\\303\\251.py"`, while
+    the compare API reports the plain name. Matching the raw header tail drops
+    that file's section, and the run still stamps `since:` — so the one file the
+    push changed is reviewed by nobody while the record says it was read."""
+    proc, _, input_dir = _delta(
+        tmp_path,
+        {"status": "ahead", "files": [{"filename": "f1.py"}, {"filename": "fé.py"}]},
+        quoted_file=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "+accented" in diff, diff
+    assert "diff --git a/f1.py" in diff, diff
+    assert "diff --git a/f0.py" not in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["scope"] == f"since:{SINCE}"

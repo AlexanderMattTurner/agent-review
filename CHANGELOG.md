@@ -12,6 +12,10 @@ the prose from the release's commits.
 
 ## Unreleased
 
+### Security
+
+- Model-authored review text no longer opens an HTML comment: `post-pr-review.mjs` escapes `<!--` in the summary, in each finding's own text, in its path and in its suggestion. The reviewer reads its records back off the body it posts — the coverage stamp, the read markers, the severity marker the merge gate reads — and the model's text lands in the same body, derived from an untrusted diff. A pull request that talked the model into echoing one of those markers forged the record: a `review-coverage` stamp in the summary is captured ahead of the trusted one, so it could spend the accumulated budget or claim a head nobody read. A fenced suggestion is escaped too, because every reader matches the raw body.
+
 ### Added
 
 - `check-review-caller-run-name.py`, a pre-commit check refusing a caller of `review.yaml` whose `run-name:` does not end with the pull request number. `dispatch-delta-review.sh` attributes a run to a pull request by that name alone, so a caller without it never reaches the two-failure bound and re-dispatches a dying read for the life of the pull request. Nothing goes red, so the waste is invisible. A caller passing `max-delta-reviews-per-pr: 0` asks for no accumulated read and is exempt.

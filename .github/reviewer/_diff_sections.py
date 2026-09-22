@@ -31,13 +31,33 @@ def split_into_files(diff_text: str) -> tuple[list[str], list[list[str]]]:
     return preamble, files
 
 
+def unquote_path(quoted: str) -> str:
+    """Git's C-style quoting, decoded back to the name the file actually has.
+
+    `\\303\\251` is one UTF-8 character written as two octal BYTES, not two code
+    points. `unicode_escape` turns each escape into a code point below 256, so
+    the round trip back through latin-1 recovers the original bytes to decode.
+    """
+    escaped = quoted.encode("utf-8", "backslashreplace").decode(
+        "unicode_escape", "replace"
+    )
+    return escaped.encode("latin-1", "replace").decode("utf-8", "replace")
+
+
 def file_path_of(section: list[str]) -> str:
     """The b-side path from a `diff --git a/x b/y` header, for the manifest.
 
     Split from the right: a path containing a space makes a left-anchored parse
-    ambiguous, but the b-side is always the final token.
+    ambiguous, but the b-side is always the final token. Git QUOTES a path
+    holding a non-ASCII byte, a quote, a backslash or a control character, and
+    writes it as `"b/f\\303\\251.py"`. Callers compare this against the plain
+    name GitHub's compare API reports, so the quoted form is decoded here: a
+    caller matching the raw header tail drops that file's section silently.
     """
     header = section[0].rstrip("\n")
     tail = header[len(FILE_HEADER) :]
+    quoted = tail.rfind(' "b/')
+    if quoted != -1 and tail.endswith('"'):
+        return unquote_path(tail[quoted + 4 : -1])
     b_side = tail.rsplit(" b/", 1)
     return b_side[-1] if len(b_side) == 2 else tail

@@ -122,8 +122,13 @@ not_ready="$(jq -r --arg gate "$GATE_CONTEXT" '
 # — a new push re-arms the read by moving the head, and the review that covered
 # it is the boundary this window starts at.
 match="${RUN_NAME_MATCH:-PR ${PR}}"
-failed="$(retry_stdout gh api \
-  "repos/${GH_REPO}/actions/workflows/${REVIEW_WORKFLOW}/runs?event=workflow_dispatch&per_page=50" \
+# The bound is a COUNT, so it needs every run in the window, not the newest page
+# of them: a repository running 50 newer dispatches between two sweeps drops this
+# PR's failures off page one, the count resets to zero, and the read it exists to
+# stop is dispatched again. `created` asks the API for the same window the count
+# is over, which is what keeps the paginated walk bounded. `%3E%3D` is `>=`.
+failed="$(retry_stdout gh api --paginate \
+  "repos/${GH_REPO}/actions/workflows/${REVIEW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100&created=%3E%3D${covered_at}" \
   --jq ".workflow_runs[]
         | select((.display_title // \"\") | endswith(\"${match}\"))
         | select((.created_at // \"\") > \"${covered_at}\")

@@ -47,6 +47,13 @@ from tests._helpers import (  # noqa: E402
 )
 
 CASES_DIR_DEFAULT = REPO_ROOT / "tests" / "eval" / "cases"
+# The same file post-pr-review.mjs reads, so "would this hold the merge?" is
+# answered here by the reviewer's own definition rather than a second list.
+GATING_SEVERITIES = set(
+    json.loads(
+        (REPO_ROOT / "config" / "review-severities.json").read_text(encoding="utf-8")
+    )["gating"]
+)
 BUILD_CONTEXT = REPO_ROOT / ".github" / "reviewer" / "build-review-context.py"
 PROMPT_FILE = REPO_ROOT / ".github" / "reviewer" / "prompts" / "claude-pr-review.md"
 REVIEWER_DIR = REPO_ROOT / ".github" / "reviewer"
@@ -169,7 +176,7 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
 
     calls, cost_usd, is_error = _read_log(log_path)
     findings = _read_findings(pr_input_dir / "review.json")
-    flagged_paths = {f.get("path") for f in findings}
+    traps = set(case["must_not_flag"])
 
     return {
         "case": case_dir.name,
@@ -179,10 +186,40 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
         "is_error": is_error,
         "execution_log": str(log_path),
         "must_flag": [
-            {"path": entry["path"], "flagged": entry["path"] in flagged_paths}
+            {
+                "path": entry["path"],
+                "why": entry["why"],
+                "gating_findings": [
+                    _quote(f)
+                    for f in findings
+                    if f.get("path") == entry["path"] and _is_gating(f)
+                ],
+            }
             for entry in case["must_flag"]
         ],
-        "false_positives": [p for p in case["must_not_flag"] if p in flagged_paths],
+        "false_positives": [
+            _quote(f) | {"path": f.get("path")}
+            for f in findings
+            if f.get("path") in traps
+        ],
+    }
+
+
+def _is_gating(finding: dict) -> bool:
+    """Whether this finding would hold the merge. `kind: defect` promises a
+    BLOCKING or WARNING finding, so a nit on the right file is not the defect
+    caught — scoring it as one overstates the reviewer's accuracy."""
+    return finding.get("severity") in GATING_SEVERITIES
+
+
+def _quote(finding: dict) -> dict:
+    """What the model actually said, so a human grades it against the case's
+    `why` instead of trusting the path it landed on."""
+    body = str(finding.get("body") or "")
+    return {
+        "severity": finding.get("severity"),
+        "title": finding.get("title"),
+        "body": body[:400] + ("…" if len(body) > 400 else ""),
     }
 
 
