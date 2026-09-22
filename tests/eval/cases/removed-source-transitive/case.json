@@ -1,0 +1,8 @@
+{
+  "kind": "non_bug",
+  "source": "AlexanderMattTurner/agent-glovebox@07c5341ff8a1944cc1860568b63a027285e5c981",
+  "summary": "gc-sbx-state.bash drops its direct `source sbx/auth.bash`, but the file also sources sbx/detect.bash, which itself sources auth.bash, so every name auth.bash exports is still reachable.",
+  "must_flag": [],
+  "must_not_flag": ["bin/lib/gc-sbx-state.bash"],
+  "context_expect": []
+}

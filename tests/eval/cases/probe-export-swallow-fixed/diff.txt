@@ -1,0 +1,113 @@
+commit 6df41fb261620face23f39cf8314155eeaa03257
+Author: Claude <noreply@anthropic.com>
+Date:   Tue Sep 22 00:16:27 2026 +0000
+
+    fix(sbx): read the workspace-image probe through one helper that keeps its message
+    
+    gb_vm_workspace_image_probe captures the probe stderr and hands back its exit
+    status, so both callers tell exit 3 ("no image packed yet") from a probe nobody
+    could read. `glovebox export` warned about neither before, and reported an
+    unreadable probe as "no session here" for a workspace that may hold one.
+    
+    The prewarm consume test now asserts its own call log never appears; the log it
+    shared with the adopt drive above already held that drive's ls line.
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01DHX9NCSeREyrGUmx3Pu6be
+
+diff --git a/bin/lib/sbx/vm-exec.bash b/bin/lib/sbx/vm-exec.bash
+index 0db2426abe..dbd50f9bbe 100644
+--- a/bin/lib/sbx/vm-exec.bash
++++ b/bin/lib/sbx/vm-exec.bash
+@@ -468,6 +468,17 @@ gb_vm_check_workspace_arg() {
+   printf '%s\n' "$img"
+ }
+ 
++# gb_vm_workspace_image_probe KEY OUT_ERR — ask the kata guest whether it holds KEY's durable
++# workspace image, writing the probe's own stderr into OUT_ERR. Exit 0 means it holds one, 3 is
++# the verb's own "no image packed yet", and any other status is a probe nobody could read: a
++# caller that reads one of those as 3 tells the user their work is not there.
++gb_vm_workspace_image_probe() {
++  local key="$1" out_err="$2" rc=0 err
++  err="$("${_GLOVEBOX_VM_WSIMAGE[@]}" "$key" 2>&1 >/dev/null)" || rc=$?
++  printf -v "$out_err" '%s' "$err"
++  return "$rc"
++}
++
+ # gb_vm_check_clone_workspace_arg DIR KEY ARCHIVE OUT_SEED OUT_ARCHIVE — write into OUT_SEED
+ # the seed positional a `create --clone` takes for DIR, and into OUT_ARCHIVE the path that
+ # create's `--seed-archive` takes for ARCHIVE, or return non-zero having said why. Needs
+@@ -495,14 +506,14 @@ gb_vm_check_clone_workspace_arg() {
+   printf -v "$out_seed" '%s' ""
+   printf -v "$out_archive" '%s' ""
+   if [[ -n "$key" ]] && gb_vm_backend_is kata; then
+-    local probe_rc=0
+-    "${_GLOVEBOX_VM_WSIMAGE[@]}" "$key" >/dev/null 2>&1 || probe_rc=$?
++    local probe_rc=0 probe_err
++    gb_vm_workspace_image_probe "$key" probe_err || probe_rc=$?
+     if ((probe_rc == 0)); then
+       return 0
+     elif ((probe_rc != 3)); then
+-      # 3 is the verb's own "no image packed yet". Any other status is a probe this could
+-      # not read, so the launch carries a seed and says so rather than reading it as none.
+-      gb_warn "could not ask the kata guest whether it holds a workspace image for $key (ws-image exited $probe_rc); carrying a seed instead."
++      # The launch carries a seed on a probe nobody could read, and says so: reading it as
++      # "no image yet" would silently start the session on a tree the guest already holds.
++      gb_warn "could not ask the kata guest whether it holds a workspace image for $key (ws-image exited $probe_rc: ${probe_err:-no message}); carrying a seed instead."
+     fi
+   fi
+   # The backend test first: only the kata arm assigns this name, so under any other backend an
+diff --git a/bin/subcommands/export b/bin/subcommands/export
+index 2ab7506720..574664fc3b 100755
+--- a/bin/subcommands/export
++++ b/bin/subcommands/export
+@@ -107,7 +107,14 @@ _export_offline_workspace_key() {
+   gb_vm_backend_is kata || return 1
+   [[ -z "$sandbox_override" ]] || return 1
+   key="$(glovebox_workspace_key "${_GLOVEBOX_SBX_WORKSPACE_KEY:-$1}")"
+-  "${_GLOVEBOX_VM_WSIMAGE[@]}" "$key" >/dev/null 2>&1 || return 1
++  local probe_rc=0 probe_err
++  gb_vm_workspace_image_probe "$key" probe_err || probe_rc=$?
++  if ((probe_rc != 0)); then
++    # Only exit 3 says the guest holds nothing. On any other status this export cannot tell
++    # a missing workspace from an unreadable probe, and "no session here" would read as lost work.
++    ((probe_rc == 3)) || gb_warn "glovebox export: could not ask the kata guest whether it holds a workspace for $key (ws-image exited $probe_rc: ${probe_err:-no message}); this export reports what it can see, which may not be all of it."
++    return 1
++  fi
+   printf '%s\n' "$key"
+ }
+ 
+diff --git a/tests/test_sbx_prewarm.py b/tests/test_sbx_prewarm.py
+index 490ca1f343..e279873373 100644
+--- a/tests/test_sbx_prewarm.py
++++ b/tests/test_sbx_prewarm.py
+@@ -870,12 +870,14 @@ def test_consume_forgets_the_marker_and_claim_but_never_removes_the_sandbox(
+     lifecycle (a Kata session creating its cell inside the anchor): it must take the
+     spare's marker, mount dirs and claim OUT of the pool exactly like
+     test_prune_removes_marker_mount_dirs_and_claim above, but never touch the sandbox
+-    itself. A call-log stub proves that directly — an exit-code-only check would still
+-    pass a `sbx rm` call whose failure a future edit wrapped in `|| true`."""
++    itself. Consume issues no `sbx` call at all, so its own call log must never appear —
++    stricter than an exit-code check a removal wrapped in `|| true` would still pass."""
+     seed_dir, dep_dir = _published(tmp_path)
+     adopt = _adopt(tmp_path, STUB_LS_JSON=_ls_json())
+     assert adopt.returncode == 0, adopt.stderr
+-    calllog = tmp_path / "sbx-calls.log"
++    # A log of its OWN: the adopt above shares tmp_path, and its `ls` line would satisfy
++    # any assertion made over a log both drives write to.
++    calllog = tmp_path / "consume-calls.log"
+ 
+     r = _lib(
+         tmp_path,
+@@ -888,10 +890,7 @@ def test_consume_forgets_the_marker_and_claim_but_never_removes_the_sandbox(
+     assert not seed_dir.exists()
+     assert not dep_dir.exists()
+     assert _claim_released(tmp_path)
+-    logged = calllog.read_text(encoding="utf-8") if calllog.exists() else ""
+-    assert not [line for line in logged.splitlines() if line.split()[:1] == ["rm"]], (
+-        logged
+-    )
++    assert not calllog.exists(), calllog.read_text(encoding="utf-8")
+ 
+ 
+ def test_store_records_which_backend_baked_the_spare(tmp_path: Path) -> None:

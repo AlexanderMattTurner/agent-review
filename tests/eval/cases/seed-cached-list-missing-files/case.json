@@ -1,0 +1,13 @@
+{
+  "kind": "defect",
+  "source": "AlexanderMattTurner/agent-glovebox@8ede7f3d088f20c1ae50ba22d982e48af283dab9",
+  "summary": "_gb_seed_untracked_into lists a nested repo's tracked paths with `ls-files --cached`, which names a path the work tree no longer holds after a delete or rename.",
+  "must_flag": [
+    {
+      "path": "bin/lib/seed-format.bash",
+      "why": "the nested-repo branch lists `ls-files --cached --others` paths straight into the tar list with no check that the work tree still holds them, so a deleted or renamed tracked file fails the whole tar carry."
+    }
+  ],
+  "must_not_flag": [],
+  "context_expect": []
+}

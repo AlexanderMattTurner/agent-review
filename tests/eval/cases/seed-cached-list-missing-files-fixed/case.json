@@ -1,0 +1,8 @@
+{
+  "kind": "non_bug",
+  "source": "AlexanderMattTurner/agent-glovebox@dcbac415a9850509776e893d4f181e252fccb87e",
+  "summary": "_gb_seed_untracked_into now skips a nested repo's cached path when the work tree no longer holds it, so a deleted or renamed tracked file no longer fails the whole tar carry.",
+  "must_flag": [],
+  "must_not_flag": ["bin/lib/seed-format.bash"],
+  "context_expect": []
+}

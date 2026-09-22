@@ -1,0 +1,37 @@
+commit a9d5c8c9567a760f572298e0978896dc3947a1e3
+Author: Claude <noreply@anthropic.com>
+Date:   Mon Sep 21 23:29:41 2026 +0000
+
+    fix(sbx): say when the kata workspace-image probe could not be read
+    
+    gb_vm_check_clone_workspace_arg read every non-zero exit of the
+    ws-image probe as "no image packed yet" and carried a seed in silence.
+    Only exit 3 is that sentinel; any other status means the guest could
+    not be asked, and a durable workspace inside it may be the only copy of
+    the session's work. The seam now warns with the probe's exit status and
+    still carries a seed, so the launch is not stranded but the reader
+    learns why a transfer ran. The seam test asserts the warning.
+    
+    Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01DHX9NCSeREyrGUmx3Pu6be
+
+diff --git a/bin/lib/sbx/vm-exec.bash b/bin/lib/sbx/vm-exec.bash
+index a34aa176a8..a8d50f1099 100644
+--- a/bin/lib/sbx/vm-exec.bash
++++ b/bin/lib/sbx/vm-exec.bash
+@@ -495,8 +495,14 @@ gb_vm_check_clone_workspace_arg() {
+   printf -v "$out_seed" '%s' ""
+   printf -v "$out_archive" '%s' ""
+   if [[ -n "$key" ]] && gb_vm_backend_is kata; then
+-    if "${_GLOVEBOX_VM_WSIMAGE[@]}" "$key" >/dev/null 2>&1; then
++    local probe_rc=0
++    "${_GLOVEBOX_VM_WSIMAGE[@]}" "$key" >/dev/null 2>&1 || probe_rc=$?
++    if ((probe_rc == 0)); then
+       return 0
++    elif ((probe_rc != 3)); then
++      # 3 is the verb's own "no image packed yet". Any other status is a probe this could
++      # not read, so the launch carries a seed and says so rather than reading it as none.
++      gb_warn "could not ask the kata guest whether it holds a workspace image for $key (ws-image exited $probe_rc); carrying a seed instead."
+     fi
+   fi
+   # The backend test first: only the kata arm assigns this name, so under any other backend an

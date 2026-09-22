@@ -130,3 +130,10 @@ poetry.lock      -merge
 Gemfile.lock     -merge
 go.sum           -merge
 go.work.sum      -merge
+
+# Frozen evaluation inputs. Each file under tests/eval/cases is a byte-exact
+# copy of a real pull request's diff or of the tree it was reviewed against, so
+# its trailing whitespace is part of the input the reviewer must read. Git's
+# whitespace check is off for them, and .prettierignore keeps the formatter off
+# the same paths.
+tests/eval/cases/** -whitespace

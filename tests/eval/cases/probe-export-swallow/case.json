@@ -1,0 +1,18 @@
+{
+  "kind": "defect",
+  "source": "AlexanderMattTurner/agent-glovebox@a9d5c8c9567a760f572298e0978896dc3947a1e3",
+  "summary": "vm-exec.bash teaches one caller of the ws-image probe to report a non-zero status, but bin/subcommands/export still reads every non-zero status as \"no image packed yet\".",
+  "must_flag": [
+    {
+      "path": "bin/subcommands/export",
+      "why": "line 110 reads any non-zero exit of _GLOVEBOX_VM_WSIMAGE as \"no workspace\", the same defect the diff just fixed in the sibling caller — an unreadable probe now silently reports a lost workspace as none."
+    }
+  ],
+  "must_not_flag": [],
+  "context_expect": [
+    {
+      "identifier": "_GLOVEBOX_VM_WSIMAGE",
+      "path": "bin/subcommands/export"
+    }
+  ]
+}
