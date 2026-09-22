@@ -122,17 +122,34 @@ def search(repo_dir: Path, names: list[str], exclude: set[str]) -> tuple[str, bo
     return proc.stdout, True
 
 
+def code_of(line: str) -> str:
+    """The source text of a `git grep -n` hit, without its `path:lineno:` prefix.
+
+    The prefix is not the code, and reading it as code attributes a hit to every
+    queried name the PATH happens to contain — one name that is also a directory
+    name then collects every hit under it.
+    """
+    parts = line.split(":", 2)
+    return parts[2] if len(parts) == 3 else line
+
+
 def group_hits(output: str, names: list[str]) -> dict[str, list[str]]:
     """Each name's hits, dropping a name with more than the per-name cap.
 
     One grep answered every name, so a line is attributed to each queried name it
-    contains — a line mentioning two of them is about both.
+    mentions — a line mentioning two of them is about both. Attribution matches
+    the way `search` asked git grep to: by WORD, over the code alone. A substring
+    test re-attributes `foo`'s hits to every line holding `foo_bar`, and past the
+    cap a name is DROPPED rather than truncated, so one busy longer name deletes
+    the shorter name's section outright.
     """
     hits: dict[str, list[str]] = {name: [] for name in names}
     dropped: set[str] = set()
+    patterns = {name: re.compile(rf"\b{re.escape(name)}\b") for name in names}
     for line in output.splitlines():
+        code = code_of(line)
         for name in names:
-            if name in dropped or name not in line:
+            if name in dropped or not patterns[name].search(code):
                 continue
             bucket = hits[name]
             if len(bucket) >= MAX_HITS_PER_IDENTIFIER:
@@ -161,7 +178,7 @@ def render(hits: dict[str, list[str]], tree: str, complete: bool) -> str:
     budget = MAX_TOTAL_LINES - len(out)
     for name, lines in hits.items():
         if budget <= len(lines) + 2:
-            out.append(f"# Budget reached; {len(hits)} name(s) in total were searched.")
+            out.append(f"# Budget reached; {len(hits)} name(s) have other mentions.")
             break
         out.append("")
         out.append(f"## {name}")

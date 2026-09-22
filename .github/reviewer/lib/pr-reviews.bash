@@ -103,6 +103,24 @@ coverage_stamp() {
     "$COVERAGE_MARKER_PREFIX" "$1" "$2" "$3" "$4" "$5"
 }
 
+# coverage_stamp_of <coverage.json> — the stamp for the record prepare wrote.
+coverage_stamp_of() {
+  coverage_stamp \
+    "$(jq -r '.head // ""' "$1")" \
+    "$(jq -r '.base // ""' "$1")" \
+    "$(jq -r '.reviewer // ""' "$1")" \
+    "$(jq -r '.read // "first"' "$1")" \
+    "$(jq -r '.scope // "whole"' "$1")"
+}
+
+# The scope an oversized notice stamps. It read no diff at all, so no reader may
+# mistake it for a review of those commits — and it is still a paid decision
+# about that head, so it advances the record like any other spend. A notice that
+# stamped nothing left the covered head where it was, and the accumulated read's
+# re-dispatch bound counts only FAILED runs: an oversized run succeeds, so the
+# sweep asked for the same read every cycle for the life of the pull request.
+OVERSIZED_COVERAGE_SCOPE=oversized
+
 # The jq that reads the stamp back off a review body. `capture` emits NOTHING for
 # a body without one, so an unstamped review drops out of every fold below rather
 # than folding in as an empty record.

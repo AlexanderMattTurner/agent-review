@@ -699,3 +699,21 @@ def test_a_range_that_describes_no_push_re_reads_the_whole_diff(
         "scope": "whole",
         "since": SINCE,
     }
+
+
+def test_a_narrowing_that_keeps_no_file_re_reads_the_whole_diff(
+    tmp_path: Path,
+) -> None:
+    """The revert case. Compare names a file the base...head diff has no section
+    for, because the push put it back the way the base has it. Narrowing to it
+    keeps nothing, and stamping `since:` over that empty diff would spend the
+    accumulated budget and report the pushes as read."""
+    proc, _, input_dir = _delta(
+        tmp_path, {"status": "ahead", "files": [{"filename": "reverted.py"}]}
+    )
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "diff --git a/f0.py" in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["scope"] == "whole"
+    assert "no file changed since" in proc.stderr

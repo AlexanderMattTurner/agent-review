@@ -37,6 +37,7 @@ OVERSIZED_MARKER = "<!-- oversized-review -->"
 # PR's read budget, so one notice per PR would pin that count at 1 and let every later
 # push re-run the whole job forever.
 HEAD_MARKER = f"<!-- oversized-head: {HEAD_SHA} -->"
+REVIEWER_SHA = "1234567812345678123456781234567812345678"
 NOTICE = "This PR's diff is too large for the automated reviewer to read."
 
 _FAKE_GH = r"""#!/usr/bin/env python3
@@ -160,6 +161,7 @@ def _run(
     reviews: list[dict],
     threads: list[dict],
     notice: str | None = NOTICE,
+    read: str = "first",
 ) -> tuple[subprocess.CompletedProcess, list[dict]]:
     """Run the real script against canned reviews/threads; return the process
     and the POSTs the fake gh recorded. notice=None leaves the file absent,
@@ -191,6 +193,8 @@ def _run(
             "PR": "5",
             "PR_INPUT_DIR": str(pr_dir),
             "HEAD_SHA": HEAD_SHA,
+            "REVIEWER_SHA": REVIEWER_SHA,
+            "READ": read,
             "RETRY_BASE_DELAY": "0",  # a failing API call must not sleep out the backoff
             "GH_PULL_REVIEWS": str(tmp_path / "reviews.json"),
             "GH_THREADS": str(tmp_path / "threads.json"),
@@ -316,3 +320,29 @@ def test_a_non_reviewer_marker_quote_does_not_satisfy_idempotence(
         "repos/o/r/pulls/5/reviews",
         "repos/o/r/pulls/5/comments",
     ]
+
+
+def test_the_notice_stamps_the_head_it_decided_and_says_it_read_no_diff(
+    tmp_path: Path,
+) -> None:
+    """The notice spends a read, so it records which head it spent it on. Without
+    the stamp the covered head never moved, and the sweep asked for the same
+    accumulated read every cycle: its re-dispatch bound counts failed runs, and
+    an oversized run succeeds."""
+    proc, posted = _run(tmp_path, reviews=[], threads=[])
+    assert proc.returncode == 0, proc.stderr
+    body = posted[0]["fields"]["body"]
+    assert (
+        f"<!-- review-coverage head={HEAD_SHA} base= reviewer={REVIEWER_SHA} "
+        "read=first scope=oversized -->" in body
+    ), body
+
+
+def test_an_oversized_accumulated_read_stamps_the_budget_that_paid(
+    tmp_path: Path,
+) -> None:
+    """`read=delta` is what spends `max-delta-reviews-per-pr` rather than the
+    first-read budget, so a pull request too large to read is still bounded."""
+    proc, posted = _run(tmp_path, reviews=[], threads=[], read="delta")
+    assert proc.returncode == 0, proc.stderr
+    assert "read=delta scope=oversized -->" in posted[0]["fields"]["body"]

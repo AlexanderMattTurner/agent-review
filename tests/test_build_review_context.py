@@ -170,3 +170,55 @@ def test_the_header_says_the_lines_are_not_from_the_pull_request(
         diff_for("bin/changed.sh", added=['probe_workspace_image "$1"']),
     )
     assert "NOT from the pull request" in context
+
+
+def test_a_busy_longer_name_does_not_delete_a_shorter_one_s_section(
+    tmp_path: Path,
+) -> None:
+    """The grep matched by WORD, so the grouping must too. Attributing by
+    substring gives every `read_wsimage_path` line to `read_wsimage` as well;
+    past the per-name cap a name is DROPPED, so the shorter name loses the
+    sibling caller this file exists to surface."""
+    cap = MODULE.MAX_HITS_PER_IDENTIFIER
+    tree = {f"lib/busy{n}.sh": 'read_wsimage_path "$1"\n' for n in range(cap + 3)}
+    tree["lib/sibling.sh"] = 'read_wsimage "$1"\n'
+    tree["bin/changed.sh"] = 'read_wsimage "$1"\nread_wsimage_path "$1"\n'
+    # BOTH names are in the diff, so both are queried and one grep returns the
+    # busy lines — which is the only way the misattribution is reachable.
+    context = build(
+        tmp_path,
+        tree,
+        diff_for(
+            "bin/changed.sh",
+            added=['read_wsimage "$1"', 'read_wsimage_path "$1"'],
+            removed=["true"],
+        ),
+    )
+    assert "## read_wsimage\n" in context, context
+    assert "lib/sibling.sh" in context, context
+
+
+def test_a_name_inside_a_directory_name_does_not_collect_that_whole_tree(
+    tmp_path: Path,
+) -> None:
+    """`git grep -n` prefixes each hit with `path:lineno:`, so matching the whole
+    line attributes a hit to every queried name the PATH contains. Here the
+    directory is named after one of them and its files never mention it."""
+    tree = {
+        "seed_format/a.sh": 'common_helper "$1"\n',
+        "seed_format/b.sh": 'common_helper "$1"\n',
+        "lib/real.sh": 'seed_format "$1"\n',
+        "bin/changed.sh": 'seed_format "$1"\ncommon_helper "$1"\n',
+    }
+    context = build(
+        tmp_path,
+        tree,
+        diff_for(
+            "bin/changed.sh",
+            added=['seed_format "$1"', 'common_helper "$1"'],
+            removed=["true"],
+        ),
+    )
+    assert "lib/real.sh" in context, context
+    section = context.split("## seed_format\n", 1)[1].split("\n##", 1)[0]
+    assert "seed_format/a.sh" not in section, context

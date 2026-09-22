@@ -427,6 +427,8 @@ jobs:
           PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
+          # The notice stamps coverage, so it needs the budget that paid for it.
+          READ: ${{ needs.decide.outputs.read }}
         run: bash "${REVIEWER_DIR}/post-oversized-review.sh"
 
       - name: Hand the sanitized input to the shard reviewers
