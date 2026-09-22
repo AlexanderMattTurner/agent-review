@@ -354,6 +354,52 @@ def test_repeated_failures_of_the_read_stop_being_re_dispatched(
     assert _dispatched(calls) == []
 
 
+def _failed_run() -> dict:
+    return {
+        "display_title": f"Claude reviewers — PR {PR}",
+        "created_at": "2026-03-01T00:00:00Z",
+        "status": "completed",
+        "conclusion": "failure",
+    }
+
+
+def _posted_reviews(calls: list[str]) -> list[str]:
+    return [c for c in calls if "pulls/42/reviews" in c and "-X POST" in c]
+
+
+def test_giving_up_on_a_dying_read_spends_the_budget_out_loud(tmp_path: Path) -> None:
+    """The deadlock, closed. The merge gate holds while the live head is past the
+    covered one AND the accumulated budget still has room. A crashed read posts
+    no review, so it advances no coverage and spends no budget, and the bound
+    above then stops the retries — leaving the pull request unmergeable with
+    nothing red to fix. So the give-up spends the budget itself.
+
+    The stamp keeps the OLD covered head on purpose: nothing read the new one, so
+    the gate must say the later pushes went unread rather than claim it read
+    them."""
+    _, calls = dispatch(
+        tmp_path, reviews=[_review(COVERED)], runs=[_failed_run(), _failed_run()]
+    )
+    assert _dispatched(calls) == []
+    posted = _posted_reviews(calls)
+    assert len(posted) == 1, calls
+    assert "read=delta" in posted[0], posted[0]
+    assert "scope=failed" in posted[0], posted[0]
+    assert f"head={COVERED}" in posted[0], posted[0]
+    assert PUSHED not in posted[0], posted[0]
+
+
+def test_a_read_that_has_failed_once_is_retried_and_spends_nothing(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in how many runs died. Below
+    the bound the read is still coming, so spending its budget here would strand
+    the pushes the retry is about to read."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], runs=[_failed_run()])
+    assert len(_dispatched(calls)) == 1, calls
+    assert _posted_reviews(calls) == []
+
+
 def test_another_prs_failures_do_not_stop_this_ones_read(tmp_path: Path) -> None:
     """The suffix match is what makes that bound per-PR. `PR 4` is a suffix of no
     run named `PR 42`, and `PR 42` is a suffix of no run named `PR 421`."""

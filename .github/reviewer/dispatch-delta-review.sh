@@ -33,7 +33,9 @@
 # with `PR <number>` (override the whole suffix with RUN_NAME_MATCH), matched as an
 # exact suffix so PR 1 never claims PR 12's runs. A caller whose run-name does not
 # end that way gets no bound and re-dispatches a failing read each sweep — the
-# README says so beside the input.
+# README says so beside the input. Hitting the bound POSTS a stamped notice: it
+# spends the accumulated budget so the merge gate stops waiting for a read that
+# is no longer coming, and it says on the pull request which commits went unread.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, REVIEW_WORKFLOW (the caller's workflow
 # file name), SEVERITY_CONFIG, MAX_DELTA_REVIEWS_PER_PR.
@@ -134,8 +136,27 @@ failed="$(retry_stdout gh api --paginate \
         | select((.created_at // \"\") > \"${covered_at}\")
         | select(.status == \"completed\" and .conclusion != \"success\")
         | .id" | wc -l | tr -d '[:space:]')"
-[[ "$failed" -lt "$MAX_FAILED_DELTA_RUNS" ]] ||
-  skip "${failed} accumulated read(s) of it have failed since the last review — fix the reviewer rather than re-running it"
+if [[ "$failed" -ge "$MAX_FAILED_DELTA_RUNS" ]]; then
+  # GIVING UP IS A DECISION, AND A DECISION THAT STAMPS NOTHING HOLDS THE MERGE
+  # FOREVER. The gate waits while the live head is past the covered one and the
+  # accumulated budget still has room. A crashed read posts no review, so it
+  # advances no coverage and spends no budget — and this bound then stops the
+  # retries. Both halves are right on their own; together they leave the pull
+  # request unmergeable with nothing red to fix.
+  #
+  # So the give-up spends the budget, out loud. The stamp keeps the OLD covered
+  # head, because nothing read the new one: the gate then greens with "the
+  # accumulated read is spent, so the pushes after it were NOT read", which is
+  # what happened. The budget check above runs first, so this posts exactly once.
+  body="$(
+    printf '%s\n\n%s\n' \
+      "$(coverage_stamp "$covered" "" "" delta failed)" \
+      "The accumulated review of this pull request was started ${failed} time(s) since the review of ${covered:0:7} and did not complete. This sweep stops asking for it, so the commits pushed after ${covered:0:7} are NOT reviewed. Fix the reviewer rather than re-running it; a human should read those commits before merging."
+  )"
+  retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
+    -f "event=COMMENT" -f "body=${body}" >/dev/null
+  skip "${failed} accumulated read(s) of it have failed since the last review — said so on the pull request and spent the budget; fix the reviewer rather than re-running it"
+fi
 
 dispatch_ref="${DISPATCH_REF:-$(retry_stdout gh api "repos/${GH_REPO}" --jq .default_branch)}"
 retry gh workflow run "$REVIEW_WORKFLOW" --repo "$GH_REPO" --ref "$dispatch_ref" -f "pr=${PR}"
