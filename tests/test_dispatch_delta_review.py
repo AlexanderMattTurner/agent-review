@@ -101,8 +101,10 @@ def dispatch(
     state: str = "OPEN",
     draft: bool = False,
     runs: list[dict] | None = None,
-    max_delta_reviews: str = "1",
+    max_delta_reviews: str | None = "1",
+    severity_config: Path = SEVERITIES,
     env: dict[str, str] | None = None,
+    expect_success: bool = True,
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run the real script against a `gh` stub; return (proc, its argv lines).
 
@@ -201,14 +203,19 @@ exit 0
             "GH_REPO": "o/r",
             "PR": str(PR),
             "REVIEW_WORKFLOW": REVIEW_WORKFLOW,
-            "SEVERITY_CONFIG": str(SEVERITIES),
+            "SEVERITY_CONFIG": str(severity_config),
             "GATE_CONTEXT": GATE,
-            "MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews,
+            **(
+                {}
+                if max_delta_reviews is None
+                else {"MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews}
+            ),
             "RETRY_BASE_DELAY": "0",
             **(env or {}),
         },
     )
-    assert proc.returncode == 0, proc.stderr
+    if expect_success:
+        assert proc.returncode == 0, proc.stderr
     return proc, log.read_text(encoding="utf-8").splitlines()
 
 
@@ -342,6 +349,37 @@ def test_the_accumulated_budget_is_spent_exactly_once(tmp_path: Path) -> None:
         head="3333333333333333333333333333333333333333",
     )
     assert _dispatched(calls) == []
+
+
+def test_with_no_budget_passed_the_severity_config_supplies_it(
+    tmp_path: Path,
+) -> None:
+    """The sweep and the event dispatcher pass no budget: they read the same
+    config key both gate legs read, so the read they ask for is one the gate is
+    waiting for."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], max_delta_reviews=None)
+    assert len(_dispatched(calls)) == 1, calls
+
+
+def test_with_no_budget_anywhere_the_dispatcher_refuses(tmp_path: Path) -> None:
+    """The pair: the same call against a config naming no budget. A dispatcher
+    cannot guess how many reads a pull request may spend, so it says where the
+    number is looked for and stops."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    config.pop("max_delta_reviews_per_pr")
+    keyless = tmp_path / "keyless.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    keyless.write_text(json.dumps(config), encoding="utf-8")
+    proc, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        max_delta_reviews=None,
+        severity_config=keyless,
+        expect_success=False,
+    )
+    assert proc.returncode != 0
+    assert "max_delta_reviews_per_pr" in proc.stderr, proc.stderr
+    assert calls == []
 
 
 def test_a_zero_budget_asks_for_nothing_and_reads_no_api(tmp_path: Path) -> None:

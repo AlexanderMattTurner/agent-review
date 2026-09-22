@@ -39,9 +39,10 @@
 # that stamp and asks for nothing, whatever the budget says.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, REVIEW_WORKFLOW (the caller's workflow
-# file name), SEVERITY_CONFIG, MAX_DELTA_REVIEWS_PER_PR.
-# Optional: DISPATCH_REF (default branch by default), GATE_CONTEXT,
-# REVIEWER_LOGIN, RUN_NAME_MATCH, MAX_FAILED_DELTA_RUNS (2).
+# file name), SEVERITY_CONFIG.
+# Optional: MAX_DELTA_REVIEWS_PER_PR (else SEVERITY_CONFIG's
+# max_delta_reviews_per_pr), DISPATCH_REF (default branch by default),
+# GATE_CONTEXT, REVIEWER_LOGIN, RUN_NAME_MATCH, MAX_FAILED_DELTA_RUNS (2).
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

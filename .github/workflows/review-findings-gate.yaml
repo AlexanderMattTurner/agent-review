@@ -106,7 +106,7 @@ on:
         default: "pending"
         type: string
       max-delta-reviews-per-pr:
-        description: "How many ACCUMULATED reads the reviewer may spend on one pull request — the same number passed to the review workflow. Setting it turns on the `uncovered` verdict: the gate then holds a pull request whose head is past the head its last review covered, and says so, instead of greening on a review of older code. EMPTY (the default) keeps the gate the pull-request-scoped predicate it was, for a consumer whose reviewer reads once and never re-reads."
+        description: "How many ACCUMULATED reads the reviewer may spend on one pull request — the same number passed to the review workflow. Setting it turns on the `uncovered` verdict: the gate then holds a pull request whose head is past the head its last review covered, and says so, instead of greening on a review of older code. EMPTY (the default) reads `max_delta_reviews_per_pr` from the severity config, which is how a pull-request leg and a merge-queue leg share one number; a queue leg with a higher number reds a pull request that entered the queue green. With neither, the gate stays the pull-request-scoped predicate, for a consumer whose reviewer reads once and never re-reads."
         required: false
         default: ""
         type: string

@@ -56,10 +56,10 @@ jobs:
       # sweep's re-post keeps the Details link review-gate.yaml's post carries.
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # Naming the reviewer workflow is what turns the accumulated read on. Its
-      # budget is separate from the first read's, so this sweep can cost a PR at
-      # most one extra model read across its whole life.
+      # budget is `max_delta_reviews_per_pr` in the severity config, separate
+      # from the first read's, so this sweep can cost a PR at most that many
+      # extra model reads across its whole life.
       REVIEW_WORKFLOW: claude-review.yaml
-      MAX_DELTA_REVIEWS_PER_PR: 1
     steps:
       - name: Checkout the trusted approval and gate scripts (default branch)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

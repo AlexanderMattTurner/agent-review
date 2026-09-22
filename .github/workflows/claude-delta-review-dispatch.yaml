@@ -103,12 +103,11 @@ jobs:
       # A pull request run reports the PULL REQUEST's head here, not the
       # ephemeral merge commit, which is what makes the association resolve.
       SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
-      # The same two settings the sweep passes. Naming the reviewer workflow is
-      # what turns the accumulated read on, and its budget is separate from the
-      # first read's, so this path can cost a PR no extra read the sweep would
-      # not also have spent.
+      # The same setting the sweep passes. Naming the reviewer workflow is what
+      # turns the accumulated read on; its budget is `max_delta_reviews_per_pr`
+      # in the severity config, so this path can cost a PR no extra read the
+      # sweep would not also have spent.
       REVIEW_WORKFLOW: claude-review.yaml
-      MAX_DELTA_REVIEWS_PER_PR: 1
     steps:
       - name: Checkout the trusted dispatcher and its libraries (default branch)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

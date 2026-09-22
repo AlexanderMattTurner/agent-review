@@ -170,15 +170,35 @@ delta_read_abandoned() {
            | select(.read == \"delta\" and .scope == \$abandoned)] | length > 0"
 }
 
-# require_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR, or refuse. Same
-# required-with-no-default shape and same pattern as the first-read budget above,
-# so neither script can read a value the other rejects.
-require_delta_review_budget() {
-  MAX_DELTA_REVIEWS_PER_PR="${MAX_DELTA_REVIEWS_PER_PR:?MAX_DELTA_REVIEWS_PER_PR required — review.yaml passes its max-delta-reviews-per-pr input}"
-  [[ "$MAX_DELTA_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+# resolve_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR from the environment
+# when it is non-empty, else from `max_delta_reviews_per_pr` in SEVERITY_CONFIG,
+# else leave it EMPTY, which the gate reads as "no accumulated read runs here".
+#
+# PROBLEM CLASS — the merge-queue leg and the pull-request leg of the review gate
+# disagreeing about the accumulated-read budget. Each leg is a separate workflow,
+# so a number restated in both drifts. A queue leg above the pull-request leg lets
+# a pull request enter the queue green and then reds its merge group: the same
+# state exits 0 at budget 1 and 1 at budget 2. Both legs read the consumer's
+# severity SSOT here instead, as they already do for `gate_context`.
+#
+# Assigns a global, so call it plainly and never under `$(…)`.
+resolve_delta_review_budget() {
+  MAX_DELTA_REVIEWS_PER_PR="${MAX_DELTA_REVIEWS_PER_PR:-}"
+  if [[ -z "$MAX_DELTA_REVIEWS_PER_PR" && -f "${SEVERITY_CONFIG:-}" ]]; then
+    MAX_DELTA_REVIEWS_PER_PR="$(jq -r '.max_delta_reviews_per_pr // empty' "$SEVERITY_CONFIG")"
+  fi
+  [[ -z "$MAX_DELTA_REVIEWS_PER_PR" || "$MAX_DELTA_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
     echo "max-delta-reviews-per-pr must be a whole number from 0 to 999 with no leading zero, not '$MAX_DELTA_REVIEWS_PER_PR'" >&2
     exit 1
   }
+}
+
+# require_delta_review_budget — resolve the budget, or refuse. Same
+# required-with-no-default shape and same pattern as the first-read budget above,
+# so neither script can read a value the other rejects.
+require_delta_review_budget() {
+  resolve_delta_review_budget
+  : "${MAX_DELTA_REVIEWS_PER_PR:?MAX_DELTA_REVIEWS_PER_PR required — review.yaml passes its max-delta-reviews-per-pr input, or the severity config names max_delta_reviews_per_pr}"
 }
 
 # real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's
