@@ -4,7 +4,10 @@
 #   * the reviewer's hold — approve-if-reviewer-hold-clear.sh, the one source of
 #     truth for "the hold is cleared -> approve";
 #   * the `Automated review posted` merge gate — review-findings-gate.sh, which stays RED
-#     while one of the reviewer's finding threads is unresolved.
+#     while one of the reviewer's finding threads is unresolved;
+#   * the ACCUMULATED review of the pushes since the last one — dispatch-delta-
+#     review.sh, which starts a read only when the PR is otherwise ready to merge.
+#     Skipped entirely unless REVIEW_WORKFLOW names the workflow to dispatch.
 # This is the no-push safety net: GitHub fires no event when a review thread is
 # resolved, so a PR whose author resolves every finding without pushing gets
 # neither the push-time approve nor a fresh gate verdict, and the gate would hold
@@ -13,11 +16,14 @@
 # verdict stays in the script that owns it, so every caller reaches the same one.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name); REVIEWER_LOGIN optional (passed through).
+#      REVIEW_WORKFLOW and MAX_DELTA_REVIEWS_PER_PR enable the accumulated read.
 set -euo pipefail
 
 : "${GH_REPO:?GH_REPO required}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The severity SSOT both the gate and the dispatcher read, resolved once.
+severity_config="$(cd "$here/../.." && pwd)/config/review-severities.json"
 
 # Open, non-draft PRs authored by a real user (skip bot-authored PRs — Dependabot
 # et al. are handled elsewhere and never Claude-reviewed), mirroring the per-event
@@ -67,10 +73,19 @@ for row in "${prs[@]}"; do
     echo "::warning::sweep-reviewer-holds: PR #${pr} reported no head sha; its review gate is not re-evaluated" >&2
     status=1
   elif ! PR="$pr" REPORT_SHA="$head_sha" \
-    SEVERITY_CONFIG="$(cd "$here/../.." && pwd)/config/review-severities.json" \
+    SEVERITY_CONFIG="$severity_config" \
     UNREVIEWED_STATE=failure \
     bash "$here/../reviewer/review-findings-gate.sh"; then
     echo "sweep: PR #${pr} review gate could not be re-evaluated" >&2
+    status=1
+  fi
+  # The accumulated read. Every readiness question lives in the dispatcher; this
+  # loop only offers it the PR. A repo that names no reviewer workflow asks for
+  # none, which is how a consumer keeps today's one-read-per-PR behaviour.
+  if [[ -n "${REVIEW_WORKFLOW:-}" ]] &&
+    ! PR="$pr" SEVERITY_CONFIG="$severity_config" \
+      bash "$here/../reviewer/dispatch-delta-review.sh"; then
+    echo "sweep: PR #${pr} accumulated review could not be evaluated" >&2
     status=1
   fi
   echo "::endgroup::"

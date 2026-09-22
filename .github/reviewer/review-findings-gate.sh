@@ -5,7 +5,8 @@
 #   (a) the automated reviewer has read it at least once, or owes it no read at
 #       all, AND
 #   (b) no unresolved reviewer-rooted review thread still carries a merge-gating
-#       finding.
+#       finding, AND
+#   (c) no push after the covered head is still owed an accumulated read.
 # Resolving the last gating thread is what flips the gate — there is no approval
 # to mint, no sticky verdict to supersede, and no state beyond what the pull
 # request itself shows.
@@ -20,6 +21,15 @@
 # run=false for a plain `synchronize`), so a head-scoped clause would hold a
 # reviewed pull request at unreviewed forever the moment a push produced a head
 # nothing will review.
+#
+# Clause (c) is what says so OUT LOUD. The reviews carry a coverage stamp naming
+# the commit each read covered, so a head past it is one nobody has read — and
+# while an accumulated read is still owed, this gate says that rather than
+# greening on a review of older code. Once that budget is spent the verdict is
+# green again, because no further read is coming, and the description says which
+# commit the reading stopped at instead of claiming the head was read. The clause
+# is OFF for a caller that passes no MAX_DELTA_REVIEWS_PER_PR: such a caller runs
+# no accumulated read, so no head can be waiting for one.
 #
 # A DISMISSED review counts as a read, because a dismissal retracts the HOLD and
 # not the reading. A consumer's hold sweeper dismisses the reviewer's
@@ -74,8 +84,8 @@
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, GATE_CONTEXT, SEVERITY_CONFIG.
 # Optional: REPORT_SHA, RUN_URL, GATE_UNREPORTED, UNREVIEWED_STATE (pending or
-# failure), RECHECK_LABEL, REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES,
-# REVIEW_SKIP_BOT_AUTHORS.
+# failure), MAX_DELTA_REVIEWS_PER_PR (clause (c), off when unset), RECHECK_LABEL,
+# REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES, REVIEW_SKIP_BOT_AUTHORS.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -165,24 +175,29 @@ fi
 owner="${GH_REPO%%/*}"
 name="${GH_REPO##*/}"
 
-# Captured before iterating so a jq failure (malformed config, a gating severity
-# with no icon) fails the gate loudly instead of dissolving into an empty loop.
-severity_rows="$(jq -r '.gating[] as $s | [$s, (.icons[$s] // error("no icon for gating severity \($s)"))] | @tsv' "$SEVERITY_CONFIG")"
-gating_predicate=""
-while IFS=$'\t' read -r sev sev_icon; do
-  # An empty `gating` list makes the herestring yield ONE blank line, and a
-  # blank row would append `startswith("")` — true of every body — so the gate
-  # would red every thread while the can-never-gate guard below stayed
-  # satisfied. Skipping blanks is what lets that guard actually see an empty
-  # predicate.
-  [[ -n "$sev" && -n "$sev_icon" ]] || continue
-  [[ -n "$gating_predicate" ]] && gating_predicate+=" or "
-  gating_predicate+="(\$body | split(\"\\n\") | any(. == \"<!-- severity: ${sev} -->\"))"
-  gating_predicate+=" or (\$body | startswith(\"${sev_icon}\"))"
-done <<<"$severity_rows"
-[[ -n "$gating_predicate" ]] || {
-  echo "no gating severities in $SEVERITY_CONFIG — refusing to run a gate that can never gate" >&2
-  exit 1
+# Clause (c): rewrite a green verdict when the head is past what any review
+# covered. Reads the LIVE head rather than REPORT_SHA, which the merge-queue leg
+# does not set and a sweep may have read a minute ago — the claim is about the
+# pull request's current head, so it is read now. A head this cannot read leaves
+# the verdict alone: a can't-verify must not invent a hold, and the reviewed-at
+# fact is already true.
+uncovered_verdict() {
+  [[ -n "${MAX_DELTA_REVIEWS_PER_PR:-}" ]] || return 0
+  require_delta_review_budget
+  local coverage covered deltas live live_rc=0
+  coverage="$(coverage_of_reviews <<<"$reviews")"
+  [[ -n "$coverage" ]] || return 0
+  covered="$(jq -r '.head // ""' <<<"$coverage")"
+  [[ -n "$covered" ]] || return 0
+  live="$(retry_stdout gh pr view "$PR" --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || live_rc=$?
+  [[ "$live_rc" -eq 0 && -n "$live" && "$live" != "$covered" ]] || return 0
+  deltas="$(delta_reviews_count <<<"$reviews")"
+  if [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
+    verdict=uncovered
+    reason="reviewed at ${covered:0:7}; the pushes since it are waiting for the accumulated review"
+  else
+    reason="reviewed at ${covered:0:7}; the accumulated read is spent, so the pushes after it were NOT read"
+  fi
 }
 
 reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
@@ -199,13 +214,10 @@ if [[ "$read_owed" == true ]]; then
   verdict=unreviewed
   reason="waiting for the automated review of this pull request"
 else
-  gating="$(fetch_review_threads "$owner" "$name" "$PR" \
-    "[.[] | select(.isResolved == false)
-          | $REVIEW_THREAD_ROOT_IS_REVIEWER
-          | . + {rootBody: (.comments.nodes[0].body // \"\")}
-          | select(.rootBody as \$body | ${gating_predicate})
-          | {path, line}]" |
-    jq -s 'add // []')"
+  # The threads, the severity model and the refusal to run a gate that can never
+  # gate all live in the shared library, so the delta-read dispatcher asks this
+  # question through the same code rather than a second copy of the predicate.
+  gating="$(unresolved_gating_findings "$owner" "$name" "$PR" "$SEVERITY_CONFIG")"
   count="$(jq 'length' <<<"$gating")"
   if [[ "$count" -eq 0 ]]; then
     verdict=green
@@ -214,6 +226,7 @@ else
     else
       reason="the reviewer has reviewed this PR and no unresolved thread carries a gating finding"
     fi
+    uncovered_verdict
   else
     verdict=red
     where="$(jq -r '[.[] | (.path // "(general)") + (if .line then ":" + (.line|tostring) else "" end)] | join(", ")' <<<"$gating")"
@@ -230,6 +243,14 @@ fi
 
 case "$verdict" in
 green) state=success ;;
+# A head nobody has read is reported exactly like a pull request nobody has read:
+# the same "nothing looked at this" fact, and the same consumer-chosen state.
+uncovered)
+  case "${UNREVIEWED_STATE:-pending}" in
+  pending | failure) state="${UNREVIEWED_STATE:-pending}" ;;
+  *) state=failure ;;
+  esac
+  ;;
 # The state for "nothing has read this yet" is the consumer's call. `pending`
 # says "waiting" in the merge box; `failure` is louder — a pending status does
 # not appear in `gh pr checks` at all, so a reader cannot tell "the reviewer has

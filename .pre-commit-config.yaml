@@ -11,6 +11,13 @@
 default_language_version:
   python: python3.11
 
+# Frozen reviewer evaluation inputs: byte-exact copies of real diffs and of the
+# trees they were reviewed against. Every hook is off for them. A formatter that
+# strips a diff's trailing whitespace, or a linter that reports the very defect a
+# case exists to hold, is reading the input under test as if this repository wrote
+# it. .gitattributes and .prettierignore hold the same line for their own tools.
+exclude: ^tests/eval/cases/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

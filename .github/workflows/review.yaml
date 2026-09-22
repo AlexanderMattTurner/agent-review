@@ -79,6 +79,16 @@ on:
         required: false
         default: 1
         type: number
+      max-delta-reviews-per-pr:
+        description: "How many ACCUMULATED reads one pull request may spend, from 0 to 999. An accumulated read covers the pushes that landed after the last review, and only once the pull request is otherwise ready to merge. It is a separate budget because the automatic first-read arms fire on `synchronize`, which is what an accumulated read must not do. 0 turns the accumulated read off, and the pushes after a review then stay unread — the merge gate says so rather than claiming coverage."
+        required: false
+        default: 1
+        type: number
+      pr-number:
+        description: "The pull request to read on a `workflow_dispatch` run, which carries no pull request payload. Empty (the default) is every other trigger, where the event names the pull request. `dispatch-delta-review.sh` passes it when it asks for the accumulated read."
+        required: false
+        default: ""
+        type: string
       setup-command:
         description: "Command run in the caller's base checkout before the model call — a dependency sync a later step needs (the log redactor's interpreter, for one). Empty runs nothing."
         required: false
@@ -172,7 +182,9 @@ jobs:
   # opt-in buys another.
   decide:
     name: Decide whether to review
-    if: github.event_name == 'pull_request_target'
+    # A dispatch names its pull request in `pr-number`, because a
+    # `workflow_dispatch` run carries no pull request payload at all.
+    if: github.event_name == 'pull_request_target' || inputs.pr-number != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -185,6 +197,13 @@ jobs:
       # that is still generating; the review job re-asks the question from inside
       # the concurrency group.
       recheck: ${{ steps.decide.outputs.recheck }}
+      # Which pull request, which head, and which budget pays — written by the one
+      # script that decided them, so no later job re-derives them from an event
+      # payload a dispatch run has not got.
+      pr: ${{ steps.decide.outputs.pr }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      read: ${{ steps.decide.outputs.read }}
+      since: ${{ steps.decide.outputs.since }}
     steps:
       # No caller checkout at all: this job runs the reviewer's own script and
       # reads the PR through the API, so the repository under review is never on
@@ -212,20 +231,27 @@ jobs:
           # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+          # The coverage stamp records which reviewer read the pull request, so a
+          # later run can tell a read by an older reviewer from its own.
+          echo "REVIEWER_SHA=$(git -C "${dest}" rev-parse HEAD)" >>"$GITHUB_ENV"
 
       - name: Decide whether to review
         id: decide
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTION: ${{ github.event.action }}
+          # `dispatch` is the accumulated read's own arm; every other value is
+          # the pull_request_target action GitHub sent.
+          ACTION: ${{ inputs.pr-number != '' && 'dispatch' || github.event.action }}
           REPO: ${{ github.repository }}
+          # Empty on a dispatch, where the script reads the live head itself.
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ inputs.pr-number || github.event.pull_request.number }}
           # The on-demand hatch. `labeled` reaches here only from a caller that
           # lists it, and only this label answers true.
           LABEL: ${{ github.event.label.name }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          MAX_DELTA_REVIEWS_PER_PR: ${{ inputs.max-delta-reviews-per-pr }}
           READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/decide-pr-review-trigger.sh"
 
@@ -239,7 +265,7 @@ jobs:
     # started review always runs to completion — a push mid-review cannot throw
     # the read away. Keyed by PR number, never static, so it strands no check.
     concurrency:
-      group: claude-pr-review-${{ github.event.pull_request.number }}
+      group: claude-pr-review-${{ needs.decide.outputs.pr }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     # A timeout here strands the PR: no review posts, and `decide` re-runs a
@@ -287,6 +313,9 @@ jobs:
           # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+          # The coverage stamp records which reviewer read the pull request, so a
+          # later run can tell a read by an older reviewer from its own.
+          echo "REVIEWER_SHA=$(git -C "${dest}" rev-parse HEAD)" >>"$GITHUB_ENV"
 
       - name: Re-check that the PR still owes a review
         # Runs INSIDE the concurrency group, so the earlier run's review job has
@@ -298,8 +327,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ needs.decide.outputs.pr }}
           MAX_REVIEWS_PER_PR: ${{ inputs.max-reviews-per-pr }}
+          MAX_DELTA_REVIEWS_PER_PR: ${{ inputs.max-delta-reviews-per-pr }}
+          # Which budget this run is spending, so the re-check asks about the
+          # same one decide approved.
+          READ_KIND: ${{ needs.decide.outputs.read }}
           READS_MARKED_FROM: ${{ inputs.reads-marked-from }}
         run: bash "${REVIEWER_DIR}/recheck-pr-review-owed.sh"
 
@@ -346,8 +379,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ needs.decide.outputs.pr }}
+          EVENT_HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
         run: bash "${REVIEWER_DIR}/recheck-pr-head-current.sh"
 
       - name: Fetch and sanitize the untrusted PR input
@@ -362,7 +395,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           ELIDE_COMMAND: ${{ inputs.elide-command }}
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
@@ -374,6 +407,13 @@ jobs:
           MODEL_LOW: ${{ inputs.model-low }}
           LOW_TIER_PATHS: ${{ inputs.low-tier-paths }}
           BULK_DIFF_LINES: ${{ inputs.bulk-diff-lines }}
+          # What the coverage stamp will claim, and where an accumulated read
+          # starts. HEAD_SHA is the head decide resolved: prepare refuses to read a
+          # pull request whose head moved since, rather than stamping a head that
+          # no longer exists as covered.
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
+          READ: ${{ needs.decide.outputs.read }}
+          SINCE: ${{ needs.decide.outputs.since }}
         run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
 
       - name: Post the oversized notice as a review plus a human-review thread
@@ -384,9 +424,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
+          # The notice stamps coverage, so it needs the budget that paid for it.
+          READ: ${{ needs.decide.outputs.read }}
         run: bash "${REVIEWER_DIR}/post-oversized-review.sh"
 
       - name: Hand the sanitized input to the shard reviewers
@@ -402,7 +444,7 @@ jobs:
 
       - name: Review the PR with Claude
         id: claude_review
-        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        if: steps.prepare.outputs.stale != 'true' && steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
         env:
           # Rung 1 is the metered key: a review spends the caller's own funded key
           # first and reaches a subscription token only once it errors. An empty
@@ -418,7 +460,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py"
@@ -428,7 +470,7 @@ jobs:
         # attempt still errored this classifies it — a zero-cost credential
         # failure against a real run failure — instead of surfacing as the generic
         # "no review.json".
-        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        if: steps.prepare.outputs.stale != 'true' && steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
         env:
           EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
           CONTEXT: Claude PR review attempt
@@ -437,13 +479,13 @@ jobs:
       - name: Post the structured review
         # Turns review.json into ONE PR review with inline comments and suggested
         # edits, validating every anchor against the diff first.
-        if: steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
+        if: steps.prepare.outputs.stale != 'true' && steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
           # Carries total_cost_usd for the review's cost footer.
           EXECUTION_FILE: ${{ steps.claude_review.outputs.execution_file }}
         run: bash "${REVIEWER_DIR}/post-pr-review.sh"
@@ -458,12 +500,13 @@ jobs:
         # name a head the PR no longer has.
         if: >-
           always() && inputs.post-review-command != '' &&
+          steps.prepare.outputs.stale != 'true' &&
           (steps.prepare.conclusion == 'success' || steps.recheck.outputs.skip == 'true')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ needs.decide.outputs.pr }}
+          REPORT_SHA: ${{ needs.decide.outputs.head_sha }}
           POST_REVIEW_COMMAND: ${{ inputs.post-review-command }}
         run: bash -c "$POST_REVIEW_COMMAND"
 
@@ -504,7 +547,7 @@ jobs:
   # injection in a shard reaches no PR surface from here.
   review_shard:
     name: Claude PR review (shard ${{ matrix.shard }})
-    needs: review
+    needs: [decide, review]
     if: needs.review.outputs.sharded == 'true'
     runs-on: ubuntu-latest
     # Matches the review job's 30, and for the same reason: this budget covers a
@@ -556,6 +599,9 @@ jobs:
           # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+          # The coverage stamp records which reviewer read the pull request, so a
+          # later run can tell a read by an older reviewer from its own.
+          echo "REVIEWER_SHA=$(git -C "${dest}" rev-parse HEAD)" >>"$GITHUB_ENV"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -615,7 +661,7 @@ jobs:
           MODEL: ${{ env.SHARD_MODEL || inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/run-review-ladder.py"
@@ -650,7 +696,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         # The re-read's own log directory, the guarded copies and the restore live
@@ -731,7 +777,7 @@ jobs:
 
   review_synthesis:
     name: Post the sharded PR review
-    needs: [review, review_shard]
+    needs: [decide, review, review_shard]
     # merge-shard-reviews.mjs enforces "never claim a complete read the shards did
     # not deliver": it refuses to fold fewer shard reviews than the manifest
     # names. Do not gate this on the shard JOBS' conclusion instead — that proxy
@@ -745,7 +791,7 @@ jobs:
     # Matches the review job: a started synthesis runs to completion, so the
     # review it posts is never thrown away mid-write.
     concurrency:
-      group: claude-pr-review-synthesis-${{ github.event.pull_request.number }}
+      group: claude-pr-review-synthesis-${{ needs.decide.outputs.pr }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -783,6 +829,9 @@ jobs:
           # Outside GITHUB_WORKSPACE on purpose: the reviewed repository's
           # checkout must not be able to replace the code reviewing it.
           echo "REVIEWER_DIR=${dest}/.github/reviewer" >>"$GITHUB_ENV"
+          # The coverage stamp records which reviewer read the pull request, so a
+          # later run can tell a read by an older reviewer from its own.
+          echo "REVIEWER_SHA=$(git -C "${dest}" rev-parse HEAD)" >>"$GITHUB_ENV"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -815,9 +864,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
           # No single execution log exists here: the cost is summed from what the
           # shards recorded in their artifacts.
           SHARD_COST_DIR: ${{ runner.temp }}/shard-reviews
@@ -838,8 +887,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ needs.decide.outputs.pr }}
+          EVENT_HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
           POST_REVIEW_COMMAND: ${{ inputs.post-review-command }}
         run: |
           live="$(gh pr view "$PR" --repo "$GH_REPO" --json headRefOid --jq .headRefOid || true)"

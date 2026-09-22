@@ -24,11 +24,20 @@
 # fewer reads than the budget, which re-arms `opened` after an oversized diff or a
 # cancelled job.
 #
+# `dispatch` is the fourth arm and the only one that reads a PR twice: the sweep
+# asks for the ACCUMULATED read of the pushes that landed after the covered head,
+# once the PR is otherwise ready to merge (dispatch-delta-review.sh owns that
+# question). It spends `max-delta-reviews-per-pr`, never the first-read budget, so
+# a delta read cannot starve a PR of its first pass. A dispatch for a PR nothing
+# has read yet is its FIRST read, under the first-read budget.
+#
 # Security: read under pull_request_target, so the untrusted head is never
 # checked out or executed, and matched only as fixed DATA strings (never eval).
 #
 # Env: GH_TOKEN, ACTION, REPO, HEAD_SHA, PR, LABEL, REVIEW_LABEL,
-#      MAX_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
+#      MAX_REVIEWS_PER_PR, MAX_DELTA_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
+# On the `dispatch` arm HEAD_SHA is empty and read from the API instead: the run
+# carries no event payload, and the head to review is whichever one is live now.
 set -euo pipefail
 
 KEYWORD="[opus-review]"
@@ -49,6 +58,8 @@ source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 # because the number bounds what one PR costs. A caller that wants no automatic
 # read at all passes 0.
 require_review_budget
+# The separate budget for the accumulated read, for the reason its own arm gives.
+require_delta_review_budget
 # The cutover date the count is read against; empty means the stamp alone decides.
 require_reads_marked_from
 # Written once: both arms that short-circuit on a budget of 0 say the same thing,
@@ -58,16 +69,74 @@ REPO="${REPO:?REPO (owner/name) required}"
 owner="${REPO%%/*}"
 name="${REPO##*/}"
 
+# What the review job reads back: which PR and head to read, which budget pays,
+# and where an accumulated read starts. Written on EVERY decision, so a job that
+# runs never has to re-derive them from an event payload the dispatch arm has not
+# got.
+READ_KIND="first"
+SINCE=""
+HEAD_SHA="${HEAD_SHA:-}"
+
 emit() { # $1 run, $2 reason, $3 recheck (default false)
   local run="$1" reason="$2" recheck="${3:-false}"
   {
     echo "run=$run"
     echo "recheck=$recheck"
+    echo "pr=${PR:-}"
+    echo "head_sha=$HEAD_SHA"
+    echo "read=$READ_KIND"
+    echo "since=$SINCE"
   } >>"$GITHUB_OUTPUT"
-  echo "decision: run=$run recheck=$recheck ($reason)"
+  echo "decision: run=$run recheck=$recheck read=$READ_KIND head=${HEAD_SHA:-unknown} ($reason)"
 }
 
 case "$ACTION" in # `opened` is the ONLY unconditional arm — fires once per PR; the other two fire without limit
+dispatch)
+  # The accumulated read. The sweep already decided this PR is worth one; this
+  # re-asks the two questions that can have changed since — is the covered head
+  # still behind the live one, and is the delta budget still unspent — because the
+  # dispatch and this run are minutes apart and a push or another run can land in
+  # between. It reads the live head itself: a dispatch carries no event payload.
+  live_rc=0
+  HEAD_SHA="$(retry_stdout gh pr view "${PR:?PR required on the dispatch arm}" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || live_rc=$?
+  if [[ "$live_rc" -ne 0 || -z "$HEAD_SHA" ]]; then
+    emit false "could not read $REPO#${PR}'s live head (rc=$live_rc) — not reviewing rather than reading an unnamed commit"
+    exit 0
+  fi
+  reviews_rc=0
+  reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR" 2>/dev/null)" || reviews_rc=$?
+  if [[ "$reviews_rc" -ne 0 ]]; then
+    emit false "could not read $REPO#${PR} reviews (rc=$reviews_rc) — not reviewing rather than guessing what is covered"
+    exit 0
+  fi
+  coverage="$(coverage_of_reviews <<<"$reviews")"
+  if [[ -z "$coverage" ]]; then
+    # Nothing has read this PR, so this is its FIRST read and the first-read
+    # budget is what bounds it. That is the re-arm for a PR whose `opened` run
+    # produced no review at all.
+    spent="$(real_reviewer_reviews "$owner" "$name" "$PR" 2>/dev/null | jq -rs 'length')" || spent=""
+    if [[ -z "$spent" ]]; then
+      emit false "could not count $REPO#${PR}'s spent reads — not reviewing rather than guessing"
+    elif [[ "$spent" -lt "$MAX_REVIEWS_PER_PR" ]]; then
+      emit true "no review covers $REPO#${PR} yet — this dispatch buys its first read" true
+    else
+      emit false "no review of $REPO#${PR} carries a coverage stamp and its $MAX_REVIEWS_PER_PR read(s) are spent"
+    fi
+    exit 0
+  fi
+  covered="$(jq -r '.head // ""' <<<"$coverage")"
+  deltas="$(delta_reviews_count <<<"$reviews")"
+  if [[ "$covered" == "$HEAD_SHA" ]]; then
+    emit false "$REPO#${PR}'s head ${HEAD_SHA} is already covered by a review — nothing to re-read"
+  elif [[ "$deltas" -ge "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
+    emit false "$REPO#${PR} has spent all $MAX_DELTA_REVIEWS_PER_PR accumulated read(s) — the pushes after ${covered} stay unread"
+  else
+    READ_KIND="delta"
+    SINCE="$covered"
+    emit true "$REPO#${PR} is covered only to ${covered}; reading the pushes since then (${deltas} of $MAX_DELTA_REVIEWS_PER_PR accumulated read(s) spent)" true
+  fi
+  exit 0
+  ;;
 opened)
   # GitHub fires `opened` exactly once per PR, so no review can exist yet and the
   # count is 0 by construction — the cap is read here, never the review list.

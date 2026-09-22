@@ -18,3 +18,7 @@ uv.lock
 
 # Template sync
 .template-version
+
+# Frozen evaluation inputs — see the .gitattributes block that unsets their
+# whitespace check. Reformatting one changes the input the reviewer reads.
+tests/eval/cases/

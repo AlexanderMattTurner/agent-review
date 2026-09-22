@@ -1,0 +1,35 @@
+commit dcbac415a9850509776e893d4f181e252fccb87e
+Author: Claude <noreply@anthropic.com>
+Date:   Mon Sep 21 21:47:10 2026 +0000
+
+    fix(seed): drop a nested repo's missing files from the tar list
+    
+    _gb_seed_untracked_into lists a nested repository's tracked paths
+    with `ls-files --cached`, which answers from that repository's
+    index. A path deleted or renamed in the nested work tree is still
+    named there. `tar --null -T` stats every member of the list, so one
+    missing name fails the whole carry and the first Kata launch dies
+    instead of seeding the nested tree as it stands.
+    
+    Skip a listed path that the work tree no longer holds. The test
+    drives gb_seed_copy_untracked over a nested repository with a
+    deleted file and with a renamed one.
+    
+    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_017upL4DbnTRHWXRKxp4WAcY
+
+diff --git a/bin/lib/seed-format.bash b/bin/lib/seed-format.bash
+index 3817f2d7c1..0d2645826e 100644
+--- a/bin/lib/seed-format.bash
++++ b/bin/lib/seed-format.bash
+@@ -106,6 +106,10 @@ _gb_seed_untracked_into() {
+         _gb_seed_untracked_into "$src/${path%/}" "$list" "$prefix$path" "$((depth + 1))" || rc=1
+         continue
+       fi
++      # --cached answers from the nested index, which still names a path the work tree no
++      # longer holds after a delete or a rename. tar reads this list and stats every member,
++      # so one missing name fails the whole seed instead of carrying the tree as it stands.
++      [[ -e "$src/$path" || -L "$src/$path" ]] || continue
+       printf '%s\0' "$prefix$path" >>"$list"
+     done <"$raw"
+   fi

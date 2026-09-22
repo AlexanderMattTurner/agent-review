@@ -1,0 +1,8 @@
+{
+  "kind": "non_bug",
+  "source": "AlexanderMattTurner/agent-glovebox@6ddcd506f44778d472307f81f8183b4a9ae5ac72",
+  "summary": "The claude-owned-label workflow step body moves to .github/scripts/claude-owned-label-apply.sh, which sets its own `set -euo pipefail` and guards every inherited env var with `:?`, so no errexit or unset-variable regression follows the extraction.",
+  "must_flag": [],
+  "must_not_flag": [".github/scripts/claude-owned-label-apply.sh"],
+  "context_expect": []
+}

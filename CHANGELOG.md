@@ -12,7 +12,17 @@ the prose from the release's commits.
 
 ## Unreleased
 
+### Security
+
+- Model-authored review text no longer opens an HTML comment: `post-pr-review.mjs` escapes `<!--` in the summary, in each finding's own text, in its path and in its suggestion. The reviewer reads its records back off the body it posts — the coverage stamp, the read markers, the severity marker the merge gate reads — and the model's text lands in the same body, derived from an untrusted diff. A pull request that talked the model into echoing one of those markers forged the record: a `review-coverage` stamp in the summary is captured ahead of the trusted one, so it could spend the accumulated budget or claim a head nobody read. A fenced suggestion is escaped too, because every reader matches the raw body.
+
 ### Added
+
+- A coverage stamp on every review body, naming the head and base the review read, the reviewer commit that read them, whether the read was the first or the accumulated one, and its scope. `lib/pr-reviews.bash` is the only place that writes or parses it. Before this, a review said nothing about which revision it covered, so nobody could tell "findings the author has not resolved" from "pushes nobody read". A review that is never posted stamps nothing, so a failed or skipped read advances no coverage.
+
+- One ACCUMULATED read per pull request, bounded by the new `max-delta-reviews-per-pr` input (default 1) and charged to its own budget, so it never spends a whole-diff read. It covers every push made since the head the last review read. `dispatch-delta-review.sh` asks for it, per open pull request, from the twice-hourly sweep in `claude-reviewer-hold-clear.yaml`: the pull request must be open and not a draft, a review must already cover an older head, the budget must have room, no unresolved reviewer finding may still hold the merge, and every check on the live head must have concluded successfully. The review gate is excluded from that last test, because it is red exactly while the read is owed. A burst of pushes coalesces with no timer, since each push reds the checks again. The read runs through a `workflow_dispatch` of the caller, so the new `pr-number` input carries the pull request a dispatch has no payload for.
+
+- `build-review-context.py`, which gives the model the base tree's OTHER mentions of the identifiers a diff changes. The reviewer read the diff alone, so a change to one caller of a helper looked complete while the sibling caller with the same defect sat unread in the base tree. It runs in the trusted base checkout, emits a capped `context.txt` beside the diff, and judges nothing. Sharded reads share the one file, so it costs no extra model call.
 
 - `review.yaml`, the PR reviewer as a REUSABLE workflow other repositories call by `uses:`. It carries the whole first-pass reviewer — the per-PR read budget, the per-file split for a diff that outgrows one model context, the input sanitizer, and the credential ladder — and runs its own scripts from `.github/reviewer/` at the commit the caller pinned. The `max-reviews-per-pr` input says how many whole-diff reads one pull request may spend, and defaults to 1. Raise it for a second automatic read, or pass 0 for none. The `[opus-review]` head-commit opt-in and the `needs-auto-review` label start a read whatever the count says, and a read either one posts still counts against the budget. This repository's own `claude-review.yaml` is now a caller of it, so a change to the reviewer reviews the pull request that makes it. Configure it through the inputs the README lists; `elide-command`, `post-review-command` and `log-redactor` are how a consumer keeps its own repository-specific pieces.
 
@@ -76,6 +86,10 @@ the prose from the release's commits.
 - A memo shadow on the decide job: `decide-memo-base.py` names the newest commit
   on the branch whose work job actually PASSED, and the gate logs what it would
   decide diffing from there. Logged only — nothing acts on it yet.
+
+### Changed
+
+- The review-findings gate now answers the coverage question. While the live head is past the head a review covered and an accumulated read is still affordable, the gate stays red and names what it waits for. Once that budget is spent, the gate goes green with a description naming the head it was last read at, so it never makes a silent claim of complete coverage.
 
 ### Fixed
 

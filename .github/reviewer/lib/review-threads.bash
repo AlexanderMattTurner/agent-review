@@ -10,6 +10,7 @@
 #   fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walk EVERY page, applying <jq> to each page's nodes ARRAY. Non-zero once retries exhaust.
 #   raise_human_review_finding <marker> <prose-file> — open ONE file-level finding thread stamped <marker>, unless an UNRESOLVED thread already carries it. Requires GH_REPO, PR, HEAD_SHA and an exported REVIEWER_LOGIN_BARE.
 #   settled_merge_delta_shas <owner> <name> <pr> — every merge sha a merge-delta finding thread was raised about, replied to by a non-reviewer, and resolved.
+#   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's unresolved threads that HOLD a merge, as a JSON array of {path, line}.
 
 # retry_stdout, sourced here rather than assumed, so a consumer gets the retry ladder by
 # sourcing this file alone. lib-ci-retry.sh guards against a double source.
@@ -149,6 +150,53 @@ settled_merge_delta_shas() {
     export REVIEWER_LOGIN_BARE="$MERGE_DELTA_REVIEWER_LOGIN"
     fetch_review_threads "$owner" "$name" "$pr" "$projection" 100
   ) | sort -u
+}
+
+# Which severities HOLD a merge, as a jq predicate over `$body`. The consumer's
+# own config says which they are, and each gates two ways: a hidden
+# `<!-- severity: … -->` marker on a line of its own (a whole-line match, so a
+# body that merely QUOTES a marker in prose or a suggestion block does not gate),
+# or — the pre-marker fallback — a body starting with that severity's icon.
+#
+# A gating list with no severities is refused rather than compiled: an empty
+# predicate is `false` for every thread, so the gate would green over every
+# finding, and the dispatcher would read a held PR as clear.
+gating_severity_predicate() {
+  local config="$1" rows predicate="" sev sev_icon
+  rows="$(jq -r '.gating[] as $s | [$s, (.icons[$s] // error("no icon for gating severity \($s)"))] | @tsv' "$config")"
+  while IFS=$'\t' read -r sev sev_icon; do
+    # An empty `gating` list makes the herestring yield ONE blank line, and a
+    # blank row would append `startswith("")` — true of every body.
+    [[ -n "$sev" && -n "$sev_icon" ]] || continue
+    [[ -n "$predicate" ]] && predicate+=" or "
+    predicate+="(\$body | split(\"\\n\") | any(. == \"<!-- severity: ${sev} -->\"))"
+    predicate+=" or (\$body | startswith(\"${sev_icon}\"))"
+  done <<<"$rows"
+  [[ -n "$predicate" ]] || {
+    echo "no gating severities in $config — refusing to answer a question that can never gate" >&2
+    return 1
+  }
+  printf '%s' "$predicate"
+}
+
+# unresolved_gating_findings <owner> <name> <pr> <severity-config> — the
+# reviewer's unresolved threads carrying a gating finding, as a JSON array of
+# {path, line}. The merge gate reds on a non-empty answer and the delta-read
+# dispatcher declines on one, so both read the same threads through the same
+# predicate: a PR still holding findings is one whose next read would be of a
+# head its author is about to change.
+#
+# The caller must have EXPORTED REVIEWER_LOGIN_BARE.
+unresolved_gating_findings() {
+  local owner="$1" name="$2" pr="$3" config="$4" predicate
+  predicate="$(gating_severity_predicate "$config")"
+  fetch_review_threads "$owner" "$name" "$pr" \
+    "[.[] | select(.isResolved == false)
+          | $REVIEW_THREAD_ROOT_IS_REVIEWER
+          | . + {rootBody: (.comments.nodes[0].body // \"\")}
+          | select(.rootBody as \$body | ${predicate})
+          | {path, line}]" |
+    jq -s 'add // []'
 }
 
 # fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walks every page, applying <jq> to each page's nodes ARRAY.

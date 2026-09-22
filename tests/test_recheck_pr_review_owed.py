@@ -30,6 +30,8 @@ def _run(
     fail_runs: bool = False,
     fail_jobs: bool = False,
     max_reviews: str = "1",
+    max_delta_reviews: str = "1",
+    read_kind: str = "first",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Drive the REAL script with a `gh` stub answering the shared reviews query
     with one NDJSON node per entry in `review_states`, oldest first (nothing at
@@ -93,6 +95,10 @@ def _run(
             # The script takes no default of its own — review.yaml's input owns
             # the number — so every run names one.
             "MAX_REVIEWS_PER_PR": max_reviews,
+            "MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews,
+            # Which budget the run is spending. `first` is the push-driven read;
+            # `delta` is the dispatched accumulated one.
+            "READ_KIND": read_kind,
         },
     )
     skips = [
@@ -399,7 +405,7 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
     gate = _post_review_step(steps)
     assert "steps.recheck.outputs.skip != 'true'" not in gate["if"]
     assert "steps.recheck.outputs.skip == 'true'" in gate["if"]
-    assert gate["env"]["REPORT_SHA"] == "${{ github.event.pull_request.head.sha }}", (
+    assert gate["env"]["REPORT_SHA"] == "${{ needs.decide.outputs.head_sha }}", (
         "the verdict must land on THIS run's head — the one nothing else re-posts"
     )
 
@@ -411,8 +417,135 @@ def test_the_concurrency_barrier_the_recheck_depends_on_is_intact() -> None:
     covered by the script's in-flight-run detection, which needs actions:read."""
     job = _review_job()
     assert (
-        job["concurrency"]["group"]
-        == "claude-pr-review-${{ github.event.pull_request.number }}"
+        job["concurrency"]["group"] == "claude-pr-review-${{ needs.decide.outputs.pr }}"
     )
     assert job["concurrency"]["cancel-in-progress"] is False
     assert job["permissions"]["actions"] == "read"
+
+
+# ── The accumulated read's own budget ─────────────────────────────────────────
+#
+# A dispatched read spends `max-delta-reviews-per-pr`, never the first-read
+# budget, so this arm counts a different set of reviews against a different
+# number. Sharing either would let a delta read cancel a first pass the PR is
+# still owed — the permanently-unreviewed latch this script exists to prevent.
+
+COVERED = "1111111111111111111111111111111111111111"
+
+
+def _delta_body(head: str, read: str) -> str:
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; source "$1";'
+            ' printf "%s " "$WHOLE_DIFF_READ_MARKER";'
+            ' coverage_stamp "$2" ba5eba5e 0e0e0e0e "$3" whole',
+            "_",
+            str(lib),
+            head,
+            read,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.replace("\n", " ")
+
+
+def _run_bodies(
+    tmp_path: Path, bodies: tuple[str, ...], **kwargs
+) -> tuple[subprocess.CompletedProcess, str, str]:
+    """`_run` drives review STATES; these cases need specific review BODIES,
+    which is where the coverage stamp lives."""
+    nodes = "".join(
+        "printf '"
+        + json.dumps(
+            {
+                "state": "COMMENTED",
+                "body": body,
+                "submittedAt": f"2024-01-{n + 1:02d}T00:00:00Z",
+                "reviewId": str(n + 1),
+                "reviewedSha": COVERED,
+            }
+        ).replace("'", "'\\''")
+        + "\\n' ; "
+        for n, body in enumerate(bodies)
+    )
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >>"$GH_ARGV_FILE"\n'
+        'case "$*" in\n'
+        f"*graphql*) {nodes} ;;\n"
+        '*/jobs*) cat "$JOBS_JSON_FILE" ;;\n'
+        '*actions/workflows*) cat "$RUNS_JSON_FILE" ;;\n'
+        "*) ;;\nesac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    (tmp_path / "runs.json").write_text(
+        json.dumps({"workflow_runs": []}), encoding="utf-8"
+    )
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": []}), encoding="utf-8")
+    out_file = tmp_path / "github_output"
+    out_file.write_text("", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "GITHUB_OUTPUT": str(out_file),
+            "GH_ARGV_FILE": str(tmp_path / "gh_argv"),
+            "RUNS_JSON_FILE": str(tmp_path / "runs.json"),
+            "JOBS_JSON_FILE": str(tmp_path / "jobs.json"),
+            "GH_TOKEN": "fake",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "GITHUB_RUN_ID": str(OWN_RUN_ID),
+            "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/review.yaml@main",
+            "RETRY_BASE_DELAY": "0",
+            "MAX_REVIEWS_PER_PR": "1",
+            "MAX_DELTA_REVIEWS_PER_PR": "1",
+            **kwargs,
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    skips = [
+        ln.split("=", 1)[1]
+        for ln in out_file.read_text(encoding="utf-8").splitlines()
+        if ln.startswith("skip=")
+    ]
+    assert len(skips) == 1, skips
+    return proc, skips[0], (tmp_path / "gh_argv").read_text(encoding="utf-8")
+
+
+def test_a_spent_first_read_does_not_cancel_the_accumulated_one(
+    tmp_path: Path,
+) -> None:
+    """The separation, from this side: the PR has spent its one whole-diff read,
+    and the dispatched accumulated read still runs."""
+    _, skip, _ = _run_bodies(
+        tmp_path, (_delta_body(COVERED, "first"),), READ_KIND="delta"
+    )
+    assert skip == "false"
+
+
+def test_a_spent_accumulated_read_cancels_the_next_one(tmp_path: Path) -> None:
+    """The pair, over reviews differing only in which budget they stamped."""
+    _, skip, _ = _run_bodies(
+        tmp_path,
+        (_delta_body(COVERED, "first"), _delta_body(COVERED, "delta")),
+        READ_KIND="delta",
+    )
+    assert skip == "true"
+
+
+def test_a_spent_accumulated_read_does_not_cancel_a_first_pass(
+    tmp_path: Path,
+) -> None:
+    """The other direction, and the costly one: a PR that has only ever had an
+    accumulated read is still owed its first whole-diff pass."""
+    _, skip, _ = _run_bodies(tmp_path, (_delta_body(COVERED, "delta"),))
+    assert skip == "false"

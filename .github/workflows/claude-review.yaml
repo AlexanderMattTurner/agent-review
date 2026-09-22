@@ -20,6 +20,10 @@ name: Claude reviewers
 # blind that query to these secrets-bearing reviewer jobs. The scheduled
 # reviewer-hold sweeper (claude-reviewer-hold-clear.yaml) is likewise separate.
 
+# The accumulated read is dispatched, so its run must say which pull request it
+# reads: dispatch-delta-review.sh attributes a failed read by this exact suffix.
+run-name: Claude reviewers${{ inputs.pr && format(' — PR {0}', inputs.pr) || '' }}
+
 on: # zizmor: ignore[dangerous-triggers] — reviewer jobs are base-only checkout + least privilege; see each job's header
   # Union of the three source triggers. `opened`/`ready_for_review`/`synchronize`
   # drive the first-pass reviewer; `synchronize` also drives the thread resolver;
@@ -29,6 +33,15 @@ on: # zizmor: ignore[dangerous-triggers] — reviewer jobs are base-only checkou
   # branch, these reviewers only take effect once merged to the default branch.
   pull_request_target: # not-required-check
     types: [opened, ready_for_review, synchronize, labeled]
+  # The accumulated read of the pushes since the last review, asked for by
+  # claude-reviewer-hold-clear.yaml's sweep once the PR is otherwise ready to
+  # merge. GITHUB_TOKEN may start a dispatch, which is why this is the trigger.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to read the accumulated changes of."
+        required: true
+        type: string
 
 permissions: {}
 
@@ -46,6 +59,9 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   classify:
     name: Reviewer skip routing
+    # A dispatch carries no pull request payload, and routing a read the sweep
+    # already decided on would answer the wrong question anyway.
+    if: github.event_name == 'pull_request_target'
     # not-required-check: routes a pull request and reports no verdict of its own.
     permissions:
       contents: read
@@ -81,11 +97,17 @@ jobs:
     # posts. `labeled` is the on-demand hatch: it starts the read the stand-in
     # approval offers, whatever the class says.
     needs: classify
+    # !cancelled() so the dispatch arm survives `classify` being skipped: a
+    # skipped dependency otherwise skips this job whatever the condition says.
     if: >-
-      github.event.action == 'labeled' ||
+      !cancelled() &&
       (
-        contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
-        needs.classify.outputs.skip != 'true'
+        github.event_name == 'workflow_dispatch' ||
+        github.event.action == 'labeled' ||
+        (
+          contains(fromJSON('["opened","ready_for_review","synchronize"]'), github.event.action) &&
+          needs.classify.outputs.skip != 'true'
+        )
       )
     permissions:
       contents: read
@@ -102,6 +124,10 @@ jobs:
       # `github.job_workflow_sha` fallback is empty and it would refuse to clone.
       reviewer-ref: ${{ github.sha }}
       review-prompt: .github/prompts/claude-pr-review.md
+      # Empty on every pull_request_target event, which is what keeps the first
+      # read on its own budget; set only by the sweep's dispatch.
+      pr-number: ${{ inputs.pr || '' }}
+      max-delta-reviews-per-pr: 1
       # Re-post the `Automated review posted` verdict once the review (and its
       # finding threads) exist. Nothing else would: the review posts with the
       # workflow GITHUB_TOKEN, whose events start no workflow run, so
@@ -111,9 +137,13 @@ jobs:
       # exports — the same form a consumer repository writes, and it does not
       # depend on the caller happening to BE the reviewer. `${PWD}` is the
       # caller's checkout, where its severity SSOT is.
+      # MAX_DELTA_REVIEWS_PER_PR is what turns the gate's `uncovered` verdict on:
+      # without it the gate cannot tell an unread push from a covered one, so it
+      # stays the PR-scoped predicate it was.
       post-review-command: |
         SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
           UNREVIEWED_STATE=failure \
+          MAX_DELTA_REVIEWS_PER_PR=1 \
           bash "${REVIEWER_DIR}/review-findings-gate.sh"
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}

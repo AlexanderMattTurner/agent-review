@@ -1,0 +1,8 @@
+{
+  "kind": "non_bug",
+  "source": "AlexanderMattTurner/agent-glovebox@6df41fb261620face23f39cf8314155eeaa03257",
+  "summary": "Both callers of the ws-image probe now read it through one gb_vm_workspace_image_probe helper, so export and the clone-workspace check tell the same statuses apart.",
+  "must_flag": [],
+  "must_not_flag": ["bin/subcommands/export"],
+  "context_expect": []
+}

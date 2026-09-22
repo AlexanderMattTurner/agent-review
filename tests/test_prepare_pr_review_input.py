@@ -23,6 +23,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests._helpers import REPO_ROOT
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "prepare-pr-review-input.sh"
@@ -30,6 +32,12 @@ SCRIPT = REPO_ROOT / ".github" / "reviewer" / "prepare-pr-review-input.sh"
 # Each fake file section is this many lines (header + ---/+++ + @@ + one body
 # line), so a diff's line count is a simple multiple of its file count.
 LINES_PER_FILE = 5
+
+# The head the run was dispatched for, and the base the compare starts from. The
+# script re-reads the live head after the fetch and bails when it moved, so the
+# fake `gh pr view` answers this one unless a test asks for a different one.
+HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
+BASE_SHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
 
 # An elidable artifact. The elider is the CALLER's, named by ELIDE_COMMAND, and
 # `_ELIDER` below stands in for one: it replaces this file's hunks with a
@@ -90,6 +98,9 @@ def _fake_bins(
     bundle_lines: int = 0,
     flaky_budget: int = 0,
     escape_byte: bool = False,
+    quoted_file: bool = False,
+    live_head: str = HEAD_SHA,
+    compare: dict | None = None,
 ) -> None:
     """Put a fake `gh` and a fake `node` (the sanitizer stand-in: cats stdin) on PATH.
 
@@ -134,6 +145,16 @@ def _fake_bins(
             '  echo "@@ -0,0 +1,1 @@"\n'
             '  printf "+escaped \x1b[31mred\x1b[0m line\\n"\n'
         )
+    # Git's own header for a path holding a non-ASCII byte: the whole side is
+    # quoted and the bytes are written as octal escapes. Verified against
+    # `git diff` on a file named f<U+00E9>.py.
+    quoted = ""
+    if quoted_file:
+        quoted = (
+            '  echo \'diff --git "a/f\\303\\251.py" "b/f\\303\\251.py"\'\n'
+            '  echo "@@ -0,0 +1,1 @@"\n'
+            '  echo "+accented"\n'
+        )
     gh = tmp_path / "gh"
     gh.write_text(
         "#!/usr/bin/env bash\n"
@@ -142,7 +163,11 @@ def _fake_bins(
         # never travels as an argument or an environment string.
         'pad=""\n'
         'if [[ -n "${FAKE_PATCH_PAD:-}" ]]; then pad="$(cat "$FAKE_PATCH_PAD")"; fi\n'
-        'if [[ "$1" == "api" ]]; then\n'
+        # The compare read a delta run makes, routed before the files API: it
+        # is the authority on which files landed after the covered head.
+        'if [[ "$*" == *"/compare/"* ]]; then\n'
+        f'  cat "{tmp_path}/compare.json"\n'
+        'elif [[ "$1" == "api" ]]; then\n'
         # `--paginate` alone emits one JSON array per page, concatenated;
         # `--paginate --slurp` emits ONE array holding those pages. The two
         # callers here ask for different ones, so the flag has to route.
@@ -177,12 +202,23 @@ def _fake_bins(
         "  done\n"
         f"{bundle}"
         f"{escape}"
+        f"{quoted}"
         'elif [[ "$2" == "view" ]]; then\n'
-        '  printf \'%s\' \'{"title":"t","body":"b","author":{"login":"a"},"files":[]}\'\n'
+        # Two different `pr view` reads, told apart by the fields they ask for:
+        # the metadata the sanitizer renders, and the live head the staleness
+        # check compares against the head this run was dispatched for.
+        '  if [[ "$*" == *headRefOid* ]]; then\n'
+        f'    printf \'{{"headRefOid":"{live_head}","baseRefOid":"{BASE_SHA}"}}\'\n'
+        "  else\n"
+        '    printf \'%s\' \'{"title":"t","body":"b","author":{"login":"a"},"files":[]}\'\n'
+        "  fi\n"
         "fi\n",
         encoding="utf-8",
     )
     gh.chmod(0o755)
+    (tmp_path / "compare.json").write_text(
+        json.dumps(compare or {"status": "identical", "files": []}), encoding="utf-8"
+    )
     # The script invokes the sanitizer as `node .github/reviewer/sanitize-...mjs`;
     # a fake `node` that ignores its args and copies stdin lets diff.txt be written
     # without the real sanitizer/node_modules. The copy it appends to
@@ -206,7 +242,11 @@ def _run(
     flaky_budget: int = 0,
     retry_max: int | None = None,
     escape_byte: bool = False,
+    quoted_file: bool = False,
     elide: bool = False,
+    live_head: str = HEAD_SHA,
+    env: dict[str, str] | None = None,
+    compare: dict | None = None,
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
     """Run the script with fakes on PATH; return (proc, GITHUB_OUTPUT map, input dir).
 
@@ -222,6 +262,9 @@ def _run(
         bundle_lines=bundle_lines,
         flaky_budget=flaky_budget,
         escape_byte=escape_byte,
+        quoted_file=quoted_file,
+        live_head=live_head,
+        compare=compare,
     )
     extra_env = {}
     if flaky_budget:
@@ -266,9 +309,14 @@ def _run(
             "GH_TOKEN": "fake",
             "GH_REPO": "owner/repo",
             "PR": "123",
+            # The head decide resolved. prepare refuses to read a PR without one:
+            # it is what the coverage stamp claims, and a read that cannot name
+            # the commit it covered must not post one.
+            "HEAD_SHA": HEAD_SHA,
             "PR_INPUT_DIR": str(input_dir),
             **{k: str(v) for k, v in bounds.items() if v is not None},
             **extra_env,
+            **(env or {}),
         },
     )
     outputs = dict(
@@ -558,3 +606,148 @@ def test_the_sanitizer_never_reads_an_elided_artifact_body(tmp_path: Path) -> No
     read = (tmp_path / "sanitizer_input").read_text(encoding="utf-8")
     assert "+bundle line 4999" not in read, "the sanitizer paid for elided bytes"
     assert "lines of generated output elided" in read, "it must still see the notice"
+
+
+# ── Coverage: which head this read may claim, and how much of it it read ──────
+
+
+def test_a_head_that_moved_during_the_fetch_reads_nothing(tmp_path: Path) -> None:
+    """THE error the coverage record exists to prevent. A push landing inside the
+    diff fetch would otherwise be stamped as covered by a read that never saw
+    it, and every later reader trusts that stamp."""
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=2,
+        max_diff_lines=100,
+        live_head="9999999999999999999999999999999999999999",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["stale"] == "true"
+    assert not (input_dir / "coverage.json").exists()
+
+
+def test_a_read_of_the_dispatched_head_records_what_it_covered(
+    tmp_path: Path,
+) -> None:
+    """The pair: the head did not move, so the record names it, the base it was
+    diffed against, and the reviewer commit that did the reading."""
+    proc, outputs, input_dir = _run(
+        tmp_path, files=2, max_diff_lines=100, env={"REVIEWER_SHA": "deadbeef"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["stale"] == "false"
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage == {
+        "head": HEAD_SHA,
+        "base": BASE_SHA,
+        "reviewer": "deadbeef",
+        "read": "first",
+        "scope": "whole",
+        "since": "",
+    }
+
+
+def test_the_base_tree_context_is_written_beside_the_diff(tmp_path: Path) -> None:
+    """The reviewer reads context.txt by name, so an absent file is a silently
+    smaller review rather than a loud failure."""
+    _, _, input_dir = _run(tmp_path, files=2, max_diff_lines=100)
+    assert (input_dir / "context.txt").exists()
+
+
+SINCE = "5555555555555555555555555555555555555555"
+
+
+def _delta(tmp_path: Path, compare: dict, files: int = 3, quoted_file: bool = False):
+    return _run(
+        tmp_path,
+        files=files,
+        max_diff_lines=100,
+        compare=compare,
+        quoted_file=quoted_file,
+        env={"READ": "delta", "SINCE": SINCE},
+    )
+
+
+def test_a_delta_read_narrows_to_the_files_pushed_since_the_covered_head(
+    tmp_path: Path,
+) -> None:
+    """What makes the accumulated read cheap: the earlier review already read the
+    rest, so only the files the later pushes touched are read again."""
+    proc, _, input_dir = _delta(
+        tmp_path, {"status": "ahead", "files": [{"filename": "f1.py"}]}
+    )
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "diff --git a/f1.py" in diff
+    assert "diff --git a/f0.py" not in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["read"] == "delta"
+    assert coverage["scope"] == f"since:{SINCE}"
+
+
+@pytest.mark.parametrize(
+    "compare",
+    [
+        pytest.param(
+            {"status": "diverged", "files": [{"filename": "f1.py"}]}, id="rebase"
+        ),
+        pytest.param({"status": "ahead", "files": []}, id="no-files-reported"),
+    ],
+)
+def test_a_range_that_describes_no_push_re_reads_the_whole_diff(
+    tmp_path: Path, compare: dict
+) -> None:
+    """A force-push leaves the covered head off this head's history, so no commit
+    range describes the change. Reading the whole diff again is the one
+    disposition that cannot claim coverage it does not have, and the stamp says
+    `whole` so nobody reads it as a narrowed one."""
+    proc, _, input_dir = _delta(tmp_path, compare)
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "diff --git a/f0.py" in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage == {
+        "head": HEAD_SHA,
+        "base": BASE_SHA,
+        "reviewer": "",
+        "read": "delta",
+        "scope": "whole",
+        "since": SINCE,
+    }
+
+
+def test_a_narrowing_that_keeps_no_file_re_reads_the_whole_diff(
+    tmp_path: Path,
+) -> None:
+    """The revert case. Compare names a file the base...head diff has no section
+    for, because the push put it back the way the base has it. Narrowing to it
+    keeps nothing, and stamping `since:` over that empty diff would spend the
+    accumulated budget and report the pushes as read."""
+    proc, _, input_dir = _delta(
+        tmp_path, {"status": "ahead", "files": [{"filename": "reverted.py"}]}
+    )
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "diff --git a/f0.py" in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["scope"] == "whole"
+    assert "no file changed since" in proc.stderr
+
+
+def test_a_delta_keeps_the_section_of_a_file_git_quotes(tmp_path: Path) -> None:
+    """Git writes a path holding a non-ASCII byte as `"b/f\\303\\251.py"`, while
+    the compare API reports the plain name. Matching the raw header tail drops
+    that file's section, and the run still stamps `since:` — so the one file the
+    push changed is reviewed by nobody while the record says it was read."""
+    proc, _, input_dir = _delta(
+        tmp_path,
+        {"status": "ahead", "files": [{"filename": "f1.py"}, {"filename": "fé.py"}]},
+        quoted_file=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    diff = (input_dir / "diff.txt").read_text(encoding="utf-8")
+    assert "+accented" in diff, diff
+    assert "diff --git a/f1.py" in diff, diff
+    assert "diff --git a/f0.py" not in diff, diff
+    coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["scope"] == f"since:{SINCE}"

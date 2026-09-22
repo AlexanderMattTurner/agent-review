@@ -20,10 +20,13 @@ SCRIPT = REPO_ROOT / ".github" / "scripts" / "sweep-reviewer-holds.sh"
 SIBLINGS = {
     "approve-if-reviewer-hold-clear.sh": "approve-if-reviewer-hold-clear.sh",
     "review-findings-gate.sh": "../reviewer/review-findings-gate.sh",
+    "dispatch-delta-review.sh": "../reviewer/dispatch-delta-review.sh",
 }
 
 
-def run_sweep(tmp_path: Path, prs: list[dict]) -> tuple[int, dict[str, list[str]]]:
+def run_sweep(
+    tmp_path: Path, prs: list[dict], **env: str
+) -> tuple[int, dict[str, list[str]]]:
     """Sweep `prs`; return the exit code and each per-PR script's `PR REPORT_SHA`
     lines, in call order.
 
@@ -67,6 +70,7 @@ def run_sweep(tmp_path: Path, prs: list[dict]) -> tuple[int, dict[str, list[str]
             "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin",
             "GH_REPO": "o/r",
             "GH_TOKEN": "t",
+            **env,
         },
     )
     calls = {}
@@ -133,3 +137,35 @@ def test_a_pr_with_no_readable_head_gets_no_verdict_and_reds_the_sweep(
     assert code != 0
     assert calls["review-findings-gate.sh"] == ["10 beef"]
     assert calls["approve-if-reviewer-hold-clear.sh"] == ["9 ", "10 "]
+
+
+# ── The accumulated review ───────────────────────────────────────────────────
+#
+# The sweep is also the only clock the accumulated read has: nothing else asks,
+# twice an hour, whether a PR has stopped moving. It SELECTS the PRs; every
+# readiness question stays in dispatch-delta-review.sh.
+
+
+def test_every_swept_pr_is_offered_for_an_accumulated_review(tmp_path: Path) -> None:
+    """A PR whose author pushed after the review and then stopped has no event
+    left to fire. Without this offer nothing ever reads those pushes."""
+    code, calls = run_sweep(
+        tmp_path,
+        [pull_request(11), pull_request(12)],
+        REVIEW_WORKFLOW="claude-review.yaml",
+        MAX_DELTA_REVIEWS_PER_PR="1",
+    )
+    assert code == 0
+    assert calls["dispatch-delta-review.sh"] == ["11 ", "12 "]
+
+
+def test_a_repo_that_names_no_reviewer_workflow_asks_for_none(
+    tmp_path: Path,
+) -> None:
+    """A consumer keeps the one-read-per-PR behaviour it had by naming no
+    workflow, and pays nothing per sweep per PR for the choice."""
+    code, calls = run_sweep(tmp_path, [pull_request(11)])
+    assert code == 0
+    assert calls["dispatch-delta-review.sh"] == []
+    # The two verdicts it does re-derive still run.
+    assert calls["review-findings-gate.sh"] == ["11 sha1"]

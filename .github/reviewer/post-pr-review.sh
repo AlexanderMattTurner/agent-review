@@ -33,6 +33,19 @@ source "$_SCRIPT_DIR/lib/review-threads.bash"
 # shellcheck source=.github/reviewer/lib/pr-reviews.bash
 source "$_SCRIPT_DIR/lib/pr-reviews.bash"
 
+# The coverage stamp, off the record prepare wrote: which commits this read
+# covered and which budget paid. Stamped beside the read marker on BOTH posting
+# paths, so a reader can tell an unresolved finding from a push nobody read.
+# Required, never defaulted: a review with no stamp reads as covering the commit
+# GitHub recorded it against, which for a delta read is a claim over the whole
+# diff.
+COVERAGE_FILE="${PR_INPUT_DIR}/coverage.json"
+[[ -f "$COVERAGE_FILE" ]] || {
+  echo "::error::missing ${COVERAGE_FILE} — refusing to post a review that cannot say what it read" >&2
+  exit 1
+}
+COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
+
 # The reviewer posts with the workflow GITHUB_TOKEN, so its threads are authored by this bot, and
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.
 # shellcheck disable=SC2031 # false positive across the source-follow: the only subshell assignment
@@ -217,7 +230,7 @@ post_review_comment_by_comment() {
   local body
   body="$(mktemp)"
   {
-    printf '%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$WHOLE_DIFF_READ_MARKER"
+    printf '%s\n%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$WHOLE_DIFF_READ_MARKER" "$COVERAGE_STAMP"
     printf '<sub>GitHub refused this review as one payload, so %d of its %d findings were posted as individual comments.</sub>\n\n' "$((total - failed))" "$total"
     cat "${PR_INPUT_DIR}/review-summary.txt"
   } >"$body"
@@ -240,11 +253,13 @@ if [[ "$status" != "PAYLOAD" ]]; then
   exit 0
 fi
 
-# The read marker goes on the payload's own summary body, so the ONE post that records
-# this read is the one that carries it. jq rather than a rebuild: every other field, and
-# every comment, rides through untouched with the type the payload gave it.
+# The read marker and the coverage stamp go on the payload's own summary body, so the
+# ONE post that records this read is the one that carries both. jq rather than a rebuild:
+# every other field, and every comment, rides through untouched with the type the payload
+# gave it.
 stamped_payload="$(mktemp)"
-jq --arg marker "$WHOLE_DIFF_READ_MARKER" '.body = ((.body // "") + "\n\n" + $marker)' \
+jq --arg marker "$WHOLE_DIFF_READ_MARKER" --arg coverage "$COVERAGE_STAMP" \
+  '.body = ((.body // "") + "\n\n" + $marker + "\n" + $coverage)' \
   "${PR_INPUT_DIR}/review-payload.json" >"$stamped_payload"
 
 api_err="$(mktemp)"

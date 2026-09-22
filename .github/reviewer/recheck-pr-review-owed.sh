@@ -3,8 +3,11 @@
 #   script as `bash <script>` against stubbed CLIs on PATH, so the branches are asserted but
 #   no run is ever traced.
 # Re-ask, from inside the review job's per-PR concurrency group, whether this PR
-# still owes a whole-diff review under `max-reviews-per-pr`; emits
-# skip=true/false to GITHUB_OUTPUT.
+# still owes the read decide asked for; emits skip=true/false to GITHUB_OUTPUT.
+# READ_KIND picks which budget answers: `first` counts whole-diff reads against
+# `max-reviews-per-pr`, `delta` counts accumulated reads against
+# `max-delta-reviews-per-pr`. The two never share a budget, so a delta read that
+# lost this race cannot cancel the first read a PR is still owed.
 # The group serializes review JOBS only, and a sharded review is posted later by
 # review_synthesis (its own group) — so a submitted-reviews read alone still
 # races the sharded path, and an earlier run of this workflow with a live
@@ -20,7 +23,8 @@
 # two reads that are meant to fire whatever the count says.
 #
 # Env: GH_TOKEN, REPO, PR, GITHUB_RUN_ID, GITHUB_WORKFLOW_REF,
-#      MAX_REVIEWS_PER_PR; READS_MARKED_FROM is optional.
+#      MAX_REVIEWS_PER_PR, MAX_DELTA_REVIEWS_PER_PR; READS_MARKED_FROM and
+#      READ_KIND (default `first`) are optional.
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,8 +43,17 @@ export REVIEWER_LOGIN_BARE="github-actions"
 # The same budget decide-pr-review-trigger.sh reads, through the same helper, so
 # the two cannot disagree about whether this PR still owes a read.
 require_review_budget
+require_delta_review_budget
 # The cutover date the count is read against; empty means the stamp alone decides.
 require_reads_marked_from
+READ_KIND="${READ_KIND:-first}"
+if [[ "$READ_KIND" == "delta" ]]; then
+  BUDGET="$MAX_DELTA_REVIEWS_PER_PR"
+  KIND="accumulated"
+else
+  BUDGET="$MAX_REVIEWS_PER_PR"
+  KIND="whole-diff"
+fi
 
 emit() {
   # $1 skip, $2 reason
@@ -50,18 +63,24 @@ emit() {
 
 reviews_rc=0
 count=0
-spent="$(real_reviewer_reviews "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
-# Folded into the same status capture, for the reason decide's own read gives: a
-# jq failure leaves the count as unknown as a failed walk does.
-[[ "$reviews_rc" -ne 0 ]] || count="$(jq -rs 'length' <<<"$spent")" || reviews_rc=$?
+spent=""
+if [[ "$READ_KIND" == "delta" ]]; then
+  # The accumulated reads are the ones `real_reviewer_reviews` filters OUT, so the
+  # delta arm counts them off the unfiltered walk through their own stamp.
+  spent="$(reviewer_reviews_ndjson "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
+  [[ "$reviews_rc" -ne 0 ]] || count="$(delta_reviews_count <<<"$spent")" || reviews_rc=$?
+else
+  spent="$(real_reviewer_reviews "${REPO%%/*}" "${REPO##*/}" "$PR" 2>/dev/null)" || reviews_rc=$?
+  # Folded into the same status capture, for the reason decide's own read gives: a
+  # jq failure leaves the count as unknown as a failed walk does.
+  [[ "$reviews_rc" -ne 0 ]] || count="$(jq -rs 'length' <<<"$spent")" || reviews_rc=$?
+fi
 if [[ "$reviews_rc" -ne 0 ]]; then
   emit false "could not read $REPO#$PR reviews (exhausted the retry ladder, rc=$reviews_rc) — reviewing rather than risking a read the PR still owes"
   exit 0
 fi
-if [[ "$count" -ge "$MAX_REVIEWS_PER_PR" ]]; then
-  # Any state — including DISMISSED — counts as spent, matching decide's trigger 2.
-  state="$(latest_of_reviews <<<"$spent" | jq -r '.state // ""')"
-  emit true "$REPO#$PR has spent all $MAX_REVIEWS_PER_PR read(s) (latest: $state) — this run buys none"
+if [[ "$count" -ge "$BUDGET" ]]; then
+  emit true "$REPO#$PR has spent all $BUDGET $KIND read(s) — this run buys none"
   exit 0
 fi
 
@@ -74,16 +93,29 @@ fi
 # Candidates are filtered client-side on "not completed" rather than with the
 # API's status=in_progress: a run whose shard legs still wait for runners reports
 # `queued`. Only runs OLDER than this one count — a newer run is waiting on us.
+#
+# A dispatched accumulated read carries no `pull_requests` entry at all — the run
+# has no pull request payload — so that arm attributes runs by the caller's
+# `run-name`, the same handle dispatch-delta-review.sh bounds its retries with.
 runs_rc=0
+if [[ "$READ_KIND" == "delta" ]]; then
+  runs_event="workflow_dispatch"
+  # shellcheck disable=SC2016 # a jq program, expanded by jq's own --arg, not bash
+  runs_filter='select((.display_title // "") | endswith($match))'
+else
+  runs_event="pull_request_target"
+  # shellcheck disable=SC2016 # a jq program, expanded by jq's own --argjson
+  runs_filter='select(any(.pull_requests[]?.number; . == $pr))'
+fi
 candidates="$(
   retry_stdout gh api \
-    "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?event=pull_request_target&per_page=100" 2>/dev/null |
-    jq -r --argjson run_id "$RUN_ID" --argjson pr "$PR" \
-      '.workflow_runs[]
-        | select(.status != "completed")
-        | select(.id < $run_id)
-        | select(any(.pull_requests[]?.number; . == $pr))
-        | .id'
+    "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?event=${runs_event}&per_page=100" 2>/dev/null |
+    jq -r --argjson run_id "$RUN_ID" --argjson pr "$PR" --arg match "${RUN_NAME_MATCH:-PR $PR}" \
+      ".workflow_runs[]
+        | select(.status != \"completed\")
+        | select(.id < \$run_id)
+        | ${runs_filter}
+        | .id"
 )" || runs_rc=$?
 if [[ "$runs_rc" -ne 0 ]]; then
   emit false "could not read $REPO in-flight runs (exhausted the retry ladder, rc=$runs_rc) — reviewing rather than risking a read the PR still owes"
@@ -122,8 +154,8 @@ done <<<"$candidates"
 # A read in flight only cancels this one once it fills the budget. Counting it as
 # a stop whatever the budget says would drop this event at a budget of 3 with one
 # read spent and one generating, leaving the third owed and no event to buy it.
-if [[ $((count + inflight)) -ge "$MAX_REVIEWS_PER_PR" ]]; then
-  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — those fill the $MAX_REVIEWS_PER_PR read(s) this PR may spend"
+if [[ $((count + inflight)) -ge "$BUDGET" ]]; then
+  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — those fill the $BUDGET $KIND read(s) this PR may spend"
 else
-  emit false "$REPO#$PR has spent $count of $MAX_REVIEWS_PER_PR read(s), with $inflight in flight — running this one"
+  emit false "$REPO#$PR has spent $count of $BUDGET $KIND read(s), with $inflight in flight — running this one"
 fi

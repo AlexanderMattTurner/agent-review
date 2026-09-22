@@ -128,7 +128,10 @@ def test_the_stale_bail_gates_the_read_but_not_the_gate_re_post() -> None:
         "(needs.decide.outputs.recheck == 'true' || github.event.action != 'synchronize')"
         in cond
     ), "the bail must cover the first-review events; only the opt-in is exempt"
-    assert fresh["env"]["EVENT_HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    # The head DECIDE resolved, not the payload's: a dispatch run carries no
+    # pull request payload, so the payload's sha is empty there and the bail
+    # would compare the live head against nothing.
+    assert fresh["env"]["EVENT_HEAD_SHA"] == "${{ needs.decide.outputs.head_sha }}"
     gated = {
         s.get("id") or str(s.get("uses", "")).rsplit("/", 1)[-1]
         for s in steps

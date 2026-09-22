@@ -105,6 +105,11 @@ on:
         required: false
         default: "pending"
         type: string
+      max-delta-reviews-per-pr:
+        description: "How many ACCUMULATED reads the reviewer may spend on one pull request — the same number passed to the review workflow. Setting it turns on the `uncovered` verdict: the gate then holds a pull request whose head is past the head its last review covered, and says so, instead of greening on a review of older code. EMPTY (the default) keeps the gate the pull-request-scoped predicate it was, for a consumer whose reviewer reads once and never re-reads."
+        required: false
+        default: ""
+        type: string
       recheck-label:
         description: "The label a human or agent adds to re-evaluate the gate. Thread resolution fires no workflow event and `workflow_dispatch` 403s for agent-session tokens, so this label is the manual hatch. This workflow removes it after acting, so re-adding it fires again. The caller must list `labeled` in its `pull_request_target` types."
         required: false
@@ -121,7 +126,7 @@ on:
         default: "needs-auto-review"
         type: string
       review-skip-types:
-        description: 'JSON array of the Conventional-Commit title types YOUR reviewer skips, so the gate waives its wait for exactly them. EMPTY BY DEFAULT: a waiver is a claim about your reviewer, not about the pull requests, and this one keys on the title, which the author writes. Name a type only if your reviewer genuinely never reads it.'
+        description: "JSON array of the Conventional-Commit title types YOUR reviewer skips, so the gate waives its wait for exactly them. EMPTY BY DEFAULT: a waiver is a claim about your reviewer, not about the pull requests, and this one keys on the title, which the author writes. Name a type only if your reviewer genuinely never reads it."
         required: false
         default: "[]"
         type: string
@@ -264,6 +269,7 @@ jobs:
           GATE_CONTEXT: ${{ inputs.status-context }}
           SEVERITY_CONFIG: ${{ github.workspace }}/${{ inputs.severity-config }}
           UNREVIEWED_STATE: ${{ inputs.unreviewed-state }}
+          MAX_DELTA_REVIEWS_PER_PR: ${{ inputs.max-delta-reviews-per-pr }}
           REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
           REVIEW_LABEL: ${{ inputs.review-label }}
           REVIEW_SKIP_TYPES: ${{ inputs.review-skip-types }}
