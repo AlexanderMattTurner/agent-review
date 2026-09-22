@@ -78,11 +78,12 @@ else
   {
     cat "$notice"
     printf '\n%s\n%s\n' "$OVERSIZED_REVIEW_MARKER" "$OVERSIZED_HEAD_MARKER"
-    # The coverage stamp. This notice spends a read, so it says which head it
-    # spent it on and which budget paid; `scope=oversized` says it read no diff.
-    # The base is empty because no diff was taken against one.
-    coverage_stamp "$HEAD_SHA" "" "${REVIEWER_SHA:-}" "${READ:-first}" \
-      "$OVERSIZED_COVERAGE_SCOPE"
+    # This notice spends a read, so it names the head it spent it on and the
+    # budget that paid; `scope=oversized` says it read no diff, and the base is
+    # empty because none was diffed against. A notice that stamps nothing leaves
+    # the covered head behind, and the re-dispatch bound counts only FAILED
+    # runs, so the sweep asks for the same read every cycle.
+    coverage_stamp "$HEAD_SHA" "" "${REVIEWER_SHA:-}" "${READ:-first}" oversized
   } >"$review_body"
   retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
     -f "event=COMMENT" \
