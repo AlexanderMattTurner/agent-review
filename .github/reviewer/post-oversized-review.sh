@@ -21,6 +21,7 @@
 # re-read after a resolve raises a fresh thread for the new head.
 #
 # Requires: GH_TOKEN, GH_REPO, PR, PR_INPUT_DIR (oversized-notice.txt), HEAD_SHA.
+# Optional: READ (first|delta, default first) and REVIEWER_SHA, both stamped.
 set -euo pipefail
 
 : "${GH_REPO:?GH_REPO required}"
@@ -77,6 +78,12 @@ else
   {
     cat "$notice"
     printf '\n%s\n%s\n' "$OVERSIZED_REVIEW_MARKER" "$OVERSIZED_HEAD_MARKER"
+    # This notice spends a read, so it names the head it spent it on and the
+    # budget that paid; `scope=oversized` says it read no diff, and the base is
+    # empty because none was diffed against. A notice that stamps nothing leaves
+    # the covered head behind, and the re-dispatch bound counts only FAILED
+    # runs, so the sweep asks for the same read every cycle.
+    coverage_stamp "$HEAD_SHA" "" "${REVIEWER_SHA:-}" "${READ:-first}" oversized
   } >"$review_body"
   retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
     -f "event=COMMENT" \

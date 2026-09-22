@@ -35,7 +35,7 @@ REVIEW_WORKFLOW = "claude-review.yaml"
 COVERED_AT = "2026-01-01T00:00:00Z"
 
 
-def _stamped(head: str, *, read: str = "first") -> str:
+def _stamped(head: str, *, read: str = "first", scope: str = "whole") -> str:
     """A review body as post-pr-review.sh leaves it, built by the library's own
     producer so a stamp-format change reds here instead of passing silently."""
     return subprocess.run(
@@ -44,11 +44,12 @@ def _stamped(head: str, *, read: str = "first") -> str:
             "-c",
             'set -euo pipefail; source "$1";'
             ' printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
-            ' coverage_stamp "$2" ba5eba5e 0e0e0e0e "$3" whole',
+            ' coverage_stamp "$2" ba5eba5e 0e0e0e0e "$3" "$4"',
             "_",
             str(LIB),
             head,
             read,
+            scope,
         ],
         capture_output=True,
         text=True,
@@ -56,10 +57,12 @@ def _stamped(head: str, *, read: str = "first") -> str:
     ).stdout
 
 
-def _review(head: str, *, read: str = "first", at: str = COVERED_AT) -> dict:
+def _review(
+    head: str, *, read: str = "first", at: str = COVERED_AT, scope: str = "whole"
+) -> dict:
     return {
         "state": "COMMENTED",
-        "body": f"Automated review.\n{_stamped(head, read=read)}",
+        "body": f"Automated review.\n{_stamped(head, read=read, scope=scope)}",
         "author": {"login": "github-actions"},
         "submittedAt": at,
     }
@@ -386,3 +389,40 @@ def test_a_failure_from_before_the_last_review_does_not_count(
         * 3,
     )
     assert len(_dispatched(calls)) == 1, calls
+
+
+def _unstamped_notice() -> dict:
+    """An oversized notice carrying its markers and no coverage stamp."""
+    return {
+        "state": "COMMENTED",
+        "body": "This PR's diff is too large.\n<!-- oversized-review -->",
+        "author": {"login": "github-actions"},
+        "submittedAt": "2026-06-01T00:00:00Z",
+    }
+
+
+def test_an_oversized_notice_that_stamps_nothing_is_asked_for_again(
+    tmp_path: Path,
+) -> None:
+    """The loop, reproduced. A dispatched read whose diff is too large posts a
+    notice and SUCCEEDS, so the failed-run bound never fires. Stamping nothing
+    leaves the covered head where it was, and the next sweep reads the same
+    state and asks for the same read."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED), _unstamped_notice()])
+    assert len(_dispatched(calls)) == 1, calls
+
+
+def test_an_oversized_notice_on_the_live_head_stops_the_re_dispatch(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in whether the notice stamps
+    the head it decided. It read no diff, and it still cost a run, so the record
+    advances and the sweep stands down."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[
+            _review(COVERED),
+            _review(PUSHED, read="delta", at="2026-06-01T00:00:00Z", scope="oversized"),
+        ],
+    )
+    assert _dispatched(calls) == []

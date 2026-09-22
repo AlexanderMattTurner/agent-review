@@ -202,10 +202,19 @@ if [[ "$READ" == "delta" && -n "$SINCE" ]]; then
     jq -r '.files[]? | .filename' <<<"$compare" >"$changed_paths"
     python3 "$here/narrow-diff-to-paths.py" \
       --diff "${PR_INPUT_DIR}/diff.txt" --paths "$changed_paths" --out "$narrowed"
-    mv "$narrowed" "${PR_INPUT_DIR}/diff.txt"
-    rm -f "$changed_paths"
-    COVERAGE_SCOPE="since:${SINCE}"
-    echo "delta read: ${compare_files} file(s) changed since ${SINCE}" >&2
+    # A narrowing that kept no file is NOT a delta of those commits. A revert
+    # reaches this: compare names the reverted file, and the base...head diff has
+    # no section for it, because it is in neither end. Keeping the empty result
+    # would hand the model nothing and stamp `since:` over it, which spends the
+    # accumulated budget and reports the pushes as read. Read the whole diff.
+    if grep -q '^diff --git ' "$narrowed"; then
+      mv "$narrowed" "${PR_INPUT_DIR}/diff.txt"
+      COVERAGE_SCOPE="since:${SINCE}"
+      echo "delta read: ${compare_files} file(s) changed since ${SINCE}" >&2
+    else
+      echo "delta read: no file changed since ${SINCE} has a section in this diff, so this reads the whole diff again" >&2
+    fi
+    rm -f "$changed_paths" "$narrowed"
   else
     echo "delta read: compare says '${compare_status:-unreadable}' over ${compare_files} file(s), so this reads the whole diff again" >&2
   fi

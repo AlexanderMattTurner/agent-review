@@ -44,12 +44,7 @@ COVERAGE_FILE="${PR_INPUT_DIR}/coverage.json"
   echo "::error::missing ${COVERAGE_FILE} — refusing to post a review that cannot say what it read" >&2
   exit 1
 }
-COVERAGE_STAMP="$(coverage_stamp \
-  "$(jq -r '.head // ""' "$COVERAGE_FILE")" \
-  "$(jq -r '.base // ""' "$COVERAGE_FILE")" \
-  "$(jq -r '.reviewer // ""' "$COVERAGE_FILE")" \
-  "$(jq -r '.read // "first"' "$COVERAGE_FILE")" \
-  "$(jq -r '.scope // "whole"' "$COVERAGE_FILE")")"
+COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its threads are authored by this bot, and
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.

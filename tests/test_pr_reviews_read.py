@@ -459,3 +459,30 @@ def test_a_pr_with_no_review_at_all_reports_no_coverage(github):
     string."""
     assert _coverage(github) == {}
     assert _deltas(github) == 0
+
+
+def test_an_oversized_notice_advances_the_covered_head(github):
+    """It read no diff, but it is a paid decision about that head. A notice that
+    left the record where it was kept the accumulated read owed forever: the
+    re-dispatch bound counts only FAILED runs, and an oversized run succeeds."""
+    github.add_review(
+        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
+        f"{_stamp(HEAD_A, scope='oversized')}"
+    )
+    coverage = _coverage(github)
+    assert coverage["head"] == HEAD_A
+    assert coverage["scope"] == "oversized"
+
+
+def test_an_oversized_notice_on_the_accumulated_read_spends_that_budget(github):
+    """And spends the RIGHT one. Stamped `read=delta`, it is excluded from the
+    first-read count and included in the accumulated one, so a pull request that
+    is too large to read cannot be re-dispatched past its budget."""
+    github.add_review(body=_stamped(HEAD_A))
+    github.add_review(
+        body=f"still too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
+        f"{_stamp(HEAD_B, read='delta', scope='oversized')}",
+        submitted_at="2026-07-02T00:00:00Z",
+    )
+    assert _spent(github) == 1
+    assert _deltas(github) == 1

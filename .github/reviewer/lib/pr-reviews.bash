@@ -103,6 +103,16 @@ coverage_stamp() {
     "$COVERAGE_MARKER_PREFIX" "$1" "$2" "$3" "$4" "$5"
 }
 
+# coverage_stamp_of <coverage.json> — the stamp for the record prepare wrote.
+coverage_stamp_of() {
+  coverage_stamp \
+    "$(jq -r '.head // ""' "$1")" \
+    "$(jq -r '.base // ""' "$1")" \
+    "$(jq -r '.reviewer // ""' "$1")" \
+    "$(jq -r '.read // "first"' "$1")" \
+    "$(jq -r '.scope // "whole"' "$1")"
+}
+
 # The jq that reads the stamp back off a review body. `capture` emits NOTHING for
 # a body without one, so an unstamped review drops out of every fold below rather
 # than folding in as an empty record.
