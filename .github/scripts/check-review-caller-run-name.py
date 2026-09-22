@@ -31,7 +31,7 @@ from pathlib import Path
 import yaml
 
 # The reusable reviewer, however a caller spells the path to it.
-REVIEWER_WORKFLOW = re.compile(r"(^|/)\.github/workflows/review\.yaml(@|$)")
+REVIEWER_WORKFLOW = re.compile(r"(?:^|/)\.github/workflows/review\.yaml(?:@|$)")
 
 # `... PR ${{ <expr> }}` — the number interpolated at the very end.
 DIRECT = re.compile(r"PR \$\{\{(?:[^}]|\}(?!\}))*\}\}\s*$")
