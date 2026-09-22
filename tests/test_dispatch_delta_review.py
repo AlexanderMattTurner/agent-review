@@ -336,24 +336,6 @@ def test_a_zero_budget_asks_for_nothing_and_reads_no_api(tmp_path: Path) -> None
     assert calls == []
 
 
-def test_repeated_failures_of_the_read_stop_being_re_dispatched(
-    tmp_path: Path,
-) -> None:
-    """A read that keeps dying must not be re-dispatched every sweep forever.
-    Runs are attributed by the caller's run-name, which must END with the PR
-    number — an exact suffix, so PR 4 never claims PR 42's runs."""
-    failed = {
-        "display_title": f"Claude reviewers — PR {PR}",
-        "created_at": "2026-03-01T00:00:00Z",
-        "status": "completed",
-        "conclusion": "failure",
-    }
-    _, calls = dispatch(
-        tmp_path, reviews=[_review(COVERED)], runs=[failed, dict(failed)]
-    )
-    assert _dispatched(calls) == []
-
-
 def _failed_run() -> dict:
     return {
         "display_title": f"Claude reviewers — PR {PR}",
@@ -387,6 +369,10 @@ def test_giving_up_on_a_dying_read_spends_the_budget_out_loud(tmp_path: Path) ->
     assert "scope=failed" in posted[0], posted[0]
     assert f"head={COVERED}" in posted[0], posted[0]
     assert PUSHED not in posted[0], posted[0]
+    # The notice releases the gate's hold, and a review posted with the workflow
+    # GITHUB_TOKEN starts no workflow run — so nothing else would re-read it, and
+    # the hold would stand until the next sweep.
+    assert [c for c in calls if f"statuses/{PUSHED}" in c], calls
 
 
 def test_a_read_that_has_failed_once_is_retried_and_spends_nothing(
@@ -404,12 +390,7 @@ def test_another_prs_failures_do_not_stop_this_ones_read(tmp_path: Path) -> None
     """The suffix match is what makes that bound per-PR. `PR 4` is a suffix of no
     run named `PR 42`, and `PR 42` is a suffix of no run named `PR 421`."""
     others = [
-        {
-            "display_title": f"Claude reviewers — PR {PR}{tail}",
-            "created_at": "2026-03-01T00:00:00Z",
-            "status": "completed",
-            "conclusion": "failure",
-        }
+        {**_failed_run(), "display_title": f"Claude reviewers — PR {PR}{tail}"}
         for tail in ("1", "7")
     ]
     _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], runs=others)

@@ -96,6 +96,7 @@ jobs:
       contents: read # sparse-checkout the trusted dispatcher and its libraries
       actions: write # start the accumulated review of a PR that is ready to merge
       pull-requests: write # post the notice when an abandoned read gives up
+      statuses: write # re-post the gate verdict the notice releases
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
@@ -116,6 +117,8 @@ jobs:
           sparse-checkout: |
             .github/scripts/dispatch-delta-review-for-sha.sh
             .github/reviewer/dispatch-delta-review.sh
+            .github/reviewer/review-findings-gate.sh
+            .github/reviewer/lib/review-skip-set.bash
             .github/reviewer/lib/review-threads.bash
             .github/reviewer/lib/pr-reviews.bash
             .github/reviewer/lib-ci-retry.sh

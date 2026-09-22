@@ -330,7 +330,11 @@ PUSHED = "2222222222222222222222222222222222222222"
 
 
 def _covered_review(
-    head: str, *, read: str = "first", submitted_at: str = "2026-01-01T00:00:00Z"
+    head: str,
+    *,
+    read: str = "first",
+    scope: str = "whole",
+    submitted_at: str = "2026-01-01T00:00:00Z",
 ) -> dict:
     """A reviewer review carrying both stamps post-pr-review.sh writes: the read
     marker that spends the budget, and the coverage stamp naming what it read.
@@ -340,13 +344,14 @@ def _covered_review(
             "bash",
             "-c",
             'source "$1"; printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
-            ' coverage_stamp "$2" "$4" "$5" "$3" whole',
+            ' coverage_stamp "$2" "$4" "$5" "$3" "$6"',
             "_",
             str(REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"),
             head,
             read,
             "ba5eba5e",
             "0e0e0e0e",
+            scope,
         ],
         capture_output=True,
         text=True,
@@ -444,3 +449,46 @@ def test_an_unread_push_never_outranks_an_open_gating_finding(tmp_path: Path) ->
     )
     assert _state_of(calls) == "failure"
     assert "unresolved reviewer finding" in calls, calls
+
+
+def test_an_abandoned_accumulated_read_stops_the_gate_waiting_at_any_budget(
+    tmp_path: Path,
+) -> None:
+    """The give-up notice spends ONE read, so at a budget of 2 the spent-count
+    test still leaves room and the gate waits — for a read the dispatcher has
+    already refused to ask for again. The gate therefore asks whether the read
+    was abandoned, not how many were spent."""
+    calls = gate_calls(
+        tmp_path,
+        [
+            _covered_review(COVERED),
+            _covered_review(
+                COVERED,
+                read="delta",
+                scope="failed",
+                submitted_at="2026-02-01T00:00:00Z",
+            ),
+        ],
+        max_delta_reviews="2",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert _state_of(calls) == "success"
+    assert "the accumulated read was abandoned" in calls, calls
+    # The head the last REAL review covered, not the live one nobody read.
+    assert COVERED[:7] in calls, calls
+
+
+def test_a_budget_with_room_and_no_notice_still_holds_the_merge(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above: the abandonment is what greens it, not the
+    budget of 2."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        max_delta_reviews="2",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert state == "failure"

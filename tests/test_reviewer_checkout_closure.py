@@ -30,13 +30,9 @@ HOLD_CLEAR_DEPS = (
     LOGIN_LIB_REL,
     ".github/scripts/lib/github-token-ladder.bash",
 )
-DELTA_DEPS = (
-    ".github/reviewer/dispatch-delta-review.sh",
-    ".github/reviewer/lib/review-threads.bash",
-    ".github/reviewer/lib/pr-reviews.bash",
-    ".github/reviewer/lib-ci-retry.sh",
-    "config/review-severities.json",
-)
+# The dispatcher re-posts the gate verdict when it abandons a read, so the gate
+# and everything it reads must reach the same runner.
+DELTA_DEPS = (".github/reviewer/dispatch-delta-review.sh", *GATE_DEPS)
 # The sweep runs all three per PR, so its runner needs the union.
 REVIEWER_SCRIPT_DEPS = {
     "review-findings-gate.sh": GATE_DEPS,

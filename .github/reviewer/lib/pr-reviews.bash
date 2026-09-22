@@ -97,6 +97,14 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # prose alone.
 COVERAGE_MARKER_PREFIX='<!-- review-coverage '
 
+# The scope of a stamp posted by a read that was ABANDONED — the give-up notice
+# in dispatch-delta-review.sh. It is the one stamp that keeps the head an EARLIER
+# review covered, because nothing read the new one, so it must never be taken for
+# the newest coverage: doing so would move `submittedAt` past the failures that
+# caused it and re-arm the very bound that posted it. `coverage_of_reviews` drops
+# it and `delta_read_abandoned` is how a caller asks for it instead.
+ABANDONED_COVERAGE_SCOPE='failed'
+
 # coverage_stamp <head> <base> <reviewer> <read> <scope> — the stamp line.
 coverage_stamp() {
   printf '%shead=%s base=%s reviewer=%s read=%s scope=%s -->\n' \
@@ -128,9 +136,11 @@ _COVERAGE_CAPTURE='capture("<!-- review-coverage head=(?<head>[0-9a-f]+) base=(?
 # not a read and is skipped, so a stand-in approval never reports a covered head.
 coverage_of_reviews() {
   jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" \
+    --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
     "[.[] | (.body // \"\") as \$b
            | if (\$b | test(\"review-coverage \"))
-             then (\$b | $_COVERAGE_CAPTURE) + {submittedAt: (.submittedAt // \"\")}
+             then ((\$b | $_COVERAGE_CAPTURE) | select(.scope != \$abandoned))
+                  + {submittedAt: (.submittedAt // \"\")}
              elif ((\$b | contains(\$read)) and ((.reviewedSha // \"\") != \"\"))
              then {head: .reviewedSha, base: \"\", reviewer: \"\", read: \"first\",
                    scope: \"whole\", submittedAt: (.submittedAt // \"\")}
@@ -144,6 +154,20 @@ coverage_of_reviews() {
 delta_reviews_count() {
   jq -rs "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
                 | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length"
+}
+
+# delta_read_abandoned — stdin is `reviewer_reviews_ndjson` output; prints `true`
+# when a give-up notice says the accumulated read was abandoned, else `false`.
+#
+# Abandonment is TERMINAL, whatever the budget. Counting the notice as one spent
+# read would leave a budget above 1 with room, so the gate would wait for a read
+# the dispatcher has already refused to ask for again — the deadlock the notice
+# exists to end, arriving one budget unit later.
+delta_read_abandoned() {
+  jq -rs --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
+    "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
+           | $_COVERAGE_CAPTURE
+           | select(.read == \"delta\" and .scope == \$abandoned)] | length > 0"
 }
 
 # require_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR, or refuse. Same

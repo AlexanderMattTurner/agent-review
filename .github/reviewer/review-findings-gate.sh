@@ -192,7 +192,9 @@ uncovered_verdict() {
   live="$(retry_stdout gh pr view "$PR" --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || live_rc=$?
   [[ "$live_rc" -eq 0 && -n "$live" && "$live" != "$covered" ]] || return 0
   deltas="$(delta_reviews_count <<<"$reviews")"
-  if [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
+  if [[ "$(delta_read_abandoned <<<"$reviews")" == "true" ]]; then
+    reason="reviewed at ${covered:0:7}; the accumulated read was abandoned, so the pushes after it were NOT read"
+  elif [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
     verdict=uncovered
     reason="reviewed at ${covered:0:7}; the pushes since it are waiting for the accumulated review"
   else
