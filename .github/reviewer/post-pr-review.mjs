@@ -27,6 +27,18 @@ async function scrub(text) {
   return cleaned;
 }
 
+// INVARIANT — a model-authored string opens no HTML comment. This body carries the records the
+// reviewer's own machinery reads back off it: the coverage stamp, the read markers, the severity
+// marker, the cost footnote. The model's text sits in the SAME body, derived from an untrusted
+// diff, so a pull request that talks it into echoing one forges the record — a `review-coverage`
+// stamp in the summary is captured AHEAD of the trusted one, which spends the accumulated budget
+// or claims a head nobody read. Escaping the opener leaves the text visible and readable, and
+// every reader of a marker then finds nothing. It applies to a fenced suggestion too: a forged
+// stamp inside a fence is read exactly like one outside it.
+/** @param {string} text @returns {string} */
+const defuseHtmlComments = (text) =>
+  typeof text === "string" ? text.replaceAll("<!--", "&lt;!--") : text;
+
 const dir = process.env.PR_INPUT_DIR;
 if (!dir) throw new Error("PR_INPUT_DIR required");
 const commitId = process.env.HEAD_SHA || "";
@@ -75,7 +87,9 @@ try {
 }
 
 const findings = Array.isArray(review.findings) ? review.findings : [];
-const summary = typeof review.summary === "string" ? review.summary.trim() : "";
+const summary = defuseHtmlComments(
+  typeof review.summary === "string" ? review.summary.trim() : "",
+);
 
 // Every review posts as a COMMENT; the review event carries no merge consequence at all. The merge
 // lever is the inline threads the review-findings status gate reads, never an
@@ -273,7 +287,9 @@ function syntheticAnchor(findingPath) {
 const comments = [];
 const spill = [];
 for (const f of findings) {
-  const detail = [f.title, f.body].filter(Boolean).join(" — ").trim();
+  const detail = defuseHtmlComments(
+    [f.title, f.body].filter(Boolean).join(" — ").trim(),
+  );
   // A detail-less finding is dropped and never gates: there is nothing to resolve.
   if (!detail) continue;
   const sev = normSeverity(f.severity);
@@ -324,12 +340,12 @@ for (const f of findings) {
       comment.start_side = "RIGHT";
     }
     if (hasSuggestion && anchorSide === "RIGHT")
-      comment.body += suggestionBlock(f.suggestion);
+      comment.body += suggestionBlock(defuseHtmlComments(f.suggestion));
     comment.body += severityMarker(sev);
     comments.push(comment);
   } else {
     const where = f.path
-      ? `\`${f.path}${line ? `:${line}` : ""}\``
+      ? defuseHtmlComments(`\`${f.path}${line ? `:${line}` : ""}\``)
       : "(general)";
     // Per the SEVERITY_CONFIG a gating finding that cannot anchor gets a synthetic anchor: the
     // gate reads only threads, so spilling it into the review body would let it ride through

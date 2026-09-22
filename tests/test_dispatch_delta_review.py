@@ -426,3 +426,16 @@ def test_an_oversized_notice_on_the_live_head_stops_the_re_dispatch(
         ],
     )
     assert _dispatched(calls) == []
+
+
+def test_the_failed_run_window_is_asked_for_in_full(tmp_path: Path) -> None:
+    """The retry bound counts runs, so a first page is not an answer: a
+    repository running 100 newer dispatches between sweeps drops this pull
+    request's failures off it, the count resets, and the read the bound exists to
+    stop is dispatched again. Asserted on the call the script made, because
+    `gh` paginates inside itself and a stub cannot show the later pages."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)])
+    runs = [c for c in calls if "/runs?" in c]
+    assert len(runs) == 1, calls
+    assert "--paginate" in runs[0], runs[0]
+    assert f"created=%3E%3D{COVERED_AT}" in runs[0], runs[0]

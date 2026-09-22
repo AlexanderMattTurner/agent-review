@@ -12,6 +12,10 @@ the prose from the release's commits.
 
 ## Unreleased
 
+### Security
+
+- Model-authored review text no longer opens an HTML comment: `post-pr-review.mjs` escapes `<!--` in the summary, in each finding's own text, in its path and in its suggestion. The reviewer reads its records back off the body it posts — the coverage stamp, the read markers, the severity marker the merge gate reads — and the model's text lands in the same body, derived from an untrusted diff. A pull request that talked the model into echoing one of those markers forged the record: a `review-coverage` stamp in the summary is captured ahead of the trusted one, so it could spend the accumulated budget or claim a head nobody read. A fenced suggestion is escaped too, because every reader matches the raw body.
+
 ### Added
 
 - A coverage stamp on every review body, naming the head and base the review read, the reviewer commit that read them, whether the read was the first or the accumulated one, and its scope. `lib/pr-reviews.bash` is the only place that writes or parses it. Before this, a review said nothing about which revision it covered, so nobody could tell "findings the author has not resolved" from "pushes nobody read". A review that is never posted stamps nothing, so a failed or skipped read advances no coverage.

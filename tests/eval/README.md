@@ -39,6 +39,9 @@ in `diff.txt` or as a file under `tree/`.
 context extraction — no live model calls, safe for CI.
 
 `tests/eval/run-live.py` runs the real `claude` CLI against a bounded number of
-cases and reports which `must_flag`/`must_not_flag` predictions the model got
-right. It costs real money and is never invoked by CI or by any test; run it by
-hand.
+cases. It costs real money and is never invoked by CI or by any test; run it by
+hand. Its report quotes, per `must_flag` entry, every BLOCKING or WARNING
+finding the model raised on that path, beside the entry's own `why`: a nit on
+the right file is not the defect caught, and only a reader comparing the two
+texts can say whether the model found this defect or another one. A
+`must_not_flag` hit is quoted with its severity for the same reason.
