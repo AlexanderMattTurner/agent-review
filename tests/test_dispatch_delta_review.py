@@ -94,6 +94,7 @@ def dispatch(
     tmp_path: Path,
     *,
     reviews: list[dict] | None = None,
+    reviews_after: list[dict] | None = None,
     threads: list[dict] | None = None,
     rollup: list[dict] | None = None,
     head: str = PUSHED,
@@ -107,18 +108,24 @@ def dispatch(
 
     The rollup defaults to one green check, so a case that does not name checks
     is a ready pull request and the refusals below are the one thing it varies.
+
+    `reviews_after` answers every read of the reviews but the first, which is how
+    a review landing mid-decision is driven.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
+
+    def _reviews_payload(nodes: list[dict]) -> str:
+        return json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviews": {"nodes": nodes}}}}}
+        )
+
     (tmp_path / "reviews.json").write_text(
-        json.dumps(
-            {
-                "data": {
-                    "repository": {"pullRequest": {"reviews": {"nodes": reviews or []}}}
-                }
-            }
-        ),
-        encoding="utf-8",
+        _reviews_payload(reviews or []), encoding="utf-8"
     )
+    if reviews_after is not None:
+        (tmp_path / "reviews-after.json").write_text(
+            _reviews_payload(reviews_after), encoding="utf-8"
+        )
     (tmp_path / "threads.json").write_text(
         json.dumps(
             {
@@ -161,7 +168,14 @@ while [[ $# -gt 0 ]]; do
 done
 case "$filter" in
   *reviewThreads.nodes*) jq -r "$filter" "{tmp_path}/threads.json"; exit 0 ;;
-  *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
+  *reviews.nodes*)
+    reads="$(cat "{tmp_path}/reviews-reads.txt" 2>/dev/null || printf 0)"
+    printf '%s' "$((reads + 1))" >"{tmp_path}/reviews-reads.txt"
+    src="{tmp_path}/reviews.json"
+    if [[ "$reads" -ge 1 && -f "{tmp_path}/reviews-after.json" ]]; then
+      src="{tmp_path}/reviews-after.json"
+    fi
+    jq -r "$filter" "$src"; exit 0 ;;
   .default_branch)       printf 'main\\n'; exit 0 ;;
 esac
 case "$subcommand" in
@@ -373,6 +387,56 @@ def test_giving_up_on_a_dying_read_spends_the_budget_out_loud(tmp_path: Path) ->
     # GITHUB_TOKEN starts no workflow run — so nothing else would re-read it, and
     # the hold would stand until the next sweep.
     assert [c for c in calls if f"statuses/{PUSHED}" in c], calls
+
+
+def _abandoned_notice(at: str = "2026-04-01T00:00:00Z") -> dict:
+    return _review(COVERED, read="delta", at=at, scope="failed")
+
+
+def test_a_read_already_abandoned_is_never_abandoned_a_second_time(
+    tmp_path: Path,
+) -> None:
+    """The notice is a decision, so a later run must not make it again. Counted
+    as one spent read, a budget of 2 leaves room, the failures are still in the
+    window, and the script posts a second notice saying the same thing."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED), _abandoned_notice()],
+        runs=[_failed_run(), _failed_run()],
+        max_delta_reviews="2",
+    )
+    assert _dispatched(calls) == []
+    assert _posted_reviews(calls) == [], calls
+
+
+def test_a_budget_with_room_and_no_notice_still_abandons_the_read(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in whether a notice exists."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        runs=[_failed_run(), _failed_run()],
+        max_delta_reviews="2",
+    )
+    assert len(_posted_reviews(calls)) == 1, calls
+
+
+def test_a_review_landing_mid_decision_stops_the_notice(tmp_path: Path) -> None:
+    """The state this decision rests on is minutes old by the time it posts. A
+    read that landed meanwhile covers the live head, so the notice would abandon
+    a pull request that was just reviewed — and abandonment is terminal."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        reviews_after=[
+            _review(COVERED),
+            _review(PUSHED, read="delta", at="2026-03-02T00:00:00Z"),
+        ],
+        runs=[_failed_run(), _failed_run()],
+    )
+    assert _posted_reviews(calls) == [], calls
+    assert _dispatched(calls) == []
 
 
 def test_a_read_that_has_failed_once_is_retried_and_spends_nothing(
