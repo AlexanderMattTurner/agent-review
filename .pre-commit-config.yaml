@@ -181,6 +181,21 @@ repos:
 
       # Depth-based parent-walking silently breaks when a test file moves;
       # tests must take REPO_ROOT from tests/_helpers.py (git rev-parse).
+      - id: check-review-caller-run-name
+        # dispatch-delta-review.sh stops asking for a pull request's accumulated
+        # read after two failed runs, and attributes a run to a pull request by
+        # the caller's `run-name:` alone. A caller whose name does not end with
+        # the number matches nothing, so the bound is never reached and a reader
+        # that dies every run is re-dispatched for the life of the pull request.
+        # Nothing goes red, so the waste is invisible.
+        name: a reviewer caller's run name must end with its PR number
+        entry: python .github/scripts/check-review-caller-run-name.py
+        # language: python (not system) so PyYAML is installed by pre-commit
+        # itself, on any machine and in CI.
+        language: python
+        additional_dependencies: ["PyYAML==6.0.2"]
+        files: ^\.github/workflows/.*\.ya?ml$
+
       - id: check-test-repo-root
         name: forbid Path(__file__) parent-walking for repo root in tests
         entry: python3 .github/scripts/check-test-repo-root.py
