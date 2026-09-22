@@ -48,15 +48,19 @@ def thread(
     }
 
 
-def run_gate(
+def gate_calls(
     tmp_path: Path,
     reviews: list[dict],
     threads: list[dict] | None = None,
     *,
     thread_pages: list[list[dict]] | None = None,
     unreviewed_state: str = "pending",
+    max_delta_reviews: str | None = None,
+    live_head: str = HEAD_SHA,
 ) -> str:
-    """Run the gate and return the single status state it posted.
+    """Run the gate and return the single status state it posted. The verdict's
+    DESCRIPTION is what `gate_calls` exposes, for the cases whose whole content
+    is what the status says.
 
     `thread_pages` is one GraphQL PAGE of review threads per element. `gh api
     graphql --paginate --jq` applies the filter to each page separately and
@@ -100,6 +104,7 @@ case "$filter" in
     for page in "{tmp_path}"/threads-*.json; do jq -r "$filter" "$page"; done
     exit 0 ;;
   *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
+  .headRefOid)           printf '%s\\n' "{live_head}"; exit 0 ;;
 esac
 exit 0
 """
@@ -123,10 +128,21 @@ exit 0
             "GATE_CONTEXT": CONTEXT,
             "SEVERITY_CONFIG": str(SEVERITIES),
             "UNREVIEWED_STATE": unreviewed_state,
+            # Left OUT when None, which is how a consumer that runs no
+            # accumulated read keeps the PR-scoped predicate it had.
+            **(
+                {}
+                if max_delta_reviews is None
+                else {"MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews}
+            ),
         },
     )
     assert res.returncode == 0, res.stderr
-    calls = log.read_text(encoding="utf-8")
+    return log.read_text(encoding="utf-8")
+
+
+def _state_of(calls: str) -> str:
+    """The one verdict a gate run posted, out of the `gh` calls it made."""
     assert f"statuses/{HEAD_SHA}" in calls, f"the gate posted no status: {calls}"
     assert f"context={CONTEXT}" in calls, f"posted under the wrong context: {calls}"
     states = [
@@ -134,6 +150,11 @@ exit 0
     ]
     assert len(states) == 1, f"expected exactly one verdict, got {states}: {calls}"
     return states[0].removeprefix("state=")
+
+
+def run_gate(*args, **kwargs) -> str:
+    """The state a gate run posted — what nearly every case here asserts on."""
+    return _state_of(gate_calls(*args, **kwargs))
 
 
 def test_the_gate_context_defaults_to_the_severity_ssot(tmp_path: Path) -> None:
@@ -295,3 +316,131 @@ def test_a_gating_thread_on_an_EARLIER_page_still_holds_the_gate(
         run_gate(tmp_path / "b", [review("COMMENTED")], thread_pages=pages[1:])
         == "success"
     )
+
+
+# ── Clause (c): a push the reviewer has not read ──────────────────────────────
+#
+# Clause (a) is PR-scoped on purpose, so a reviewed PR whose head then moves
+# stays green. Clause (c) is what keeps that honest once an accumulated read
+# exists to wait for: while one is still owed the gate holds, and once the
+# budget is spent it greens again and SAYS where the reading stopped.
+
+COVERED = "1111111111111111111111111111111111111111"
+PUSHED = "2222222222222222222222222222222222222222"
+
+
+def _covered_review(
+    head: str, *, read: str = "first", submitted_at: str = "2026-01-01T00:00:00Z"
+) -> dict:
+    """A reviewer review carrying both stamps post-pr-review.sh writes: the read
+    marker that spends the budget, and the coverage stamp naming what it read.
+    Built through the library's own producer so a format change reds here."""
+    marker = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
+            ' coverage_stamp "$2" "$4" "$5" "$3" whole',
+            "_",
+            str(REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"),
+            head,
+            read,
+            "ba5eba5e",
+            "0e0e0e0e",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return {
+        **review("COMMENTED", body=f"Automated review.\n{marker}"),
+        "submittedAt": submitted_at,
+    }
+
+
+def test_a_push_after_the_covered_head_holds_the_merge(tmp_path: Path) -> None:
+    """The gap this closes: the reviewer read `COVERED`, the author pushed, and
+    nothing has read what they pushed. Without clause (c) the gate is green and
+    the PR merges on a review of older code."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        max_delta_reviews="1",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert state == "failure"
+
+
+def test_the_same_pr_is_green_once_its_head_is_the_covered_one(tmp_path: Path) -> None:
+    """The pair for the case above, differing only in the live head: clause (c)
+    holds an UNREAD push, never a read one."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        max_delta_reviews="1",
+        live_head=COVERED,
+        unreviewed_state="failure",
+    )
+    assert state == "success"
+
+
+def test_a_spent_accumulated_budget_greens_and_names_where_reading_stopped(
+    tmp_path: Path,
+) -> None:
+    """Budget exhausted is the one case that must never read as full coverage.
+    No further read is coming, so the merge is not held — but the description
+    says which commit the reading stopped at instead of claiming the head."""
+    calls = gate_calls(
+        tmp_path,
+        [
+            _covered_review(COVERED),
+            _covered_review(PUSHED, read="delta", submitted_at="2026-02-01T00:00:00Z"),
+        ],
+        max_delta_reviews="1",
+        live_head="3333333333333333333333333333333333333333",
+    )
+    assert _state_of(calls) == "success"
+    assert "the accumulated read is spent" in calls, calls
+    # The accumulated read is the newest coverage, so the reading stopped at the
+    # head IT covered, not at the first read's.
+    assert PUSHED[:7] in calls, calls
+
+
+def test_the_clause_is_off_for_a_consumer_that_runs_no_accumulated_read(
+    tmp_path: Path,
+) -> None:
+    """A consumer passing no budget runs no accumulated read, so no head can be
+    waiting for one and the gate stays the predicate it was."""
+    state = run_gate(tmp_path, [_covered_review(COVERED)], live_head=PUSHED)
+    assert state == "success"
+
+
+def test_an_unreadable_live_head_does_not_invent_a_hold(tmp_path: Path) -> None:
+    """A can't-verify is not evidence. The reviewed-at fact is already true, so
+    an empty head read leaves the verdict alone rather than holding a PR on an
+    API blip."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        max_delta_reviews="1",
+        live_head="",
+        unreviewed_state="failure",
+    )
+    assert state == "success"
+
+
+def test_an_unread_push_never_outranks_an_open_gating_finding(tmp_path: Path) -> None:
+    """Clause (b) still decides first: an unresolved blocking thread is a red the
+    author must act on, and reporting it as "waiting for a read" would tell them
+    to wait instead."""
+    calls = gate_calls(
+        tmp_path,
+        [_covered_review(COVERED)],
+        [thread("<!-- severity: blocking -->\nleaks")],
+        max_delta_reviews="1",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert _state_of(calls) == "failure"
+    assert "unresolved reviewer finding" in calls, calls

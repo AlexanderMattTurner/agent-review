@@ -340,3 +340,122 @@ def test_a_cutover_that_is_not_an_rfc3339_utc_timestamp_is_refused(github, value
 def test_an_empty_cutover_passes_the_check_it_opts_out_of(github):
     proc = _call(github, "require_reads_marked_from", READS_MARKED_FROM="")
     assert proc.returncode == 0, proc.stderr
+
+
+# ── The coverage stamp ────────────────────────────────────────────────────────
+#
+# Every posted review records WHICH head it read. These tests drive the same
+# producer post-pr-review.sh calls and the same readers the gate, the dispatcher
+# and the decide step call, against the real paginating server.
+
+HEAD_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HEAD_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+BASE = "cccccccccccccccccccccccccccccccccccccccc"
+REVIEWER_SHA = "dddddddddddddddddddddddddddddddddddddddd"
+
+
+def _stamp(head: str, *, read: str = "first", scope: str = "whole") -> str:
+    """The stamp line, built by the library function post-pr-review.sh calls, so
+    a test never hand-writes the format the readers below parse."""
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; source "$1"; coverage_stamp "$2" "$3" "$4" "$5" "$6"',
+            "_",
+            str(LIB),
+            head,
+            BASE,
+            REVIEWER_SHA,
+            read,
+            scope,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _stamped(head: str, *, read: str = "first", scope: str = "whole") -> str:
+    """A review body as the poster leaves it: the read marker, then the stamp."""
+    return f"{_read('findings')}\n{_stamp(head, read=read, scope=scope)}"
+
+
+def _coverage(server: FakePRReviews, **env: str) -> dict:
+    proc = _call(
+        server, 'reviewer_reviews_ndjson "$2" "$3" "$4" | coverage_of_reviews', **env
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout) if proc.stdout.strip() else {}
+
+
+def _deltas(server: FakePRReviews, **env: str) -> int:
+    proc = _call(
+        server, 'reviewer_reviews_ndjson "$2" "$3" "$4" | delta_reviews_count', **env
+    )
+    assert proc.returncode == 0, proc.stderr
+    return int(proc.stdout.strip())
+
+
+def test_a_stamped_review_names_the_head_base_and_reviewer_it_read(github):
+    """The round trip the whole scheme rests on: what the poster writes is what
+    every reader gets back."""
+    github.add_review(body=_stamped(HEAD_A))
+    assert _coverage(github) == {
+        "head": HEAD_A,
+        "base": BASE,
+        "reviewer": REVIEWER_SHA,
+        "read": "first",
+        "scope": "whole",
+        "submittedAt": "2026-07-01T00:00:00Z",
+    }
+
+
+def test_the_newest_stamp_wins_across_pages(github):
+    """The server serves one review per page, oldest first, so the newest stamp
+    arrives LAST. A fold picking by array order reports the head an older review
+    covered, and the gate then greens a PR whose newer pushes nobody read."""
+    github.add_review(body=_stamped(HEAD_A), submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(login="a-human", submitted_at="2026-07-02T00:00:00Z")
+    github.add_review(
+        body=_stamped(HEAD_B, read="delta", scope=f"since:{HEAD_A}"),
+        submitted_at="2026-07-03T00:00:00Z",
+    )
+    coverage = _coverage(github)
+    assert coverage["head"] == HEAD_B
+    assert coverage["read"] == "delta"
+    assert coverage["scope"] == f"since:{HEAD_A}"
+
+
+def test_an_unstamped_read_still_reports_the_commit_it_reviewed(github):
+    """Reviews posted before the stamp existed carry the read marker and the
+    commit GitHub recorded. Reading nothing from them would hand every open PR a
+    fresh accumulated read the moment this lands."""
+    github.add_review(body=_read("pre-stamp"))
+    coverage = _coverage(github)
+    assert coverage["read"] == "first"
+    assert coverage["head"], coverage
+
+
+def test_an_accumulated_read_does_not_spend_the_first_read_budget(github):
+    """The two budgets are separate, and this is where that separation lives: a
+    delta-stamped review is invisible to the count decide compares against
+    `max-reviews-per-pr`, so an accumulated read can never starve a PR of the
+    first pass it is still owed."""
+    github.add_review(body=_stamped(HEAD_A))
+    github.add_review(
+        body=_stamped(HEAD_B, read="delta", scope=f"since:{HEAD_A}"),
+        submitted_at="2026-07-02T00:00:00Z",
+    )
+    assert _spent(github) == 1
+    assert _deltas(github) == 1
+
+
+def test_a_pr_with_no_review_at_all_reports_no_coverage(github):
+    """Empty, not a zero-valued record: the gate's clause (c) and the dispatcher
+    both key on "nothing covers this yet" to stand down, and a record claiming
+    an empty head would read as coverage of the commit named by the empty
+    string."""
+    assert _coverage(github) == {}
+    assert _deltas(github) == 0

@@ -13,10 +13,20 @@
 # case (GitHub refuses the diff media type outright) is rebuilt from the files
 # API first, then routed by size like any other.
 #
+# A READ=delta run covers the pushes after SINCE, which an earlier review already
+# read: the compare API names those files and the diff is narrowed to them. A
+# rebase or a force-push leaves SINCE off the head's history, so compare reports
+# `diverged` and the whole diff is read instead — the one disposition that cannot
+# claim coverage it does not have.
+#
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
-# Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, shards, shard_count
-# (the last two written by shard-pr-diff.py). Writes into $PR_INPUT_DIR:
-# diff.txt/meta.txt, sanitizer-report.txt, shards/, oversized-notice.txt.
+# Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
+# covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
+# size bounds below are optional.
+# Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
+# shard_count (the last two written by shard-pr-diff.py). Writes into
+# $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
+# sanitizer-report.txt, shards/, oversized-notice.txt.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +39,12 @@ source "$here/lib-ci-retry.sh"
 
 : "${PR:?PR number required}"
 : "${PR_INPUT_DIR:?PR_INPUT_DIR required}"
+# The head this run was dispatched for. Every coverage claim below names it, so a
+# run that cannot say which commit it read must not run at all.
+: "${HEAD_SHA:?HEAD_SHA required — the head this read covers}"
+READ="${READ:-first}"
+SINCE="${SINCE:-}"
+REVIEWER_SHA="${REVIEWER_SHA:-}"
 
 # The single-context cap. A diff line costs about 13.6 tokens, so 12k lines is roughly
 # 163k tokens against a 200k window. The review job checks out the BASE only, so diff.txt
@@ -123,6 +139,27 @@ if ((fetch_rc == 3)); then
 fi
 ((fetch_rc == 0)) || exit "$fetch_rc"
 
+# The head, re-read AFTER the diff fetch. A push inside the fetch window would
+# otherwise be stamped as covered by a read that never saw it, which is the one
+# error this whole record exists to prevent — every later reader trusts the stamp.
+# The base comes from the same call, so the record names what the diff was taken
+# against.
+pr_state="$(retry_stdout gh pr view "$PR" --json headRefOid,baseRefOid)"
+live_head="$(jq -r '.headRefOid // ""' <<<"$pr_state")"
+base_sha="$(jq -r '.baseRefOid // ""' <<<"$pr_state")"
+if [[ -z "$live_head" ]]; then
+  echo "the live-head read returned nothing; refusing to claim coverage of a commit it cannot name" >&2
+  exit 1
+fi
+if [[ "$live_head" != "$HEAD_SHA" ]]; then
+  emit_output "stale=true"
+  emit_output "sharded=false"
+  emit_output "unreviewable=false"
+  echo "the head moved ($HEAD_SHA -> $live_head) during the fetch; this run reads nothing" >&2
+  exit 0
+fi
+emit_output "stale=false"
+
 sanitize() { node "$here/sanitize-pr-input.mjs"; }
 
 # The caller's own elider, run BEFORE the sanitizer, whose cost is per byte: a
@@ -138,6 +175,57 @@ if [[ -n "${ELIDE_COMMAND:-}" ]]; then
 fi
 
 sanitize <"$raw_diff" >"${PR_INPUT_DIR}/diff.txt" 2>"${PR_INPUT_DIR}/diff.report.txt"
+
+# A delta read covers the pushes after SINCE. GitHub's compare API is the
+# authority on which files those pushes touched, and the narrowing runs on the
+# SANITIZED diff, so a shard of it is still a slice of the bytes a whole read
+# would have shown the model.
+#
+# `ahead` is the only status that licenses a narrowed read: it says SINCE is on
+# this head's history, so everything before it is what the earlier review saw. A
+# rebase or a force-push answers `diverged`, where no commit range describes the
+# change, and a compare of 300 files is GitHub's own page limit rather than the
+# whole set. Both read the WHOLE diff again, and the stamp below says so.
+COVERAGE_SCOPE=whole
+if [[ "$READ" == "delta" && -n "$SINCE" ]]; then
+  compare_rc=0
+  compare="$(retry_stdout gh api "repos/{owner}/{repo}/compare/${SINCE}...${HEAD_SHA}" 2>/dev/null)" || compare_rc=$?
+  compare_status=""
+  compare_files=0
+  if ((compare_rc == 0)); then
+    compare_status="$(jq -r '.status // ""' <<<"$compare")"
+    compare_files="$(jq -r '[.files[]? | .filename] | length' <<<"$compare")"
+  fi
+  if ((compare_rc == 0)) && [[ "$compare_status" == "ahead" ]] && ((compare_files > 0 && compare_files < 300)); then
+    changed_paths="$(mktemp)"
+    narrowed="$(mktemp)"
+    jq -r '.files[]? | .filename' <<<"$compare" >"$changed_paths"
+    python3 "$here/narrow-diff-to-paths.py" \
+      --diff "${PR_INPUT_DIR}/diff.txt" --paths "$changed_paths" --out "$narrowed"
+    mv "$narrowed" "${PR_INPUT_DIR}/diff.txt"
+    rm -f "$changed_paths"
+    COVERAGE_SCOPE="since:${SINCE}"
+    echo "delta read: ${compare_files} file(s) changed since ${SINCE}" >&2
+  else
+    echo "delta read: compare says '${compare_status:-unreadable}' over ${compare_files} file(s), so this reads the whole diff again" >&2
+  fi
+fi
+
+# The coverage record every later reader trusts: which commits this read covered,
+# which budget paid for it, and which reviewer commit did the reading. It is
+# stamped onto the posted review body, and it is what tells the agent whether its
+# diff.txt is the whole pull request or only the pushes after an earlier read.
+jq -n --arg head "$HEAD_SHA" --arg base "$base_sha" --arg reviewer "$REVIEWER_SHA" \
+  --arg read "$READ" --arg scope "$COVERAGE_SCOPE" --arg since "$SINCE" \
+  '{head: $head, base: $base, reviewer: $reviewer, read: $read, scope: $scope, since: $since}' \
+  >"${PR_INPUT_DIR}/coverage.json"
+
+# The base tree's OTHER mentions of the identifiers this diff changes, so a
+# sibling caller of a changed contract is in front of the model rather than one
+# grep away. The workspace is the caller's trusted default branch, so this reads
+# no PR-authored content and needs no sanitizer pass.
+python3 "$here/build-review-context.py" \
+  --diff "${PR_INPUT_DIR}/diff.txt" --out "${PR_INPUT_DIR}/context.txt" --repo-dir .
 
 # Counted on the SANITIZED diff, and after the elision, so every downstream
 # budget is spent on lines a review can act on.

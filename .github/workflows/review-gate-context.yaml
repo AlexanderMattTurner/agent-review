@@ -63,6 +63,9 @@ jobs:
           # `${{ }}` expansion inside `run:` is textual substitution, so a ref
           # carrying shell metacharacters would execute as code.
           QUEUE_REF: ${{ github.ref }}
+          # The same number review-gate.yaml passes, so the queue leg and the
+          # pull-request leg answer the accumulated-read question identically.
+          MAX_DELTA_REVIEWS_PER_PR: "1"
         # The queue branch name carries the pull request number.
         run: |
           PR="$(sed -n 's|.*/pr-\([0-9]\{1,\}\)-.*|\1|p' <<<"$QUEUE_REF")"

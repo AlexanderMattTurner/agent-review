@@ -82,6 +82,71 @@ OVERSIZED_REVIEW_MARKER='<!-- oversized-review -->'
 # markers above is not what decides.
 AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 
+# COVERAGE STAMP — what a review READ, on the body of every review a read posts.
+# One line, produced by `coverage_stamp` and parsed by `coverage_of_reviews`
+# below, so the format has one home. Without it a reader can tell that the
+# reviewer spoke and not WHICH commits it spoke about, so an unreviewed push and
+# an unresolved finding look the same from outside.
+#
+#   <!-- review-coverage head=<sha> base=<sha> reviewer=<sha> read=first|delta scope=whole|since:<sha> -->
+#
+# `head` is the commit the diff was fetched at, `base` the merge target it was
+# fetched against, `reviewer` the reviewer commit that read it, `read` which
+# budget paid, and `scope` whether the read saw the whole diff or only the
+# pushes after <sha>. An HTML comment, so a human reading the review sees the
+# prose alone.
+COVERAGE_MARKER_PREFIX='<!-- review-coverage '
+
+# coverage_stamp <head> <base> <reviewer> <read> <scope> — the stamp line.
+coverage_stamp() {
+  printf '%shead=%s base=%s reviewer=%s read=%s scope=%s -->\n' \
+    "$COVERAGE_MARKER_PREFIX" "$1" "$2" "$3" "$4" "$5"
+}
+
+# The jq that reads the stamp back off a review body. `capture` emits NOTHING for
+# a body without one, so an unstamped review drops out of every fold below rather
+# than folding in as an empty record.
+_COVERAGE_CAPTURE='capture("<!-- review-coverage head=(?<head>[0-9a-f]+) base=(?<base>[0-9a-f]*) reviewer=(?<reviewer>[0-9a-f]*) read=(?<read>[a-z]+) scope=(?<scope>[^ ]+) -->")'
+
+# coverage_of_reviews — stdin is `reviewer_reviews_ndjson` output; prints the
+# NEWEST review's coverage as one JSON object {head, base, reviewer, read,
+# scope, submittedAt}, or NOTHING when no review carries a stamp.
+#
+# The FALLBACK covers a review posted before this reviewer stamped coverage: a
+# body carrying WHOLE_DIFF_READ_MARKER read the whole diff at its own
+# `reviewedSha`, which GitHub records on every review. A review with neither is
+# not a read and is skipped, so a stand-in approval never reports a covered head.
+coverage_of_reviews() {
+  jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" \
+    "[.[] | (.body // \"\") as \$b
+           | if (\$b | test(\"review-coverage \"))
+             then (\$b | $_COVERAGE_CAPTURE) + {submittedAt: (.submittedAt // \"\")}
+             elif ((\$b | contains(\$read)) and ((.reviewedSha // \"\") != \"\"))
+             then {head: .reviewedSha, base: \"\", reviewer: \"\", read: \"first\",
+                   scope: \"whole\", submittedAt: (.submittedAt // \"\")}
+             else empty end]
+     | if length == 0 then empty else (sort_by(.submittedAt) | last) end"
+}
+
+# delta_reviews_count — stdin is `reviewer_reviews_ndjson` output; how many
+# ACCUMULATED-delta reads this PR has spent, which is the budget
+# `max-delta-reviews-per-pr` bounds.
+delta_reviews_count() {
+  jq -rs "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
+                | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length"
+}
+
+# require_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR, or refuse. Same
+# required-with-no-default shape and same pattern as the first-read budget above,
+# so neither script can read a value the other rejects.
+require_delta_review_budget() {
+  MAX_DELTA_REVIEWS_PER_PR="${MAX_DELTA_REVIEWS_PER_PR:?MAX_DELTA_REVIEWS_PER_PR required — review.yaml passes its max-delta-reviews-per-pr input}"
+  [[ "$MAX_DELTA_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+    echo "max-delta-reviews-per-pr must be a whole number from 0 to 999 with no leading zero, not '$MAX_DELTA_REVIEWS_PER_PR'" >&2
+    exit 1
+  }
+}
+
 # real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's
 # read budget, as NDJSON, one object per line, oldest page first. A caller that
 # wants both a COUNT and the latest verdict reads this once and folds the result
@@ -109,14 +174,19 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # The stand-in approval is excluded even before the cutover: it is the one non-read
 # this library can name, and counting it latches a skipped pull request unread — its
 # `synchronize` never buys the first pass once it leaves the skip class.
+# An ACCUMULATED-delta read is excluded too, and by its own stamp rather than by
+# omission: it spends `max-delta-reviews-per-pr`, and counting it here would let one
+# delta read latch the first-read budget full on a pull request that never got a
+# first pass.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
     jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
       --arg marked_from "${READS_MARKED_FROM:-}" --arg approval "$AUTO_APPROVAL_MARKER" \
       'select((.body // "") as $b
-              | ($b | contains($read)) or ($b | contains($oversized))
+              | (($b | test("review-coverage [^>]*read=delta")) | not)
+              and (($b | contains($read)) or ($b | contains($oversized))
                 or ($marked_from != "" and (($b | contains($approval)) | not)
-                    and ((.submittedAt // "") < $marked_from)))'
+                    and ((.submittedAt // "") < $marked_from))))'
 }
 
 # require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.

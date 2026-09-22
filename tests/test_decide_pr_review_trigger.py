@@ -133,6 +133,7 @@ def _run(
     label: str = "",
     review_label: str | None = None,
     max_reviews: str = "1",
+    max_delta_reviews: str = "1",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Run the script with the fake gh on PATH; return (proc, run, argv).
     `expect_recheck` pins the emitted `recheck` — the flag that asks the review
@@ -177,6 +178,9 @@ def _run(
         # number — so every run names one, and the shipped default is pinned
         # against that input by test_the_workflow_owns_the_read_budget.
         "MAX_REVIEWS_PER_PR": max_reviews,
+        # Same contract as the read budget above: the script defaults neither, so
+        # review.yaml's two inputs stay the one place each number is written.
+        "MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews,
         # The shared reviews read retries; only the delay is test-tuned, so the
         # fail-safe test still exercises the real "ladder exhausted" path.
         "RETRY_BASE_DELAY": "0",
@@ -613,7 +617,11 @@ esac
 
 
 def _run_real_jq(
-    tmp_path: Path, *, reviews_pages: list, message: str = "", max_reviews: str = "1"
+    tmp_path: Path,
+    *,
+    reviews_pages: list,
+    message: str = "",
+    max_reviews: str = "1",
 ) -> tuple[str, str]:
     """Run the real script with a gh stub that applies its --jq once per page of a
     canned payload (a list of per-page review-NODE arrays), as gh --paginate does.
@@ -646,6 +654,7 @@ def _run_real_jq(
             "REVIEWS_JSON": str(reviews_json),
             "HEAD_MSG": message,
             "MAX_REVIEWS_PER_PR": max_reviews,
+            "MAX_DELTA_REVIEWS_PER_PR": "1",
         },
     )
     assert proc.returncode == 0, proc.stderr
@@ -910,7 +919,9 @@ def test_decide_reviews_every_pr() -> None:
     `opened`, so a `draft == false` here would hold every review until the work
     was finished."""
     guard = " ".join(_workflow()["jobs"]["decide"]["if"].split())
-    assert guard == "github.event_name == 'pull_request_target'"
+    assert guard == (
+        "github.event_name == 'pull_request_target' || inputs.pr-number != ''"
+    )
     for dropped in ("'chore:'", "'style:'", "'release:'", "'Bot'", "'labeled'"):
         assert dropped not in guard, f"decide must not skip on {dropped}"
 
@@ -958,7 +969,9 @@ def test_decide_step_passes_the_pr_number() -> None:
     push would buy a fresh whole-diff review."""
     steps = _workflow()["jobs"]["decide"]["steps"]
     decide = next(s for s in steps if s.get("id") == "decide")
-    assert decide["env"]["PR"] == "${{ github.event.pull_request.number }}"
+    assert decide["env"]["PR"] == (
+        "${{ inputs.pr-number || github.event.pull_request.number }}"
+    ), "a dispatch names its PR in the input; every other trigger in the payload"
 
 
 def test_a_cancelled_shard_leg_cannot_discard_a_complete_sharded_review() -> None:
@@ -1088,3 +1101,245 @@ def test_the_stand_in_approval_leaves_the_first_pass_owed(tmp_path: Path) -> Non
     )
     assert run == "true", "an approval nobody read leaves the first pass owed"
     assert "spent 0 of 1 read(s)" in decision, decision
+
+
+# ── The dispatch arm: the accumulated read ────────────────────────────────────
+#
+# A dispatch carries no event payload, so this arm reads both the live head and
+# the coverage itself. The sweep already decided the PR is worth a read; this
+# re-asks the two questions that can have changed in the minutes since.
+
+COVERED_SHA = "1111111111111111111111111111111111111111"
+PUSHED_SHA = "2222222222222222222222222222222222222222"
+
+
+def _coverage_body(head: str, *, read: str = "first") -> str:
+    """A review body as post-pr-review.sh leaves it, from the library's own
+    producer, so a stamp-format change reds here rather than passing."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; source "$1";'
+            ' printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
+            ' coverage_stamp "$2" ba5eba5e 0e0e0e0e "$3" whole',
+            "_",
+            str(lib),
+            head,
+            read,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def _run_dispatch(
+    tmp_path: Path,
+    *,
+    review_bodies: tuple[str, ...] = (),
+    live_head: str = PUSHED_SHA,
+    max_reviews: str = "1",
+    max_delta_reviews: str = "1",
+    reviewed_sha: str = COVERED_SHA,
+) -> tuple[str, str, str]:
+    """Drive the real script on the dispatch arm. Returns (run, read, since)."""
+    # The NDJSON the shared read emits, written to a file rather than into the
+    # stub's source: a review body holds newlines, and embedding one in a
+    # `printf` argument would re-interpret them as the stub's own escapes.
+    nodes_file = tmp_path / "reviews.ndjson"
+    nodes_file.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "state": "COMMENTED",
+                    "body": body,
+                    "submittedAt": f"2026-01-{n + 1:02d}T00:00:00Z",
+                    "reviewId": str(n + 1),
+                    "reviewedSha": reviewed_sha,
+                }
+            )
+            + "\n"
+            for n, body in enumerate(review_bodies)
+        ),
+        encoding="utf-8",
+    )
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >>"$GH_ARGV_FILE"\n'
+        'case "$*" in\n'
+        f'*headRefOid*) printf "%s\\n" "{live_head}" ;;\n'
+        f'*graphql*) cat "{nodes_file}" ;;\n'
+        "*) ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    out_file = tmp_path / "github_output"
+    out_file.write_text("", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "GITHUB_OUTPUT": str(out_file),
+            "GH_ARGV_FILE": str(tmp_path / "gh_argv"),
+            "GH_TOKEN": "fake",
+            "ACTION": "dispatch",
+            "REPO": "owner/repo",
+            "PR": "42",
+            "RETRY_BASE_DELAY": "0",
+            "MAX_REVIEWS_PER_PR": max_reviews,
+            "MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews,
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    outputs = dict(
+        ln.split("=", 1)
+        for ln in out_file.read_text(encoding="utf-8").splitlines()
+        if "=" in ln
+    )
+    return outputs["run"], outputs["read"], outputs["since"]
+
+
+def test_a_dispatch_reads_the_pushes_since_the_covered_head(tmp_path: Path) -> None:
+    """The arm's whole job: name the commit the last review stopped at, so
+    prepare narrows the diff to what landed after it."""
+    run, read, since = _run_dispatch(
+        tmp_path, review_bodies=(_coverage_body(COVERED_SHA),)
+    )
+    assert (run, read, since) == ("true", "delta", COVERED_SHA)
+
+
+def test_a_dispatch_for_an_already_covered_head_reads_nothing(
+    tmp_path: Path,
+) -> None:
+    """The dispatch and this run are minutes apart: a read that landed in between
+    leaves nothing to re-read, and running anyway would spend the one
+    accumulated read on a head already covered."""
+    run, _, _ = _run_dispatch(
+        tmp_path,
+        review_bodies=(_coverage_body(COVERED_SHA),),
+        live_head=COVERED_SHA,
+    )
+    assert run == "false"
+
+
+def test_a_spent_accumulated_budget_stops_the_dispatch(tmp_path: Path) -> None:
+    """One extra read per PR for its whole life. The sweep filters on the same
+    number, so this is the second line of defence against a race between them."""
+    run, _, _ = _run_dispatch(
+        tmp_path,
+        review_bodies=(
+            _coverage_body(COVERED_SHA),
+            _coverage_body(PUSHED_SHA, read="delta"),
+        ),
+        live_head="3333333333333333333333333333333333333333",
+    )
+    assert run == "false"
+
+
+def test_a_pre_stamp_review_is_treated_as_covering_the_commit_it_read(
+    tmp_path: Path,
+) -> None:
+    """Reviews posted before the stamp existed name their commit through
+    GitHub's own record. Ignoring it would hand every open PR a fresh
+    accumulated read the moment this lands."""
+    run, read, since = _run_dispatch(
+        tmp_path, review_bodies=(f"findings\n{READ_MARKER}",)
+    )
+    assert (run, read, since) == ("true", "delta", COVERED_SHA)
+
+
+def test_a_dispatch_for_a_pr_nothing_has_read_buys_its_FIRST_read(
+    tmp_path: Path,
+) -> None:
+    """The re-arm for a PR whose `opened` run produced no review at all. It is a
+    first read, so the first-read budget bounds it and it is stamped `first` —
+    there is no covered head for a delta to start after."""
+    run, read, since = _run_dispatch(tmp_path, review_bodies=())
+    assert (run, read, since) == ("true", "first", "")
+
+
+def test_a_first_read_dispatch_still_respects_the_first_read_budget(
+    tmp_path: Path,
+) -> None:
+    """The pair: a PR whose read is spent but whose review names no commit at
+    all — no stamp, and no sha GitHub recorded. Nothing says what it covered, so
+    the arm falls back to the first-read budget, and a dispatch must not be a way
+    around the budget the push arms obey."""
+    run, _, _ = _run_dispatch(
+        tmp_path,
+        review_bodies=(f"findings\n{READ_MARKER}",),
+        reviewed_sha="",
+        max_reviews="1",
+    )
+    assert run == "false"
+
+
+def test_a_dispatch_that_cannot_read_the_live_head_reviews_nothing(
+    tmp_path: Path,
+) -> None:
+    """Every coverage claim names a commit. A run that cannot say which commit it
+    is about must not post one."""
+    run, _, _ = _run_dispatch(
+        tmp_path, review_bodies=(_coverage_body(COVERED_SHA),), live_head=""
+    )
+    assert run == "false"
+
+
+# ── The wiring the dispatch arm needs ────────────────────────────────────────
+
+
+def test_the_workflow_owns_the_accumulated_read_budget() -> None:
+    """Same contract as the first-read budget: the number is written once, in the
+    workflow, and every script refuses to run without it. A decide step and a
+    re-check step on different budgets would cancel each other's reads."""
+    budget = _workflow()[True]["workflow_call"]["inputs"]["max-delta-reviews-per-pr"]
+    assert budget["default"] == 1, "one accumulated read per PR is the shipped budget"
+    assert budget["type"] == "number"
+    steps = [
+        *_workflow()["jobs"]["decide"]["steps"],
+        *_workflow()["jobs"]["review"]["steps"],
+    ]
+    readers = [
+        s["env"]["MAX_DELTA_REVIEWS_PER_PR"]
+        for s in steps
+        if "max-delta-reviews-per-pr" in str(s.get("env", {}))
+    ]
+    assert readers == ["${{ inputs.max-delta-reviews-per-pr }}"] * 2, readers
+
+
+def test_the_read_jobs_take_the_pr_and_head_from_the_decision() -> None:
+    """A dispatch run carries NO pull request payload, so a job reading
+    `github.event.pull_request` directly would post a verdict on an empty sha and
+    review a PR it cannot name. `decide` resolves both once, for every trigger."""
+    jobs = _workflow()["jobs"]
+    for name in ("review", "review_shard", "review_synthesis"):
+        assert "decide" in jobs[name]["needs"], name
+        payload = [
+            f"{step.get('name', step.get('uses', '?'))}: {key}"
+            for step in jobs[name]["steps"]
+            for key, value in (step.get("env") or {}).items()
+            if "github.event.pull_request" in str(value)
+        ]
+        assert payload == [], f"{name} reads the event payload: {payload}"
+
+
+def test_the_caller_can_be_dispatched_for_one_pull_request() -> None:
+    """The sweep starts the accumulated read with `gh workflow run`, which needs a
+    `workflow_dispatch` trigger and a way to name the PR."""
+    caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    assert caller[True]["workflow_dispatch"]["inputs"]["pr"]["required"] is True
+    assert caller["jobs"]["review"]["with"]["pr-number"] == "${{ inputs.pr || '' }}"
+
+
+def test_a_dispatched_run_is_named_after_its_pull_request() -> None:
+    """dispatch-delta-review.sh bounds a read that keeps failing by matching the
+    run name's SUFFIX against `PR <number>`. A run name that does not end that
+    way leaves the retry unbounded, so the format is a contract, not a label."""
+    caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+    assert caller["run-name"].endswith("PR {0}', inputs.pr) || '' }}")

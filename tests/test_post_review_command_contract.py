@@ -50,10 +50,13 @@ def test_the_gate_command_is_handed_the_environment_it_reads(
 
 
 def test_the_first_pass_gate_post_names_the_reviewed_head() -> None:
-    """The whole-diff read posts about the head its event named."""
+    """The whole-diff read posts about the head IT read — the one `decide`
+    resolved, which is the event's sha on a push and the live head on a
+    dispatch. Reading the payload directly would name no head at all on a
+    dispatch, and the verdict would post on an empty sha."""
     env = _gate_steps()["review"]["env"]
     assert "REPORT_SHA" in env
-    assert "github.event.pull_request.head.sha" in env["REPORT_SHA"]
+    assert env["REPORT_SHA"] == "${{ needs.decide.outputs.head_sha }}"
 
 
 def test_the_sharded_gate_post_reads_the_head_live() -> None:

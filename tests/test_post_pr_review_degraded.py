@@ -26,6 +26,8 @@ from tests._helpers import REPO_ROOT, reviewer_marker
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "post-pr-review.sh"
 
 HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
+BASE_SHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
+REVIEWER_SHA = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
 DEGRADED_MARKER = "<!-- degraded-review -->"
 
 # Two added lines per file, so both findings below anchor for real.
@@ -71,6 +73,21 @@ def _pr_input(tmp_path: Path, review: dict | None = None) -> Path:
     pr_dir.mkdir(exist_ok=True)
     (pr_dir / "review.json").write_text(json.dumps(review or REVIEW), encoding="utf-8")
     (pr_dir / "diff.txt").write_text(DIFF, encoding="utf-8")
+    # What prepare-pr-review-input.sh records about the read, and what the
+    # posted review's coverage stamp is rendered from.
+    (pr_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                "head": HEAD_SHA,
+                "base": BASE_SHA,
+                "reviewer": REVIEWER_SHA,
+                "read": "first",
+                "scope": "whole",
+                "since": "",
+            }
+        ),
+        encoding="utf-8",
+    )
     return pr_dir
 
 
@@ -394,3 +411,57 @@ def test_a_partly_refused_salvage_keeps_the_run_log_fallback(tmp_path):
         hold = _holds(github)[0]["body"]
         assert "#issuecomment-" in hold  # the part that landed is still linked
         assert "run log only" in hold  # and the refused one is not passed off as posted
+
+
+# ── The coverage stamp on the posted review ──────────────────────────────────
+#
+# The review body is where the coverage record LIVES: there is no other store,
+# so the gate, the sweep's dispatcher and the next decide step all read what is
+# stamped here.
+
+
+def _stamp_line(github: FakeReviewPoster) -> str:
+    bodies = [r["body"] for r in github.of_kind("review")]
+    assert len(bodies) == 1, bodies
+    lines = [
+        ln for ln in bodies[0].splitlines() if ln.startswith("<!-- review-coverage ")
+    ]
+    assert len(lines) == 1, bodies[0]
+    return lines[0]
+
+
+def test_a_posted_review_records_the_head_it_read(tmp_path):
+    """Both posting paths stamp it. This is the structured one — the ordinary
+    case, and the one whose body is assembled by jq rather than printf."""
+    with FakeReviewPoster(tmp_path) as github:
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        stamp = _stamp_line(github)
+    assert f"head={HEAD_SHA}" in stamp
+    assert "read=first" in stamp
+    assert "scope=whole" in stamp
+
+
+def test_a_degraded_review_records_the_same_head(tmp_path):
+    """The salvage path posts a plain summary instead of a structured review, and
+    it is still a paid read of a known head. An unstamped one would look to the
+    gate like a PR nobody has read."""
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        stamp = _stamp_line(github)
+    assert f"head={HEAD_SHA}" in stamp
+
+
+def test_a_read_that_cannot_say_what_it_covered_posts_nothing(tmp_path):
+    """Fail loud rather than post a review the gate would credit with covering a
+    head nobody can name. The next push re-reads; a mis-stamped review would
+    green the gate over unread code."""
+    with FakeReviewPoster(tmp_path) as github:
+        pr_dir = _pr_input(tmp_path)
+        (pr_dir / "coverage.json").unlink()
+        proc = _run(github, pr_dir)
+        assert proc.returncode != 0
+        assert "coverage.json" in proc.stderr
+        assert github.posted == []
