@@ -56,7 +56,14 @@ afterEach(() => {
 // null when no payload file was written.
 function run(
   review,
-  { diff = DIFF, headSha, executionFile, maxWeekly, shardCostDir } = {},
+  {
+    diff = DIFF,
+    headSha,
+    executionFile,
+    maxWeekly,
+    shardCostDir,
+    reviewRead,
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "prr-"));
   dirs.push(dir);
@@ -75,6 +82,8 @@ function run(
   if (executionFile !== undefined) env.EXECUTION_FILE = executionFile;
   if (maxWeekly !== undefined) env.MAX20X_WEEKLY_USD = maxWeekly;
   if (shardCostDir !== undefined) env.SHARD_COST_DIR = shardCostDir;
+  delete env.REVIEW_READ;
+  if (reviewRead !== undefined) env.REVIEW_READ = reviewRead;
   const status = execFileSync("node", [SCRIPT], {
     env,
     encoding: "utf8",
@@ -142,6 +151,34 @@ describe("post-pr-review: anchored inline comments", () => {
       c.body,
       `${SEVERITY_CONFIG.icons.warning} bug — wrong value\n\n\`\`\`suggestion\nconst b = 4;\n\`\`\`\n\n<!-- severity: warning -->`,
     );
+  });
+
+  it("marks every finding of an accumulated read, inline and synthetic alike, and no other read's", () => {
+    const review = {
+      summary: "s",
+      findings: [
+        {
+          path: "src/foo.js",
+          line: 2,
+          side: "RIGHT",
+          severity: "warning",
+          title: "bug",
+          body: "wrong value",
+        },
+        { path: "", severity: "blocking", title: "pr-wide", body: "x" },
+      ],
+    };
+    const bodies = (read) =>
+      run(review, { reviewRead: read }).payload.comments.map((c) => c.body);
+    assert.equal(bodies("delta").length, 2);
+    for (const body of bodies("delta"))
+      assert.ok(
+        body.split("\n").includes("<!-- read: delta -->"),
+        `unmarked: ${body}`,
+      );
+    for (const read of [undefined, "first"])
+      for (const body of bodies(read))
+        assert.ok(!body.includes("read: delta"), `marked: ${body}`);
   });
 
   it("carries start_line/start_side for a multi-line suggestion", () => {

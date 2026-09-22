@@ -290,6 +290,43 @@ def test_which_thread_bodies_gate(tmp_path: Path, body: str, expected: str) -> N
     assert run_gate(tmp_path, [review("COMMENTED")], [thread(body)]) == expected
 
 
+DELTA = "\n<!-- read: delta -->"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("risky\n\n<!-- severity: warning -->" + DELTA, "success"),
+        ("\U0001f7e1 risky\n\n<!-- severity: warning -->" + DELTA, "success"),
+        ("this breaks\n\n<!-- severity: blocking -->" + DELTA, "failure"),
+        ("\U0001f534 this breaks" + DELTA, "failure"),
+        ("quotes <!-- read: delta --> inline\n<!-- severity: warning -->", "failure"),
+    ],
+)
+def test_a_finding_of_the_accumulated_read_gates_by_delta_gating(
+    tmp_path: Path, body: str, expected: str
+) -> None:
+    """The live SSOT lists only `blocking` under `delta_gating`, so a warning the
+    accumulated read found informs and does not hold the merge. The read marker is
+    matched whole-line, like the severity marker: a body quoting it stays gated."""
+    assert run_gate(tmp_path, [review("COMMENTED")], [thread(body)]) == expected
+
+
+def test_with_no_delta_gating_key_an_accumulated_warning_still_gates(
+    tmp_path: Path,
+) -> None:
+    """A consumer whose config names no `delta_gating` keeps the gate it had."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    del config["delta_gating"]
+    path = tmp_path / "severities.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    body = "risky\n\n<!-- severity: warning -->" + DELTA
+    assert (
+        run_gate(tmp_path, [review("COMMENTED")], [thread(body)], severity_config=path)
+        == "failure"
+    )
+
+
 def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
     """Resolving the last gating thread is the whole clearing ceremony."""
     gating = "<!-- severity: blocking -->\nthis breaks"

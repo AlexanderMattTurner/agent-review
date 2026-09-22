@@ -45,6 +45,8 @@ COVERAGE_FILE="${PR_INPUT_DIR}/coverage.json"
   exit 1
 }
 COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
+# Which budget paid, for the reader that marks each finding of an accumulated read.
+REVIEW_READ="$(jq -r '.read // "first"' "$COVERAGE_FILE")"
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its threads are authored by this bot, and
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.
@@ -244,7 +246,7 @@ post_review_comment_by_comment() {
 # writing its verdict. Surface that as a RED step, so a broken reviewer cannot masquerade as a clean
 # pass. The `if !` form suspends `set -e` for the substitution, so the script reacts to the failure
 # instead of dying on it.
-if ! status="$(node "$_SCRIPT_DIR/post-pr-review.mjs")"; then
+if ! status="$(REVIEW_READ="$REVIEW_READ" node "$_SCRIPT_DIR/post-pr-review.mjs")"; then
   echo "::error::the reviewer wrote no valid review.json — it likely crashed; see the reader's diagnostics above" >&2
   exit 1
 fi

@@ -229,10 +229,15 @@ const ICON = SEVERITY_CONFIG.icons;
 const icon = (sev) => ICON[sev] || "•";
 
 // Only a severity the ICON map renders is stamped, so the status gate
-// never learns one it cannot read.
+// never learns one it cannot read. A finding of the accumulated read also carries
+// the read marker, so the gate judges it against `delta_gating` rather than
+// `gating`. That read runs once the pull request is otherwise ready to merge.
+const DELTA_READ = process.env.REVIEW_READ === "delta";
 /** @param {string} sev */
 const severityMarker = (sev) =>
-  ICON[sev] ? `\n\n<!-- severity: ${sev} -->` : "";
+  ICON[sev]
+    ? `\n\n<!-- severity: ${sev} -->${DELTA_READ ? "\n<!-- read: delta -->" : ""}`
+    : "";
 
 // A `suggestion` renders as a GitHub suggested-change block the author can apply with one click. Suggestions can only target the new file (RIGHT side), so a finding carrying one is forced RIGHT. A fence longer than any run of backticks in the suggestion keeps code containing ``` from breaking out of the block.
 /** @param {string} text @returns {string} */
