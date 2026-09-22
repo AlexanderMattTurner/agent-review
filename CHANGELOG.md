@@ -12,6 +12,10 @@ the prose from the release's commits.
 
 ## Unreleased
 
+### Fixed
+
+- A pull request whose accumulated review kept crashing is no longer unmergeable forever. The merge gate holds while the live head is past the head a review covered and the accumulated budget still has room. A crashed read posts no review, so it advanced no coverage and spent no budget, and `dispatch-delta-review.sh` stops retrying after two failures by design — so the two together left the pull request blocked with no red check naming why. Reaching that bound now posts a stamped notice instead of skipping in silence: it spends the accumulated budget so the gate stops waiting, and it says on the pull request which commits went unread. The notice keeps the head the last real review covered, so the gate reports that the later pushes were not read rather than claiming it read them.
+
 ### Security
 
 - Model-authored review text no longer opens an HTML comment: `post-pr-review.mjs` escapes `<!--` in the summary, in each finding's own text, in its path and in its suggestion. The reviewer reads its records back off the body it posts — the coverage stamp, the read markers, the severity marker the merge gate reads — and the model's text lands in the same body, derived from an untrusted diff. A pull request that talked the model into echoing one of those markers forged the record: a `review-coverage` stamp in the summary is captured ahead of the trusted one, so it could spend the accumulated budget or claim a head nobody read. A fenced suggestion is escaped too, because every reader matches the raw body.
