@@ -25,7 +25,18 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# `git rev-parse` rather than a parent walk: moving this file must not silently
+# point the import at the wrong tree.
+sys.path.insert(
+    0,
+    subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=Path(__file__).resolve().parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip(),
+)
 
 # pylint: disable=wrong-import-position  # must follow the sys.path insert above
 from tests._helpers import (  # noqa: E402

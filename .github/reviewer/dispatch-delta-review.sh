@@ -66,7 +66,9 @@ MAX_FAILED_DELTA_RUNS="${MAX_FAILED_DELTA_RUNS:-2}"
 
 skip() { # $1 reason
   echo "no accumulated review of ${GH_REPO}#${PR}: $1" >&2
-  [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "dispatched=false" >>"$GITHUB_OUTPUT"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "dispatched=false" >>"$GITHUB_OUTPUT"
+  fi
   exit 0
 }
 
@@ -133,4 +135,6 @@ failed="$(retry_stdout gh api \
 dispatch_ref="${DISPATCH_REF:-$(retry_stdout gh api "repos/${GH_REPO}" --jq .default_branch)}"
 retry gh workflow run "$REVIEW_WORKFLOW" --repo "$GH_REPO" --ref "$dispatch_ref" -f "pr=${PR}"
 echo "asked for the accumulated review of ${GH_REPO}#${PR}: covered to ${covered:0:7}, head is ${head_sha:0:7}" >&2
-[[ -z "${GITHUB_OUTPUT:-}" ]] || echo "dispatched=true" >>"$GITHUB_OUTPUT"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "dispatched=true" >>"$GITHUB_OUTPUT"
+fi
