@@ -1,0 +1,127 @@
+name: Claude accumulated-review dispatch
+
+# Ask for the ACCUMULATED review of a pull request as soon as its checks finish.
+#
+# The gate is unchanged: `Automated review posted` still holds a merge while the
+# live head is past the head a review covered. Only the WAIT changes. The
+# dispatcher's readiness test is "every check on the live head concluded
+# successfully", so the event that can make it true is another check workflow
+# finishing — and a head green at :24 no longer waits for the :53 sweep.
+#
+# `check_suite` is the event this looks like it wants, and it does not work:
+# GitHub does not trigger a workflow from a check suite "created by GitHub
+# Actions or [whose] head SHA is associated with GitHub Actions", which is every
+# suite on a pull request here. `workflow_run` is the trigger that fires.
+#
+# THE SWEEP STAYS: it is the only path that reacts to a reviewer thread resolved
+# with no push, and it is the backstop for anything this misses. That is also
+# where a fault here surfaces — a `workflow_run` run posts no check on the pull
+# request, but a fault that reds this run reds the next sweep too, and "Claude
+# reviewer-hold sweeper" is in ci-failure-notify.yaml's list.
+#
+# SECURITY — `workflow_run` runs the DEFAULT branch's copy of this file with the
+# base repository's GITHUB_TOKEN, and no pull request code is checked out or
+# executed. The job reads state through the API and can only start a workflow run
+# or post the give-up notice. Least privilege is the sweep's without approval.
+
+# The dangerous-triggers finding targets a workflow that checks out or runs the
+# triggering ref's code with write credentials. This one checks out the default
+# branch credential-less and executes nothing from the pull request.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    types: [completed]
+    # Every workflow whose check can be the last one to go green. The gate is
+    # absent on purpose: the dispatcher excludes it by name, so its completion
+    # could only start a run that exits having done nothing.
+    #
+    # The list is BEST-EFFORT and needs no guard. A name missing here costs the
+    # pull request the old wait and nothing else — the sweep still asks — and a
+    # name that is not a check costs one API-only run. Neither can read a head
+    # that is not ready, because readiness is the dispatcher's question.
+    workflows:
+      - Auto-resolve merge conflicts
+      - Claude reviewers
+      - Dependabot Auto-Merge
+      - Format check
+      - Gitleaks Secret Scanning
+      - Hook lifecycle
+      - Lint
+      - Node tests
+      - PR meta
+      - PR meta (privileged)
+      - PR review advisory
+      - Phone Home Improvements
+      - Validate config
+      - pre-commit
+      - zizmor
+  # `workflow_run` runs only the default branch's copy of this file, so this leg
+  # cannot fire on the pull request that adds it. Dispatch is how it is exercised.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: The head commit to ask for the accumulated review of
+        required: true
+        type: string
+
+# Keyed per head, and CANCELLING, because the workflows above finish one after
+# another and each fires this. The survivor is the latest, so it reads the
+# fullest rollup; a cancelled predecessor loses nothing, since the run that
+# cancelled it asks the same question. A cancel cannot strand a half-taken
+# decision either: the dispatcher's own header records that a duplicate dispatch
+# costs a queued job and not a read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || inputs.sha }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  dispatch:
+    name: Ask for the accumulated review of every PR headed by this commit
+    # A run that failed cannot have made a pull request ready, and a run outside
+    # a pull request heads no open one — both events report the PULL REQUEST's
+    # head, which is what the association below needs.
+    #
+    # Naming the two pull request events is also what cuts the re-entry: the read
+    # this job starts is a `workflow_dispatch` of the reviewer, so the reviewer
+    # run it creates completes under an event this test refuses.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      contains(fromJSON('["pull_request", "pull_request_target"]'),
+      github.event.workflow_run.event))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # sparse-checkout the trusted dispatcher and its libraries
+      actions: write # start the accumulated review of a PR that is ready to merge
+      pull-requests: write # post the notice when an abandoned read gives up
+      statuses: write # re-post the gate verdict the notice releases
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      # A pull request run reports the PULL REQUEST's head here, not the
+      # ephemeral merge commit, which is what makes the association resolve.
+      SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+      # The same setting the sweep passes. Naming the reviewer workflow is what
+      # turns the accumulated read on; its budget is `max_delta_reviews_per_pr`
+      # in the severity config, so this path can cost a PR no extra read the
+      # sweep would not also have spent.
+      REVIEW_WORKFLOW: claude-review.yaml
+    steps:
+      - name: Checkout the trusted dispatcher and its libraries (default branch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/dispatch-delta-review-for-sha.sh
+            .github/reviewer/dispatch-delta-review.sh
+            .github/reviewer/review-findings-gate.sh
+            .github/reviewer/lib/review-skip-set.bash
+            .github/reviewer/lib/review-threads.bash
+            .github/reviewer/lib/pr-reviews.bash
+            .github/reviewer/lib-ci-retry.sh
+            config/review-severities.json
+          sparse-checkout-cone-mode: false
+      - name: Ask for the accumulated review of each PR headed by this commit
+        run: bash .github/scripts/dispatch-delta-review-for-sha.sh

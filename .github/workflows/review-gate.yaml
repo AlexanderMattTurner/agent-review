@@ -99,8 +99,7 @@ jobs:
       # checks` at all, so a reader cannot tell "the reviewer has not spoken"
       # from "no gate here at all". Both block the required context.
       unreviewed-state: failure
-      # The same number claude-review.yaml gives the reviewer, so both sides of
-      # the loop agree on how many accumulated reads a pull request may spend.
-      # Without it this gate would green a head the reviewer has not read while
-      # the review job's own re-post held it, and the status would flip-flop.
-      max-delta-reviews-per-pr: "1"
+      # No `max-delta-reviews-per-pr`: the gate reads `max_delta_reviews_per_pr`
+      # from the severity config, the one number the merge-queue leg in
+      # review-gate-context.yaml reads too. Two literals could disagree, and a
+      # queue leg with the higher one reds a pull request that entered green.

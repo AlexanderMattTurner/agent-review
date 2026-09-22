@@ -127,6 +127,10 @@ jobs:
       # Empty on every pull_request_target event, which is what keeps the first
       # read on its own budget; set only by the sweep's dispatch.
       pr-number: ${{ inputs.pr || '' }}
+      # The reviewer's own accumulated-read budget. It must equal
+      # `max_delta_reviews_per_pr` in config/review-severities.json, which the
+      # gate reads: a reviewer budget above the gate's lets a head merge while
+      # its read is still in flight.
       max-delta-reviews-per-pr: 1
       # Re-post the `Automated review posted` verdict once the review (and its
       # finding threads) exist. Nothing else would: the review posts with the
@@ -136,14 +140,12 @@ jobs:
       # `${REVIEWER_DIR}` is the reviewer's own clone, which the called workflow
       # exports — the same form a consumer repository writes, and it does not
       # depend on the caller happening to BE the reviewer. `${PWD}` is the
-      # caller's checkout, where its severity SSOT is.
-      # MAX_DELTA_REVIEWS_PER_PR is what turns the gate's `uncovered` verdict on:
-      # without it the gate cannot tell an unread push from a covered one, so it
-      # stays the PR-scoped predicate it was.
+      # caller's checkout, where its severity SSOT is; its
+      # `max_delta_reviews_per_pr` is what turns the gate's `uncovered` verdict
+      # on, the same number both gate legs read.
       post-review-command: |
         SEVERITY_CONFIG="${PWD}/config/review-severities.json" \
           UNREVIEWED_STATE=failure \
-          MAX_DELTA_REVIEWS_PER_PR=1 \
           bash "${REVIEWER_DIR}/review-findings-gate.sh"
     secrets:
       rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}

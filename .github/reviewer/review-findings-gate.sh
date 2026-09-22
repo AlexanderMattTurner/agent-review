@@ -28,8 +28,9 @@
 # greening on a review of older code. Once that budget is spent the verdict is
 # green again, because no further read is coming, and the description says which
 # commit the reading stopped at instead of claiming the head was read. The clause
-# is OFF for a caller that passes no MAX_DELTA_REVIEWS_PER_PR: such a caller runs
-# no accumulated read, so no head can be waiting for one.
+# is OFF for a caller that passes no MAX_DELTA_REVIEWS_PER_PR and whose severity
+# SSOT names no `max_delta_reviews_per_pr`: such a caller runs no accumulated
+# read, so no head can be waiting for one.
 #
 # A DISMISSED review counts as a read, because a dismissal retracts the HOLD and
 # not the reading. A consumer's hold sweeper dismisses the reviewer's
@@ -84,7 +85,8 @@
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, GATE_CONTEXT, SEVERITY_CONFIG.
 # Optional: REPORT_SHA, RUN_URL, GATE_UNREPORTED, UNREVIEWED_STATE (pending or
-# failure), MAX_DELTA_REVIEWS_PER_PR (clause (c), off when unset), RECHECK_LABEL,
+# failure), MAX_DELTA_REVIEWS_PER_PR (clause (c); else SEVERITY_CONFIG's
+# max_delta_reviews_per_pr; off when neither names one), RECHECK_LABEL,
 # REVIEWER_LOGIN, REVIEW_LABEL, REVIEW_SKIP_TYPES, REVIEW_SKIP_BOT_AUTHORS.
 set -euo pipefail
 
@@ -182,8 +184,8 @@ name="${GH_REPO##*/}"
 # the verdict alone: a can't-verify must not invent a hold, and the reviewed-at
 # fact is already true.
 uncovered_verdict() {
-  [[ -n "${MAX_DELTA_REVIEWS_PER_PR:-}" ]] || return 0
-  require_delta_review_budget
+  resolve_delta_review_budget
+  [[ -n "$MAX_DELTA_REVIEWS_PER_PR" ]] || return 0
   local coverage covered deltas live live_rc=0
   coverage="$(coverage_of_reviews <<<"$reviews")"
   [[ -n "$coverage" ]] || return 0
@@ -192,7 +194,9 @@ uncovered_verdict() {
   live="$(retry_stdout gh pr view "$PR" --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)" || live_rc=$?
   [[ "$live_rc" -eq 0 && -n "$live" && "$live" != "$covered" ]] || return 0
   deltas="$(delta_reviews_count <<<"$reviews")"
-  if [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
+  if [[ "$(delta_read_abandoned <<<"$reviews")" == "true" ]]; then
+    reason="reviewed at ${covered:0:7}; the accumulated read was abandoned, so the pushes after it were NOT read"
+  elif [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]]; then
     verdict=uncovered
     reason="reviewed at ${covered:0:7}; the pushes since it are waiting for the accumulated review"
   else

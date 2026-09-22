@@ -48,7 +48,7 @@ def thread(
     }
 
 
-def gate_calls(
+def _gate_proc(
     tmp_path: Path,
     reviews: list[dict],
     threads: list[dict] | None = None,
@@ -57,15 +57,17 @@ def gate_calls(
     unreviewed_state: str = "pending",
     max_delta_reviews: str | None = None,
     live_head: str = HEAD_SHA,
-) -> str:
-    """Run the gate and return the single status state it posted. The verdict's
-    DESCRIPTION is what `gate_calls` exposes, for the cases whose whole content
-    is what the status says.
+    severity_config: Path = SEVERITIES,
+    report_sha: str | None = HEAD_SHA,
+) -> tuple[subprocess.CompletedProcess, Path]:
+    """Run the gate against a `gh` stub; return the process and its call log.
 
     `thread_pages` is one GraphQL PAGE of review threads per element. `gh api
     graphql --paginate --jq` applies the filter to each page separately and
     concatenates the results, so the stub does the same — a single-payload stub
     never exercises the gate's cross-page sum.
+
+    `report_sha=None` is the merge-queue leg, where the exit code IS the verdict.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews.json").write_text(
@@ -124,9 +126,9 @@ exit 0
             "GH_TOKEN": "t",
             "GH_REPO": "o/r",
             "PR": "18",
-            "REPORT_SHA": HEAD_SHA,
+            **({} if report_sha is None else {"REPORT_SHA": report_sha}),
             "GATE_CONTEXT": CONTEXT,
-            "SEVERITY_CONFIG": str(SEVERITIES),
+            "SEVERITY_CONFIG": str(severity_config),
             "UNREVIEWED_STATE": unreviewed_state,
             # Left OUT when None, which is how a consumer that runs no
             # accumulated read keeps the PR-scoped predicate it had.
@@ -137,8 +139,23 @@ exit 0
             ),
         },
     )
+    return res, log
+
+
+def gate_calls(tmp_path: Path, *args, **kwargs) -> str:
+    """Run the gate in its status-posting mode and return the `gh` calls it made.
+    The verdict's DESCRIPTION is in them, for the cases whose whole content is
+    what the status says."""
+    res, log = _gate_proc(tmp_path, *args, **kwargs)
     assert res.returncode == 0, res.stderr
     return log.read_text(encoding="utf-8")
+
+
+def queue_leg_exit(tmp_path: Path, *args, **kwargs) -> int:
+    """The merge-queue leg's verdict: no REPORT_SHA, so the exit code is it."""
+    res, _ = _gate_proc(tmp_path, *args, report_sha=None, **kwargs)
+    assert res.returncode in (0, 1), res.stderr
+    return res.returncode
 
 
 def _state_of(calls: str) -> str:
@@ -273,6 +290,43 @@ def test_which_thread_bodies_gate(tmp_path: Path, body: str, expected: str) -> N
     assert run_gate(tmp_path, [review("COMMENTED")], [thread(body)]) == expected
 
 
+DELTA = "\n<!-- read: delta -->"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("risky\n\n<!-- severity: warning -->" + DELTA, "success"),
+        ("\U0001f7e1 risky\n\n<!-- severity: warning -->" + DELTA, "success"),
+        ("this breaks\n\n<!-- severity: blocking -->" + DELTA, "failure"),
+        ("\U0001f534 this breaks" + DELTA, "failure"),
+        ("quotes <!-- read: delta --> inline\n<!-- severity: warning -->", "failure"),
+    ],
+)
+def test_a_finding_of_the_accumulated_read_gates_by_delta_gating(
+    tmp_path: Path, body: str, expected: str
+) -> None:
+    """The live SSOT lists only `blocking` under `delta_gating`, so a warning the
+    accumulated read found informs and does not hold the merge. The read marker is
+    matched whole-line, like the severity marker: a body quoting it stays gated."""
+    assert run_gate(tmp_path, [review("COMMENTED")], [thread(body)]) == expected
+
+
+def test_with_no_delta_gating_key_an_accumulated_warning_still_gates(
+    tmp_path: Path,
+) -> None:
+    """A consumer whose config names no `delta_gating` keeps the gate it had."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    del config["delta_gating"]
+    path = tmp_path / "severities.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    body = "risky\n\n<!-- severity: warning -->" + DELTA
+    assert (
+        run_gate(tmp_path, [review("COMMENTED")], [thread(body)], severity_config=path)
+        == "failure"
+    )
+
+
 def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
     """Resolving the last gating thread is the whole clearing ceremony."""
     gating = "<!-- severity: blocking -->\nthis breaks"
@@ -330,7 +384,11 @@ PUSHED = "2222222222222222222222222222222222222222"
 
 
 def _covered_review(
-    head: str, *, read: str = "first", submitted_at: str = "2026-01-01T00:00:00Z"
+    head: str,
+    *,
+    read: str = "first",
+    scope: str = "whole",
+    submitted_at: str = "2026-01-01T00:00:00Z",
 ) -> dict:
     """A reviewer review carrying both stamps post-pr-review.sh writes: the read
     marker that spends the budget, and the coverage stamp naming what it read.
@@ -340,13 +398,14 @@ def _covered_review(
             "bash",
             "-c",
             'source "$1"; printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
-            ' coverage_stamp "$2" "$4" "$5" "$3" whole',
+            ' coverage_stamp "$2" "$4" "$5" "$3" "$6"',
             "_",
             str(REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"),
             head,
             read,
             "ba5eba5e",
             "0e0e0e0e",
+            scope,
         ],
         capture_output=True,
         text=True,
@@ -407,13 +466,102 @@ def test_a_spent_accumulated_budget_greens_and_names_where_reading_stopped(
     assert PUSHED[:7] in calls, calls
 
 
+def _severities_with_budget(tmp_path: Path, budget: int | None) -> Path:
+    """A copy of the real severity SSOT whose `max_delta_reviews_per_pr` is
+    BUDGET, or absent when BUDGET is None."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    config.pop("max_delta_reviews_per_pr", None)
+    if budget is not None:
+        config["max_delta_reviews_per_pr"] = budget
+    path = tmp_path / f"severities-{budget}.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
 def test_the_clause_is_off_for_a_consumer_that_runs_no_accumulated_read(
     tmp_path: Path,
 ) -> None:
-    """A consumer passing no budget runs no accumulated read, so no head can be
-    waiting for one and the gate stays the predicate it was."""
-    state = run_gate(tmp_path, [_covered_review(COVERED)], live_head=PUSHED)
+    """A consumer passing no budget, whose severity config names none either,
+    runs no accumulated read, so no head can be waiting for one and the gate
+    stays the predicate it was."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        live_head=PUSHED,
+        severity_config=_severities_with_budget(tmp_path, None),
+    )
     assert state == "success"
+
+
+def test_the_severity_config_budget_turns_the_clause_on_with_no_env(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in the config key. Both gate
+    legs pass no budget and read this one, which is what keeps them agreeing."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        live_head=PUSHED,
+        severity_config=_severities_with_budget(tmp_path, 1),
+        unreviewed_state="failure",
+    )
+    assert state == "failure"
+
+
+def test_an_explicit_budget_outranks_the_severity_config(tmp_path: Path) -> None:
+    """A caller's own number still wins: config 1 with one read spent would say
+    `spent`, so only the env's 2 can make this pull request wait."""
+    spent_once = [
+        _covered_review(COVERED),
+        _covered_review(PUSHED, read="delta", submitted_at="2026-02-01T00:00:00Z"),
+    ]
+    state = run_gate(
+        tmp_path,
+        spent_once,
+        live_head="3333333333333333333333333333333333333333",
+        severity_config=_severities_with_budget(tmp_path, 1),
+        max_delta_reviews="2",
+        unreviewed_state="failure",
+    )
+    assert state == "failure"
+
+
+@pytest.mark.parametrize(("budget", "exit_code"), [(1, 0), (2, 1)])
+def test_the_merge_queue_leg_answers_from_the_same_config_number(
+    tmp_path: Path, budget: int, exit_code: int
+) -> None:
+    """The merge-queue leg passes no budget either. One read spent and a head
+    past it: at 1 the read is spent and the batch may merge, at 2 it is still
+    owed. Two legs reading two numbers could disagree here, and a queue leg
+    that says 1 where the pull-request leg let the head in at 2 fails a merge
+    group that entered green."""
+    code = queue_leg_exit(
+        tmp_path,
+        [
+            _covered_review(COVERED),
+            _covered_review(PUSHED, read="delta", submitted_at="2026-02-01T00:00:00Z"),
+        ],
+        live_head="3333333333333333333333333333333333333333",
+        severity_config=_severities_with_budget(tmp_path, budget),
+    )
+    assert code == exit_code
+
+
+@pytest.mark.parametrize("bad", ["01", 1000, "x", -1])
+def test_a_malformed_config_budget_fails_the_gate_loud(tmp_path: Path, bad) -> None:
+    """A budget the gate cannot read is a can't-verify, and can't-verify is red:
+    reading it as "off" would green a head nobody read."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    config["max_delta_reviews_per_pr"] = bad
+    path = tmp_path / "bad.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    res, _ = _gate_proc(
+        tmp_path, [_covered_review(COVERED)], live_head=PUSHED, severity_config=path
+    )
+    assert res.returncode != 0
+    assert "max-delta-reviews-per-pr must be a whole number" in res.stderr
 
 
 def test_an_unreadable_live_head_does_not_invent_a_hold(tmp_path: Path) -> None:
@@ -444,3 +592,46 @@ def test_an_unread_push_never_outranks_an_open_gating_finding(tmp_path: Path) ->
     )
     assert _state_of(calls) == "failure"
     assert "unresolved reviewer finding" in calls, calls
+
+
+def test_an_abandoned_accumulated_read_stops_the_gate_waiting_at_any_budget(
+    tmp_path: Path,
+) -> None:
+    """The give-up notice spends ONE read, so at a budget of 2 the spent-count
+    test still leaves room and the gate waits — for a read the dispatcher has
+    already refused to ask for again. The gate therefore asks whether the read
+    was abandoned, not how many were spent."""
+    calls = gate_calls(
+        tmp_path,
+        [
+            _covered_review(COVERED),
+            _covered_review(
+                COVERED,
+                read="delta",
+                scope="failed",
+                submitted_at="2026-02-01T00:00:00Z",
+            ),
+        ],
+        max_delta_reviews="2",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert _state_of(calls) == "success"
+    assert "the accumulated read was abandoned" in calls, calls
+    # The head the last REAL review covered, not the live one nobody read.
+    assert COVERED[:7] in calls, calls
+
+
+def test_a_budget_with_room_and_no_notice_still_holds_the_merge(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above: the abandonment is what greens it, not the
+    budget of 2."""
+    state = run_gate(
+        tmp_path,
+        [_covered_review(COVERED)],
+        max_delta_reviews="2",
+        live_head=PUSHED,
+        unreviewed_state="failure",
+    )
+    assert state == "failure"

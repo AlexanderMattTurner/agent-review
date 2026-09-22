@@ -33,12 +33,16 @@
 # with `PR <number>` (override the whole suffix with RUN_NAME_MATCH), matched as an
 # exact suffix so PR 1 never claims PR 12's runs. A caller whose run-name does not
 # end that way gets no bound and re-dispatches a failing read each sweep — the
-# README says so beside the input.
+# README says so beside the input. Hitting the bound POSTS a stamped notice and
+# re-posts the gate verdict: the stamp ENDS the accumulated read, so the gate
+# stops waiting, and the notice says which commits went unread. A later run reads
+# that stamp and asks for nothing, whatever the budget says.
 #
 # Env: GH_TOKEN, GH_REPO (owner/name), PR, REVIEW_WORKFLOW (the caller's workflow
-# file name), SEVERITY_CONFIG, MAX_DELTA_REVIEWS_PER_PR.
-# Optional: DISPATCH_REF (default branch by default), GATE_CONTEXT,
-# REVIEWER_LOGIN, RUN_NAME_MATCH, MAX_FAILED_DELTA_RUNS (2).
+# file name), SEVERITY_CONFIG.
+# Optional: MAX_DELTA_REVIEWS_PER_PR (else SEVERITY_CONFIG's
+# max_delta_reviews_per_pr), DISPATCH_REF (default branch by default),
+# GATE_CONTEXT, REVIEWER_LOGIN, RUN_NAME_MATCH, MAX_FAILED_DELTA_RUNS (2).
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +94,13 @@ covered="$(jq -r '.head // ""' <<<"$coverage")"
 covered_at="$(jq -r '.submittedAt // ""' <<<"$coverage")"
 [[ "$covered" != "$head_sha" ]] || skip "its head ${head_sha:0:7} is the head the last review read"
 
+# Abandonment is terminal, and this is where that binds on the asking side: the
+# notice below is a decision, so a later run must not make it again. Counted as
+# one spent read instead, a budget above 1 posts one notice per sweep until the
+# budget runs out.
+[[ "$(delta_read_abandoned <<<"$reviews")" != "true" ]] ||
+  skip "its accumulated read was abandoned — a notice on the pull request says which commits went unread"
+
 deltas="$(delta_reviews_count <<<"$reviews")"
 [[ "$deltas" -lt "$MAX_DELTA_REVIEWS_PER_PR" ]] ||
   skip "it has spent all ${MAX_DELTA_REVIEWS_PER_PR} accumulated read(s)"
@@ -134,8 +145,34 @@ failed="$(retry_stdout gh api --paginate \
         | select((.created_at // \"\") > \"${covered_at}\")
         | select(.status == \"completed\" and .conclusion != \"success\")
         | .id" | wc -l | tr -d '[:space:]')"
-[[ "$failed" -lt "$MAX_FAILED_DELTA_RUNS" ]] ||
-  skip "${failed} accumulated read(s) of it have failed since the last review — fix the reviewer rather than re-running it"
+if [[ "$failed" -ge "$MAX_FAILED_DELTA_RUNS" ]]; then
+  # Giving up is a decision, and a decision that stamps nothing holds the merge
+  # forever: the gate waits while the live head is past the covered one and the
+  # accumulated budget has room, and a crashed read moves neither. So say it out
+  # loud, keeping the OLD covered head because nothing read the new one. The
+  # scope marks the read ABANDONED, which the gate reads as terminal.
+  # A read that landed while this script was deciding covers a head nobody had
+  # read, and the notice would then abandon a pull request that was just
+  # reviewed. Coverage is read again against the head this decision was made
+  # from. The window narrows; it does not close.
+  fresh="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
+  [[ "$(coverage_of_reviews <<<"$fresh" | jq -r '.head // ""')" == "$covered" ]] ||
+    skip "a review landed while this was deciding, so the read it was about to abandon is done"
+  body="$(
+    printf '%s\n\n%s\n' \
+      "$(coverage_stamp "$covered" "" "" delta "$ABANDONED_COVERAGE_SCOPE")" \
+      "The accumulated review of this pull request was started ${failed} time(s) since the review of ${covered:0:7} and did not complete. Nothing will ask for it again, so the commits pushed after ${covered:0:7} are NOT reviewed. Fix the reviewer rather than re-running it; a human should read those commits before merging."
+  )"
+  retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
+    -f "event=COMMENT" -f "body=${body}" >/dev/null
+  # A review posted with the workflow GITHUB_TOKEN starts no workflow run, so
+  # nothing re-reads the gate on its own and the hold this notice just released
+  # would stand until the next sweep. Re-evaluate it here, from the same head the
+  # gate's own clause (c) reads.
+  PR="$PR" REPORT_SHA="$head_sha" SEVERITY_CONFIG="$SEVERITY_CONFIG" \
+    bash "$_SCRIPT_DIR/review-findings-gate.sh"
+  skip "${failed} accumulated read(s) of it have failed since the last review — said so on the pull request and ended the read; fix the reviewer rather than re-running it"
+fi
 
 dispatch_ref="${DISPATCH_REF:-$(retry_stdout gh api "repos/${GH_REPO}" --jq .default_branch)}"
 retry gh workflow run "$REVIEW_WORKFLOW" --repo "$GH_REPO" --ref "$dispatch_ref" -f "pr=${PR}"

@@ -94,31 +94,40 @@ def dispatch(
     tmp_path: Path,
     *,
     reviews: list[dict] | None = None,
+    reviews_after: list[dict] | None = None,
     threads: list[dict] | None = None,
     rollup: list[dict] | None = None,
     head: str = PUSHED,
     state: str = "OPEN",
     draft: bool = False,
     runs: list[dict] | None = None,
-    max_delta_reviews: str = "1",
+    max_delta_reviews: str | None = "1",
+    severity_config: Path = SEVERITIES,
     env: dict[str, str] | None = None,
+    expect_success: bool = True,
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run the real script against a `gh` stub; return (proc, its argv lines).
 
     The rollup defaults to one green check, so a case that does not name checks
     is a ready pull request and the refusals below are the one thing it varies.
+
+    `reviews_after` answers every read of the reviews but the first, which is how
+    a review landing mid-decision is driven.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
+
+    def _reviews_payload(nodes: list[dict]) -> str:
+        return json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviews": {"nodes": nodes}}}}}
+        )
+
     (tmp_path / "reviews.json").write_text(
-        json.dumps(
-            {
-                "data": {
-                    "repository": {"pullRequest": {"reviews": {"nodes": reviews or []}}}
-                }
-            }
-        ),
-        encoding="utf-8",
+        _reviews_payload(reviews or []), encoding="utf-8"
     )
+    if reviews_after is not None:
+        (tmp_path / "reviews-after.json").write_text(
+            _reviews_payload(reviews_after), encoding="utf-8"
+        )
     (tmp_path / "threads.json").write_text(
         json.dumps(
             {
@@ -161,7 +170,14 @@ while [[ $# -gt 0 ]]; do
 done
 case "$filter" in
   *reviewThreads.nodes*) jq -r "$filter" "{tmp_path}/threads.json"; exit 0 ;;
-  *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
+  *reviews.nodes*)
+    reads="$(cat "{tmp_path}/reviews-reads.txt" 2>/dev/null || printf 0)"
+    printf '%s' "$((reads + 1))" >"{tmp_path}/reviews-reads.txt"
+    src="{tmp_path}/reviews.json"
+    if [[ "$reads" -ge 1 && -f "{tmp_path}/reviews-after.json" ]]; then
+      src="{tmp_path}/reviews-after.json"
+    fi
+    jq -r "$filter" "$src"; exit 0 ;;
   .default_branch)       printf 'main\\n'; exit 0 ;;
 esac
 case "$subcommand" in
@@ -187,14 +203,19 @@ exit 0
             "GH_REPO": "o/r",
             "PR": str(PR),
             "REVIEW_WORKFLOW": REVIEW_WORKFLOW,
-            "SEVERITY_CONFIG": str(SEVERITIES),
+            "SEVERITY_CONFIG": str(severity_config),
             "GATE_CONTEXT": GATE,
-            "MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews,
+            **(
+                {}
+                if max_delta_reviews is None
+                else {"MAX_DELTA_REVIEWS_PER_PR": max_delta_reviews}
+            ),
             "RETRY_BASE_DELAY": "0",
             **(env or {}),
         },
     )
-    assert proc.returncode == 0, proc.stderr
+    if expect_success:
+        assert proc.returncode == 0, proc.stderr
     return proc, log.read_text(encoding="utf-8").splitlines()
 
 
@@ -330,40 +351,148 @@ def test_the_accumulated_budget_is_spent_exactly_once(tmp_path: Path) -> None:
     assert _dispatched(calls) == []
 
 
+def test_with_no_budget_passed_the_severity_config_supplies_it(
+    tmp_path: Path,
+) -> None:
+    """The sweep and the event dispatcher pass no budget: they read the same
+    config key both gate legs read, so the read they ask for is one the gate is
+    waiting for."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], max_delta_reviews=None)
+    assert len(_dispatched(calls)) == 1, calls
+
+
+def test_with_no_budget_anywhere_the_dispatcher_refuses(tmp_path: Path) -> None:
+    """The pair: the same call against a config naming no budget. A dispatcher
+    cannot guess how many reads a pull request may spend, so it says where the
+    number is looked for and stops."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    config.pop("max_delta_reviews_per_pr")
+    keyless = tmp_path / "keyless.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    keyless.write_text(json.dumps(config), encoding="utf-8")
+    proc, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        max_delta_reviews=None,
+        severity_config=keyless,
+        expect_success=False,
+    )
+    assert proc.returncode != 0
+    assert "max_delta_reviews_per_pr" in proc.stderr, proc.stderr
+    assert calls == []
+
+
 def test_a_zero_budget_asks_for_nothing_and_reads_no_api(tmp_path: Path) -> None:
     """Turning the accumulated read off must cost nothing per sweep per PR."""
     _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], max_delta_reviews="0")
     assert calls == []
 
 
-def test_repeated_failures_of_the_read_stop_being_re_dispatched(
-    tmp_path: Path,
-) -> None:
-    """A read that keeps dying must not be re-dispatched every sweep forever.
-    Runs are attributed by the caller's run-name, which must END with the PR
-    number — an exact suffix, so PR 4 never claims PR 42's runs."""
-    failed = {
+def _failed_run() -> dict:
+    return {
         "display_title": f"Claude reviewers — PR {PR}",
         "created_at": "2026-03-01T00:00:00Z",
         "status": "completed",
         "conclusion": "failure",
     }
+
+
+def _posted_reviews(calls: list[str]) -> list[str]:
+    return [c for c in calls if "pulls/42/reviews" in c and "-X POST" in c]
+
+
+def test_giving_up_on_a_dying_read_spends_the_budget_out_loud(tmp_path: Path) -> None:
+    """The deadlock, closed. The merge gate holds while the live head is past the
+    covered one AND the accumulated budget still has room. A crashed read posts
+    no review, so it advances no coverage and spends no budget, and the bound
+    above then stops the retries — leaving the pull request unmergeable with
+    nothing red to fix. So the give-up spends the budget itself.
+
+    The stamp keeps the OLD covered head on purpose: nothing read the new one, so
+    the gate must say the later pushes went unread rather than claim it read
+    them."""
     _, calls = dispatch(
-        tmp_path, reviews=[_review(COVERED)], runs=[failed, dict(failed)]
+        tmp_path, reviews=[_review(COVERED)], runs=[_failed_run(), _failed_run()]
     )
     assert _dispatched(calls) == []
+    posted = _posted_reviews(calls)
+    assert len(posted) == 1, calls
+    assert "read=delta" in posted[0], posted[0]
+    assert "scope=failed" in posted[0], posted[0]
+    assert f"head={COVERED}" in posted[0], posted[0]
+    assert PUSHED not in posted[0], posted[0]
+    # The notice releases the gate's hold, and a review posted with the workflow
+    # GITHUB_TOKEN starts no workflow run — so nothing else would re-read it, and
+    # the hold would stand until the next sweep.
+    assert [c for c in calls if f"statuses/{PUSHED}" in c], calls
+
+
+def _abandoned_notice(at: str = "2026-04-01T00:00:00Z") -> dict:
+    return _review(COVERED, read="delta", at=at, scope="failed")
+
+
+def test_a_read_already_abandoned_is_never_abandoned_a_second_time(
+    tmp_path: Path,
+) -> None:
+    """The notice is a decision, so a later run must not make it again. Counted
+    as one spent read, a budget of 2 leaves room, the failures are still in the
+    window, and the script posts a second notice saying the same thing."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED), _abandoned_notice()],
+        runs=[_failed_run(), _failed_run()],
+        max_delta_reviews="2",
+    )
+    assert _dispatched(calls) == []
+    assert _posted_reviews(calls) == [], calls
+
+
+def test_a_budget_with_room_and_no_notice_still_abandons_the_read(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in whether a notice exists."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        runs=[_failed_run(), _failed_run()],
+        max_delta_reviews="2",
+    )
+    assert len(_posted_reviews(calls)) == 1, calls
+
+
+def test_a_review_landing_mid_decision_stops_the_notice(tmp_path: Path) -> None:
+    """The state this decision rests on is minutes old by the time it posts. A
+    read that landed meanwhile covers the live head, so the notice would abandon
+    a pull request that was just reviewed — and abandonment is terminal."""
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        reviews_after=[
+            _review(COVERED),
+            _review(PUSHED, read="delta", at="2026-03-02T00:00:00Z"),
+        ],
+        runs=[_failed_run(), _failed_run()],
+    )
+    assert _posted_reviews(calls) == [], calls
+    assert _dispatched(calls) == []
+
+
+def test_a_read_that_has_failed_once_is_retried_and_spends_nothing(
+    tmp_path: Path,
+) -> None:
+    """The pair for the case above, differing only in how many runs died. Below
+    the bound the read is still coming, so spending its budget here would strand
+    the pushes the retry is about to read."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], runs=[_failed_run()])
+    assert len(_dispatched(calls)) == 1, calls
+    assert _posted_reviews(calls) == []
 
 
 def test_another_prs_failures_do_not_stop_this_ones_read(tmp_path: Path) -> None:
     """The suffix match is what makes that bound per-PR. `PR 4` is a suffix of no
     run named `PR 42`, and `PR 42` is a suffix of no run named `PR 421`."""
     others = [
-        {
-            "display_title": f"Claude reviewers — PR {PR}{tail}",
-            "created_at": "2026-03-01T00:00:00Z",
-            "status": "completed",
-            "conclusion": "failure",
-        }
+        {**_failed_run(), "display_title": f"Claude reviewers — PR {PR}{tail}"}
         for tail in ("1", "7")
     ]
     _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], runs=others)

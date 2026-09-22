@@ -97,6 +97,14 @@ AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
 # prose alone.
 COVERAGE_MARKER_PREFIX='<!-- review-coverage '
 
+# The scope of a stamp posted by a read that was ABANDONED — the give-up notice
+# in dispatch-delta-review.sh. It is the one stamp that keeps the head an EARLIER
+# review covered, because nothing read the new one, so it must never be taken for
+# the newest coverage: doing so would move `submittedAt` past the failures that
+# caused it and re-arm the very bound that posted it. `coverage_of_reviews` drops
+# it and `delta_read_abandoned` is how a caller asks for it instead.
+ABANDONED_COVERAGE_SCOPE='failed'
+
 # coverage_stamp <head> <base> <reviewer> <read> <scope> — the stamp line.
 coverage_stamp() {
   printf '%shead=%s base=%s reviewer=%s read=%s scope=%s -->\n' \
@@ -128,9 +136,11 @@ _COVERAGE_CAPTURE='capture("<!-- review-coverage head=(?<head>[0-9a-f]+) base=(?
 # not a read and is skipped, so a stand-in approval never reports a covered head.
 coverage_of_reviews() {
   jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" \
+    --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
     "[.[] | (.body // \"\") as \$b
            | if (\$b | test(\"review-coverage \"))
-             then (\$b | $_COVERAGE_CAPTURE) + {submittedAt: (.submittedAt // \"\")}
+             then ((\$b | $_COVERAGE_CAPTURE) | select(.scope != \$abandoned))
+                  + {submittedAt: (.submittedAt // \"\")}
              elif ((\$b | contains(\$read)) and ((.reviewedSha // \"\") != \"\"))
              then {head: .reviewedSha, base: \"\", reviewer: \"\", read: \"first\",
                    scope: \"whole\", submittedAt: (.submittedAt // \"\")}
@@ -146,15 +156,49 @@ delta_reviews_count() {
                 | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length"
 }
 
-# require_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR, or refuse. Same
-# required-with-no-default shape and same pattern as the first-read budget above,
-# so neither script can read a value the other rejects.
-require_delta_review_budget() {
-  MAX_DELTA_REVIEWS_PER_PR="${MAX_DELTA_REVIEWS_PER_PR:?MAX_DELTA_REVIEWS_PER_PR required — review.yaml passes its max-delta-reviews-per-pr input}"
-  [[ "$MAX_DELTA_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+# delta_read_abandoned — stdin is `reviewer_reviews_ndjson` output; prints `true`
+# when a give-up notice says the accumulated read was abandoned, else `false`.
+#
+# Abandonment is TERMINAL, whatever the budget. Counting the notice as one spent
+# read would leave a budget above 1 with room, so the gate would wait for a read
+# the dispatcher has already refused to ask for again — the deadlock the notice
+# exists to end, arriving one budget unit later.
+delta_read_abandoned() {
+  jq -rs --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
+    "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
+           | $_COVERAGE_CAPTURE
+           | select(.read == \"delta\" and .scope == \$abandoned)] | length > 0"
+}
+
+# resolve_delta_review_budget — bind MAX_DELTA_REVIEWS_PER_PR from the environment
+# when it is non-empty, else from `max_delta_reviews_per_pr` in SEVERITY_CONFIG,
+# else leave it EMPTY, which the gate reads as "no accumulated read runs here".
+#
+# PROBLEM CLASS — the merge-queue leg and the pull-request leg of the review gate
+# disagreeing about the accumulated-read budget. Each leg is a separate workflow,
+# so a number restated in both drifts. A queue leg above the pull-request leg lets
+# a pull request enter the queue green and then reds its merge group: the same
+# state exits 0 at budget 1 and 1 at budget 2. Both legs read the consumer's
+# severity SSOT here instead, as they already do for `gate_context`.
+#
+# Assigns a global, so call it plainly and never under `$(…)`.
+resolve_delta_review_budget() {
+  MAX_DELTA_REVIEWS_PER_PR="${MAX_DELTA_REVIEWS_PER_PR:-}"
+  if [[ -z "$MAX_DELTA_REVIEWS_PER_PR" && -f "${SEVERITY_CONFIG:-}" ]]; then
+    MAX_DELTA_REVIEWS_PER_PR="$(jq -r '.max_delta_reviews_per_pr // empty' "$SEVERITY_CONFIG")"
+  fi
+  [[ -z "$MAX_DELTA_REVIEWS_PER_PR" || "$MAX_DELTA_REVIEWS_PER_PR" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
     echo "max-delta-reviews-per-pr must be a whole number from 0 to 999 with no leading zero, not '$MAX_DELTA_REVIEWS_PER_PR'" >&2
     exit 1
   }
+}
+
+# require_delta_review_budget — resolve the budget, or refuse. Same
+# required-with-no-default shape and same pattern as the first-read budget above,
+# so neither script can read a value the other rejects.
+require_delta_review_budget() {
+  resolve_delta_review_budget
+  : "${MAX_DELTA_REVIEWS_PER_PR:?MAX_DELTA_REVIEWS_PER_PR required — review.yaml passes its max-delta-reviews-per-pr input, or the severity config names max_delta_reviews_per_pr}"
 }
 
 # real_reviewer_reviews <owner> <name> <pr> — the reviews that SPEND this PR's

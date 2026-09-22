@@ -486,3 +486,66 @@ def test_an_oversized_notice_on_the_accumulated_read_spends_that_budget(github):
     )
     assert _spent(github) == 1
     assert _deltas(github) == 1
+
+
+def _abandoned(server: FakePRReviews, **env: str) -> str:
+    proc = _call(
+        server, 'reviewer_reviews_ndjson "$2" "$3" "$4" | delta_read_abandoned', **env
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_a_give_up_notice_leaves_the_covered_head_and_its_time_alone(github):
+    """The notice keeps the head an EARLIER review covered, because nothing read
+    the new one. Folded in as the newest coverage it would also carry its OWN
+    submittedAt, and that timestamp is where the dispatcher starts the window it
+    counts failed runs over — so each notice would forgive the failures that
+    produced it and re-arm the two-strike bound it exists to make final."""
+    github.add_review(body=_stamped(HEAD_A), submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(
+        body=f"the read was abandoned\n{_stamp(HEAD_A, read='delta', scope='failed')}",
+        submitted_at="2026-07-03T00:00:00Z",
+    )
+    coverage = _coverage(github)
+    assert coverage["submittedAt"] == "2026-07-01T00:00:00Z"
+    assert coverage["scope"] == "whole"
+
+
+def test_a_real_delta_read_after_a_give_up_notice_still_wins(github):
+    """Dropping the notice from the fold must not drop a later real read with it."""
+    github.add_review(body=_stamped(HEAD_A), submitted_at="2026-07-01T00:00:00Z")
+    github.add_review(
+        body=f"abandoned\n{_stamp(HEAD_A, read='delta', scope='failed')}",
+        submitted_at="2026-07-02T00:00:00Z",
+    )
+    github.add_review(
+        body=_stamped(HEAD_B, read="delta", scope=f"since:{HEAD_A}"),
+        submitted_at="2026-07-03T00:00:00Z",
+    )
+    assert _coverage(github)["head"] == HEAD_B
+
+
+def test_the_abandoned_read_is_terminal_whatever_the_budget(github):
+    """The gate asks this instead of comparing the spent count to the budget. A
+    notice counted as ONE spent read leaves a budget above 1 with room, so the
+    gate waits for a read the dispatcher has already refused to ask for again."""
+    assert _abandoned(github) == "false"
+    github.add_review(body=_stamped(HEAD_A), submitted_at="2026-07-01T00:00:00Z")
+    assert _abandoned(github) == "false"
+    github.add_review(
+        body=f"abandoned\n{_stamp(HEAD_A, read='delta', scope='failed')}",
+        submitted_at="2026-07-02T00:00:00Z",
+    )
+    assert _abandoned(github) == "true"
+
+
+def test_an_oversized_notice_is_not_an_abandoned_read(github):
+    """Both read no diff, and only one gives up. The oversized notice stamps the
+    LIVE head and opens a thread a human resolves, so the read it stands for was
+    delivered; the give-up notice stamps an older head and delivers nothing."""
+    github.add_review(
+        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
+        f"{_stamp(HEAD_B, read='delta', scope='oversized')}"
+    )
+    assert _abandoned(github) == "false"
