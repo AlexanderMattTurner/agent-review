@@ -7,12 +7,16 @@ disk, and asserts the exit status and what the message names.
 import subprocess
 import sys
 import textwrap
+from importlib.metadata import version
 
 import pytest
+import yaml
 
 from tests._helpers import REPO_ROOT
 
 CHECK = REPO_ROOT / ".github" / "scripts" / "check-review-caller-run-name.py"
+PRECOMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
+HOOK_ID = "check-review-caller-run-name"
 
 CALLER = textwrap.dedent(
     """\
@@ -83,8 +87,16 @@ def test_a_caller_with_no_run_name_is_refused(tmp_path):
         "run-name: PR ${{ inputs.pr }} (accumulated)\n",
         "run-name: reviewers ${{ inputs.pr }}\n",
         "run-name: PR ${{ inputs.pr }} for pull request 12\n",
+        "run-name: Claude"
+        "${{ inputs.pr && format(' — PR {0} (accumulated)', inputs.pr) || '' }}\n",
     ],
-    ids=["no-number", "text-after-the-number", "number-without-PR", "trailing-prose"],
+    ids=[
+        "no-number",
+        "text-after-the-number",
+        "number-without-PR",
+        "trailing-prose",
+        "format-with-text-after-the-number",
+    ],
 )
 def test_a_run_name_the_dispatcher_cannot_match_is_refused(tmp_path, run_name):
     result = run(tmp_path, caller(run_name))
@@ -141,6 +153,22 @@ def test_every_refused_file_is_named_once(tmp_path):
     )
     assert result.returncode == 1
     assert result.stderr.count("declares no `run-name:`") == 2
+
+
+def test_tests_run_the_parser_version_the_hook_pins() -> None:
+    """Every workflow these tests parse goes through the YAML loader the hook
+    installs, or they certify behaviour CI never runs. Checking the *installed*
+    version tests the fact that matters, and iterating the hook's own pin list
+    covers a future addition without naming it."""
+    config = yaml.safe_load(PRECOMMIT_CONFIG.read_text(encoding="utf-8"))
+    hooks = [h for repo in config["repos"] for h in repo["hooks"] if h["id"] == HOOK_ID]
+    assert len(hooks) == 1, f"{HOOK_ID} must be configured exactly once"
+    pins = hooks[0]["additional_dependencies"]
+    assert pins, "the hook must pin its parser explicitly"
+    for pin in pins:
+        name, _, pinned = pin.partition("==")
+        assert pinned, f"{name} must be pinned to an exact version"
+        assert version(name) == pinned
 
 
 def test_this_repository_s_own_caller_satisfies_the_guard():

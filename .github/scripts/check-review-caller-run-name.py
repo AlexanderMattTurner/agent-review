@@ -37,8 +37,11 @@ REVIEWER_WORKFLOW = re.compile(r"(?:^|/)\.github/workflows/review\.yaml(?:@|$)")
 DIRECT = re.compile(r"PR \$\{\{(?:[^}]|\}(?!\}))*\}\}\s*$")
 # The final `${{ … }}` of the name, whatever precedes it.
 TRAILING_EXPR = re.compile(r"\$\{\{(?P<expr>(?:[^}]|\}(?!\}))*)\}\}\s*$")
-# `format(' … PR {0}', …)` — the number is the format template's last field.
-FORMATTED = re.compile(r"PR \{\d+\}")
+# `format(' … PR {0}', …)` — the number is the format template's LAST field, so
+# the template's closing quote must follow it. Unanchored, this accepts
+# `format(' — PR {0} (accumulated)', …)`, whose run name ends in prose and
+# matches nothing the dispatcher looks for.
+FORMATTED = re.compile(r"PR \{\d+\}'")
 
 HOW = (
     "end it with the pull request number, e.g. "

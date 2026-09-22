@@ -179,8 +179,6 @@ repos:
         language: system
         files: ^\.claude/skills/.*\.md$
 
-      # Depth-based parent-walking silently breaks when a test file moves;
-      # tests must take REPO_ROOT from tests/_helpers.py (git rev-parse).
       - id: check-review-caller-run-name
         # dispatch-delta-review.sh stops asking for a pull request's accumulated
         # read after two failed runs, and attributes a run to a pull request by
@@ -193,9 +191,11 @@ repos:
         # language: python (not system) so PyYAML is installed by pre-commit
         # itself, on any machine and in CI.
         language: python
-        additional_dependencies: ["PyYAML==6.0.2"]
+        additional_dependencies: ["PyYAML==6.0.3"]
         files: ^\.github/workflows/.*\.ya?ml$
 
+      # Depth-based parent-walking silently breaks when a test file moves;
+      # tests must take REPO_ROOT from tests/_helpers.py (git rev-parse).
       - id: check-test-repo-root
         name: forbid Path(__file__) parent-walking for repo root in tests
         entry: python3 .github/scripts/check-test-repo-root.py
