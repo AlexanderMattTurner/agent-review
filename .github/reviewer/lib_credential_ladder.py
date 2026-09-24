@@ -20,11 +20,12 @@ _NAMES = json.loads(
     )
 )
 
-# The wait before each attempt, indexed by attempt number. Attempt 1 has none:
-# nothing has failed yet. A dead credential is rejected in about half a second, so
-# back-to-back rungs would spend the whole ladder inside one provider-side blip;
-# these waits make the ladder straddle it and still finish inside six minutes.
-_BACKOFF_SECONDS = {2: 10, 3: 20, 4: 30, 5: 45, 6: 60, 7: 90, 8: 90}
+# The wait before each attempt after the first, in attempt order: entry 0 precedes
+# attempt 2. The first attempt waits for nothing because nothing has failed yet. A
+# dead credential is rejected in about half a second, so back-to-back attempts would
+# spend the whole ladder inside one provider-side blip; these waits make the ladder
+# straddle it and still finish inside six minutes.
+BACKOFF_SECONDS = (10, 20, 30, 45, 60, 90, 90)
 
 # The free same-credential retry after the first attempt is not a rung, so it
 # carries its own wait. Ten seconds is the first credential step: long enough to
@@ -34,76 +35,33 @@ FREE_RETRY_BACKOFF_SECONDS = 10
 
 @dataclass(frozen=True)
 class RungSpec:
-    """One credential slot, and every name the unrolled copies spell it with.
+    """One credential slot: its 1-based number and the secret it reads.
 
     Distinct from `_ladder.Rung`, which is one rung's RUNTIME state;
-    `run-review-ladder.py` holds both. `metered` says the slot is meant for a key
-    that bills real credits; the credential's own shape decides how it authenticates.
+    `run-review-ladder.py` holds both. Which credential is paid is not a property
+    of the slot: the runner reads it off the credential's own shape.
     """
 
-    index: int  # 1-based, the number every rendered id and message counts with
+    index: int
     env_var: str
-    metered: bool
-    backoff_seconds: int | None  # None for rung 1, which waits for nothing
-
-    @property
-    def wait_seconds(self) -> int:
-        """The wait before this rung's attempt.
-
-        INVARIANT — only rung 1 has none, because nothing has failed before it. Every
-        renderer that asks for a wait is rendering a backoff step, and a rung 1 backoff
-        step would delay every run of every caller by the first credential step.
-        """
-        if self.backoff_seconds is None:
-            raise ValueError(
-                f"rung {self.index} takes no backoff step: nothing failed before it"
-            )
-        return self.backoff_seconds
-
-    @property
-    def label(self) -> str:
-        """The rung label the run log names the winning credential with."""
-        return "api" if self.metered else str(self.index)
 
 
 def rungs() -> tuple[RungSpec, ...]:
-    """The ladder, in attempt order, from `lib/shared-names.json`.
+    """The ladder's slots, in slot order, from `lib/shared-names.json`.
 
-    INVARIANT — a rung with no wait in `_BACKOFF_SECONDS` is refused rather than
-    given a default. A silent default would let a ladder grown past the schedule
-    spend its new credentials back-to-back inside one blip, which is the failure
-    the waits exist to prevent.
+    INVARIANT — a table with more rungs than `BACKOFF_SECONDS` has waits is refused
+    rather than given a default. A silent default would let a ladder grown past the
+    schedule spend its new credentials back-to-back inside one blip, which is the
+    failure the waits exist to prevent.
     """
     order = _NAMES["oauth_ladder_vars"]
-    metered = set(_NAMES["oauth_ladder_metered_vars"])
-    unknown = sorted(metered - set(order))
-    if unknown:
+    if len(order) > len(BACKOFF_SECONDS) + 1:
         raise ValueError(
-            f"oauth_ladder_metered_vars names variables that are not rungs: {unknown}. "
-            "A metered slot the ladder never walks bills nothing and hides a typo."
+            f"{len(order)} rungs but only {len(BACKOFF_SECONDS)} waits in "
+            "BACKOFF_SECONDS. Extend the schedule in lib_credential_ladder.py "
+            "before adding the rung."
         )
-    out = []
-    for index, env_var in enumerate(order, start=1):
-        if index > 1 and index not in _BACKOFF_SECONDS:
-            raise ValueError(
-                f"rung {index} ({env_var}) has no wait in _BACKOFF_SECONDS. "
-                "Extend the schedule in lib_credential_ladder.py before adding the rung."
-            )
-        out.append(
-            RungSpec(
-                index=index,
-                env_var=env_var,
-                metered=env_var in metered,
-                backoff_seconds=_BACKOFF_SECONDS.get(index),
-            )
-        )
-    metered_indices = sorted(
-        i for i, name in enumerate(order, start=1) if name in metered
+    return tuple(
+        RungSpec(index=index, env_var=env_var)
+        for index, env_var in enumerate(order, start=1)
     )
-    if metered_indices and metered_indices != [len(order)]:
-        raise ValueError(
-            f"metered rung(s) {metered_indices} of {len(order)} are not the ladder's "
-            "last rung. The paid key is the last resort: a review spends every "
-            "subscription token before it bills real credits."
-        )
-    return tuple(out)

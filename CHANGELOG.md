@@ -14,7 +14,7 @@ the prose from the release's commits.
 
 ### Changed
 
-- The reviewer now spends the paid Anthropic API key last, not first. A review tries every Claude Code subscription token before it bills real credits. The paid key moves from `rung_1` to `rung_8`, which is now the required secret, and rungs 1 to 7 hold the subscription tokens. A caller that still passes the paid key in `rung_1` keeps working: the reviewer tells a paid key from a subscription token by its prefix, authenticates it the right way, and tries it last. The free same-credential retry now runs only when one credential is configured.
+- The reviewer now spends the paid Anthropic API key last, not first. A review tries every Claude Code subscription token before it bills real credits. The paid key moves from `rung_1` to `rung_8`, and rungs 1 to 7 hold the subscription tokens. No single rung is required any more: the review refuses to run only when no rung holds a paid key. A caller that still passes the paid key in `rung_1` keeps working: the reviewer tells a paid key from a subscription token by its prefix, authenticates it the right way, and tries it last. The free same-credential retry now runs only when one credential is configured.
 
 ### Fixed
 

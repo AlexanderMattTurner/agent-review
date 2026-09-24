@@ -167,8 +167,8 @@ on:
         description: "Seventh-tier token; empty skips the seventh attempt."
         required: false
       rung_8:
-        description: "Last and REQUIRED tier: a metered Anthropic API key, attempted only once every subscription tier has failed — a run that reaches it bills real credits. A metered key in any other rung is also moved last."
-        required: true
+        description: "Last tier: a metered Anthropic API key, attempted only once every subscription tier has failed — a run that reaches it bills real credits. A metered key in any other rung is also moved last. The review refuses to run when no rung holds a metered key."
+        required: false
 
 permissions: {}
 

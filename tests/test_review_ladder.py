@@ -135,12 +135,20 @@ def test_a_subscription_token_that_answers_bills_nothing_paid(tmp_path: Path) ->
     assert attempts == [(1, OAT_1, False)]
 
 
-def test_an_empty_last_rung_refuses_before_any_attempt(tmp_path: Path) -> None:
-    """Rung 8 is the required paid backstop. A run without it is a wiring fault,
-    so it stops before spending anything rather than reviewing with no last resort."""
+def test_no_paid_key_in_any_rung_refuses_before_any_attempt(tmp_path: Path) -> None:
+    """The paid key is the backstop. A run without one is a wiring fault, so it
+    stops before spending anything rather than reviewing with no last resort."""
     with pytest.raises(SystemExit) as stop:
-        _walk(tmp_path, {1: OAT_1}, log_for=lambda _: _clean())
-    assert "rung 8" in str(stop.value)
+        _walk(tmp_path, {1: OAT_1, 8: OAT_2}, log_for=lambda _: _clean())
+    assert "metered" in str(stop.value)
+
+
+def test_a_paid_key_alone_in_rung_one_still_walks(tmp_path: Path) -> None:
+    """A caller that re-pins without reordering, and whose rung 8 secret is unset,
+    still has its paid backstop in rung 1. The guard asks whether ANY rung holds a
+    paid key, so that run reviews rather than refusing."""
+    attempts, _ = _walk(tmp_path, {1: PAID}, log_for=lambda _: _clean())
+    assert attempts == [(1, PAID, True)]
 
 
 def test_the_first_attempt_waits_for_nothing(tmp_path: Path) -> None:

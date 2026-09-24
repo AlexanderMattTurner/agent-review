@@ -46,6 +46,7 @@ from _ladder import (  # noqa: E402  # pylint: disable=wrong-import-position
     evaluate,
 )
 from lib_credential_ladder import (  # noqa: E402  # pylint: disable=wrong-import-position
+    BACKOFF_SECONDS,
     FREE_RETRY_BACKOFF_SECONDS,
     rungs as ladder_slots,
 )
@@ -218,13 +219,12 @@ def main() -> None:
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1500"))
     slots = ladder_slots()
     tokens = {s.index: os.environ.get(f"RUNG_{s.index}_TOKEN", "") for s in slots}
-    last = slots[-1]
-    if not tokens.get(last.index):
-        # The last rung is the paid key, the backstop once every subscription token has
-        # failed. An empty one is a wiring fault, so the run says so rather than
-        # quietly reviewing with no last resort.
+    if not any(is_metered(token) for token in tokens.values() if token):
+        # The paid key is the backstop once every subscription token has failed, in
+        # whichever rung it sits. No metered credential anywhere is a wiring fault, so
+        # the run says so rather than quietly reviewing with no last resort.
         sys.exit(
-            f"::error::rung {last.index}'s secret is empty — the reviewer has no paid key to fall back to"
+            "::error::no rung holds a metered Anthropic API key — the reviewer has no paid key to fall back to"
         )
 
     # CONFIGURED rungs only. An unset rung is skipped rather than fatal — that is the
@@ -260,7 +260,7 @@ def main() -> None:
         if not rung.configured:
             time.sleep(FREE_RETRY_BACKOFF_SECONDS)
         elif position:
-            time.sleep(slots[position].wait_seconds)
+            time.sleep(BACKOFF_SECONDS[position - 1])
         log = runner_temp / f"review-attempt-{rung.name.removeprefix('rung_')}.json"
         timed_out = attempt(slot.index, token, is_metered(token), log, timeout)
         if log.is_file() and log.stat().st_size:
