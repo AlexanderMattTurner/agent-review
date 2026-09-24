@@ -80,7 +80,7 @@ def _walk(
     # patches every consumer in this worker for the rest of the session — a
     # later test that waits on a real timeout then never waits at all.
     real_sleep = module.time.sleep
-    module.time.sleep = lambda *_: events.append("wait")
+    module.time.sleep = lambda seconds: events.append(f"wait:{seconds}")
     old = dict(os.environ)
     os.environ.update(env)
     try:
@@ -153,15 +153,30 @@ def test_a_paid_key_alone_in_rung_one_still_walks(tmp_path: Path) -> None:
 
 def test_the_first_attempt_waits_for_nothing(tmp_path: Path) -> None:
     """Rungs before the first configured one are empty, so nothing has failed yet.
-    Waiting by slot number would idle before the very first attempt."""
+    Waiting by slot number would idle before the first attempt, and would wait
+    rung 8's step before the second where the schedule's first step belongs."""
     events: list[str] = []
-    _walk(
+    _, module = _walk(
         tmp_path,
         {5: OAT_5, 8: PAID},
         log_for=lambda _: _errored(cost=0),
         events=events,
     )
-    assert events == ["attempt", "wait", "attempt"]
+    assert events == ["attempt", f"wait:{module.BACKOFF_SECONDS[0]}", "attempt"]
+
+
+def test_each_wait_is_the_schedule_step_for_its_attempt(tmp_path: Path) -> None:
+    """The wait before attempt N is the schedule's step N-1, whichever slots the
+    attempts spend. An off-by-one reads one step too long at every attempt."""
+    events: list[str] = []
+    _, module = _walk(
+        tmp_path,
+        {2: OAT_2, 5: OAT_5, 8: PAID},
+        log_for=lambda _: _errored(cost=0),
+        events=events,
+    )
+    waits = [event for event in events if event.startswith("wait:")]
+    assert waits == [f"wait:{s}" for s in module.BACKOFF_SECONDS[:2]]
 
 
 def test_the_free_retry_re_spends_the_only_credential(tmp_path: Path) -> None:
