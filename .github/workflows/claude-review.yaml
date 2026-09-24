@@ -148,14 +148,14 @@ jobs:
           UNREVIEWED_STATE=failure \
           bash "${REVIEWER_DIR}/review-findings-gate.sh"
     secrets:
-      rung_1: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
-      rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
-      rung_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_2 }}
-      rung_4: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_3 }}
-      rung_5: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_4 }}
-      rung_6: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_5 }}
-      rung_7: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_6 }}
-      rung_8: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      rung_1: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
+      rung_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_2 }}
+      rung_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_3 }}
+      rung_4: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_4 }}
+      rung_5: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_5 }}
+      rung_6: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_6 }}
+      rung_7: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      rung_8: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
 
   # This workflow deliberately does NOT arm auto-merge. Arming belongs to the
   # flow that OPENS a pull request: only that flow holds the facts the decision

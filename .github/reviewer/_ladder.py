@@ -8,11 +8,11 @@ whichever copy was pasted. This module is those rules once, and
 The five rules, each load-bearing:
   * A rung that did NOT error is the answer. A genuine "conflict too hard" run has
     is_error false and a real cost; retrying it spends again on the same wall.
-  * Rung 2 alone may retry the SAME credential, and only on a proven zero_cost error —
-    no inference was billed, so the retry is free whether the cause was a transient
-    blip or a dead token.
+  * The second attempt alone may retry the SAME credential, and only on a proven
+    zero_cost error — no inference was billed, so the retry is free whether the cause
+    was a transient blip or a dead token.
   * Every later rung needs a DISTINCT configured credential. The free retry already
-    happened at rung 2; a further same-token attempt only spends.
+    happened second; a further same-token attempt only spends.
   * A ladder that billed nothing anywhere hands its attempt mark back. Reading only the
     last rung would release a mark on a run that DID spend at an earlier one.
   * A wall-clock-only failure never advances, at any rung. A fresh credential faces
