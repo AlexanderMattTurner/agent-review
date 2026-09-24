@@ -20,13 +20,13 @@ _NAMES = json.loads(
     )
 )
 
-# The wait before each rung's attempt, indexed by rung number. Rung 1 has none:
+# The wait before each attempt, indexed by attempt number. Attempt 1 has none:
 # nothing has failed yet. A dead credential is rejected in about half a second, so
 # back-to-back rungs would spend the whole ladder inside one provider-side blip;
 # these waits make the ladder straddle it and still finish inside six minutes.
 _BACKOFF_SECONDS = {2: 10, 3: 20, 4: 30, 5: 45, 6: 60, 7: 90, 8: 90}
 
-# The free same-credential retry between rung 1 and rung 2 is not a rung, so it
+# The free same-credential retry after the first attempt is not a rung, so it
 # carries its own wait. Ten seconds is the first credential step: long enough to
 # outlast a transient fault, short enough that a free retry cannot dominate wall clock.
 FREE_RETRY_BACKOFF_SECONDS = 10
@@ -37,9 +37,8 @@ class RungSpec:
     """One credential slot, and every name the unrolled copies spell it with.
 
     Distinct from `_ladder.Rung`, which is one rung's RUNTIME state;
-    `run-review-ladder.py` holds both. `metered` says the slot bills real credits,
-    which decides whether an attempt authenticates through `ANTHROPIC_API_KEY` or
-    `CLAUDE_CODE_OAUTH_TOKEN`.
+    `run-review-ladder.py` holds both. `metered` says the slot is meant for a key
+    that bills real credits; the credential's own shape decides how it authenticates.
     """
 
     index: int  # 1-based, the number every rendered id and message counts with
@@ -101,12 +100,10 @@ def rungs() -> tuple[RungSpec, ...]:
     metered_indices = sorted(
         i for i, name in enumerate(order, start=1) if name in metered
     )
-    if metered_indices and metered_indices != [1]:
+    if metered_indices and metered_indices != [len(order)]:
         raise ValueError(
             f"metered rung(s) {metered_indices} of {len(order)} are not the ladder's "
-            "first rung. A metered rung must be rung 1 so it is attempted "
-            "unconditionally — every consumer reads `ladder[0].metered` alone to decide "
-            "which credential variable a rung authenticates through, and to warn that "
-            "the run bills real credits."
+            "last rung. The paid key is the last resort: a review spends every "
+            "subscription token before it bills real credits."
         )
     return tuple(out)

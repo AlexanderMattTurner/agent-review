@@ -206,60 +206,67 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
     return False
 
 
+def is_metered(token: str) -> bool:
+    """True for a key that bills per token. A Claude subscription OAuth token starts
+    `sk-ant-oat`; anything else is an API key. The credential's shape decides, not its
+    slot, so a caller that still passes the paid key in rung 1 authenticates correctly."""
+    return not token.startswith("sk-ant-oat")
+
+
 def main() -> None:
     runner_temp = Path(os.environ["RUNNER_TEMP"])
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1500"))
     slots = ladder_slots()
     tokens = {s.index: os.environ.get(f"RUNG_{s.index}_TOKEN", "") for s in slots}
-    if not tokens.get(1):
-        # Rung 1 is the metered key every run spends first. Without it the ladder
-        # would silently start on a subscription token, so a run whose first rung is
-        # unset is a wiring fault and says so rather than re-billing an account the
-        # caller did not choose.
+    last = slots[-1]
+    if not tokens.get(last.index):
+        # The last rung is the paid key, the backstop once every subscription token has
+        # failed. An empty one is a wiring fault, so the run says so rather than
+        # quietly reviewing with no last resort.
         sys.exit(
-            "::error::rung 1's secret is empty — the reviewer has no credential to spend first"
+            f"::error::rung {last.index}'s secret is empty — the reviewer has no paid key to fall back to"
         )
 
-    # CONFIGURED rungs only, in ladder order. An unset rung is skipped rather than
-    # fatal — that is the contract the workflow's own input descriptions state — so a
-    # repository holding rungs 1, 2 and 5 walks those three. Rung 1 is always first.
-    walk = [s for s in slots if tokens[s.index]]
+    # CONFIGURED rungs only. An unset rung is skipped rather than fatal — that is the
+    # contract the workflow's own input descriptions state. A metered key goes LAST,
+    # whichever slot holds it, so a review spends every subscription token before it
+    # bills real credits. `sorted` is stable: slot order holds within each group.
+    walk = sorted(
+        (s for s in slots if tokens[s.index]),
+        key=lambda s: is_metered(tokens[s.index]),
+    )
     rungs: list[Rung] = [
         Rung(name=f"rung_{s.index}", token_env=s.env_var, configured=True) for s in walk
     ]
-    # The free same-credential retry: rung 2 alone may re-spend rung 1's token, and
-    # only on a proven zero-cost error. It is a rung of the WALK with rung 1's
-    # credential, so it authenticates the way rung 1 does.
-    free_retry = len(walk) == 1 or walk[1].index != 2
-    if free_retry:
-        retry = slots[1]
-        rungs.insert(
-            1,
+    # The free same-credential retry, only when one credential is configured: with a
+    # second one, a fresh credential is the better next attempt. `_ladder.advances`
+    # lets it run only on a proven zero-cost error.
+    if len(walk) == 1:
+        rungs.append(
             Rung(
-                name=f"rung_{retry.index}", token_env=slots[0].env_var, configured=False
-            ),
+                name=f"rung_{walk[0].index}_retry",
+                token_env=walk[0].env_var,
+                configured=False,
+            )
         )
-        walk.insert(1, retry)
+        walk.append(walk[0])
 
     outcomes: dict[str, RungOutcome] = {}
     newest_log = ""
-    for position, slot in enumerate(walk):
-        reused = not tokens[slot.index]
-        token = tokens[1] if reused else tokens[slot.index]
-        # A reused token authenticates through its OWN rung's variable, never the
-        # slot's: rung 1 is metered, so handing its key to rung 2's OAuth variable
-        # would make the free retry an authentication failure rather than a retry.
-        metered = slots[0].metered if reused else slot.metered
-        if reused:
+    for position, (rung, slot) in enumerate(zip(rungs, walk)):
+        token = tokens[slot.index]
+        # The wait follows the attempt's POSITION, not its slot: the first attempt
+        # waits for nothing, whichever slot it spends.
+        if not rung.configured:
             time.sleep(FREE_RETRY_BACKOFF_SECONDS)
-        elif slot.backoff_seconds is not None:
-            time.sleep(slot.wait_seconds)
-        log = runner_temp / f"review-attempt-{slot.index}.json"
-        timed_out = attempt(slot.index, token, metered, log, timeout)
+        elif position:
+            time.sleep(slots[position].wait_seconds)
+        log = runner_temp / f"review-attempt-{rung.name.removeprefix('rung_')}.json"
+        timed_out = attempt(slot.index, token, is_metered(token), log, timeout)
         if log.is_file() and log.stat().st_size:
             newest_log = str(log)
         outcome = TIMED_OUT if timed_out else outcome_of(log)
-        outcomes[rungs[position].name] = outcome
+        outcomes[rung.name] = outcome
         following = rungs[position + 1] if position + 1 < len(rungs) else None
         if following is None or not advances(position, outcome, following.configured):
             break

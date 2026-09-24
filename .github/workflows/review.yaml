@@ -146,10 +146,10 @@ on:
         type: number
     secrets:
       rung_1:
-        description: "First and REQUIRED tier: a metered Anthropic API key, attempted before every subscription tier — this bills real credits on every run."
-        required: true
+        description: "First-tier Claude Code OAuth token; empty skips the first attempt."
+        required: false
       rung_2:
-        description: "Second-tier Claude Code OAuth token; empty skips the second attempt."
+        description: "Second-tier token; empty skips the second attempt."
         required: false
       rung_3:
         description: "Third-tier token; empty skips the third attempt."
@@ -167,8 +167,8 @@ on:
         description: "Seventh-tier token; empty skips the seventh attempt."
         required: false
       rung_8:
-        description: "Eighth-tier token; empty skips the eighth attempt."
-        required: false
+        description: "Last and REQUIRED tier: a metered Anthropic API key, attempted only once every subscription tier has failed — a run that reaches it bills real credits. A metered key in any other rung is also moved last."
+        required: true
 
 permissions: {}
 
@@ -446,9 +446,9 @@ jobs:
         id: claude_review
         if: steps.prepare.outputs.stale != 'true' && steps.prepare.outputs.sharded == 'false' && steps.prepare.outputs.unreviewable == 'false'
         env:
-          # Rung 1 is the metered key: a review spends the caller's own funded key
-          # first and reaches a subscription token only once it errors. An empty
-          # rung is not a stop — the ladder drops it and reaches the rungs behind.
+          # Rung 8 is the metered key: a review spends every subscription token
+          # first and bills real credits only once they all error. An empty rung
+          # is not a stop — the ladder drops it and reaches the rungs behind.
           RUNG_1_TOKEN: ${{ secrets.rung_1 }}
           RUNG_2_TOKEN: ${{ secrets.rung_2 }}
           RUNG_3_TOKEN: ${{ secrets.rung_3 }}

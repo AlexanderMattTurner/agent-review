@@ -3,10 +3,11 @@ spends the credential ladder on one review.
 
 Contract:
   * The walk is the CONFIGURED rungs, in order. An unset rung is skipped, never
-    the end of the ladder: a repository holding rungs 1 and 5 walks both.
-  * Rung 2 alone may re-spend rung 1's credential, and only on a proven
-    zero-cost error. That retry authenticates the way rung 1 does — rung 1 is
-    metered, so its key goes to ANTHROPIC_API_KEY and not to the OAuth variable.
+    the end of the ladder: a repository holding rungs 1, 5 and 8 walks all three.
+  * A metered key is spent LAST, whichever slot holds it, and authenticates
+    through ANTHROPIC_API_KEY; a subscription token goes to the OAuth variable.
+  * The free same-credential retry runs only when one credential is configured,
+    and only on a proven zero-cost error.
   * A run the wall clock killed is NOT proof the attempt was free, so it neither
     buys the free retry nor advances to a fresh credential.
   * Each attempt starts with no review.json, so a rung that errors after writing
@@ -46,10 +47,13 @@ def _module():
     return module
 
 
-def _walk(tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=()):
+def _walk(
+    tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=(), events=None
+):
     """Run the ladder with `attempt` recorded rather than run. `log_for(index)`
     is the execution log that rung leaves behind; `timed_out` names the rungs the
-    wall clock killed. Returns (attempts, module), where each attempt is
+    wall clock killed; `events`, when given, collects each wait and attempt in
+    order. Returns (attempts, module), where each attempt is
     (rung index, credential, metered)."""
     env = {
         "RUNNER_TEMP": str(tmp_path),
@@ -63,9 +67,11 @@ def _walk(tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=()):
         env[f"RUNG_{index}_TOKEN"] = value
     module = _module()
     attempts: list[tuple[int, str, bool]] = []
+    events = [] if events is None else events
 
     def fake_attempt(index, token, metered, log, timeout):  # noqa: ARG001
         attempts.append((index, token, metered))
+        events.append("attempt")
         Path(log).write_text(json.dumps(log_for(index)), encoding="utf-8")
         return index in timed_out
 
@@ -74,7 +80,7 @@ def _walk(tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=()):
     # patches every consumer in this worker for the rest of the session — a
     # later test that waits on a real timeout then never waits at all.
     real_sleep = module.time.sleep
-    module.time.sleep = lambda *_: None
+    module.time.sleep = lambda *_: events.append("wait")
     old = dict(os.environ)
     os.environ.update(env)
     try:
@@ -84,6 +90,12 @@ def _walk(tmp_path: Path, tokens: dict[int, str], *, log_for, timed_out=()):
         os.environ.clear()
         os.environ.update(old)
     return attempts, module
+
+
+OAT_1 = "sk-ant-oat01-one"
+OAT_2 = "sk-ant-oat01-two"
+OAT_5 = "sk-ant-oat01-five"
+PAID = "sk-ant-api03-paid"
 
 
 def _errored(*, cost: float):
@@ -96,31 +108,68 @@ def _clean():
 
 def test_an_unset_rung_is_skipped_not_the_end_of_the_ladder(tmp_path: Path) -> None:
     """The contract every consumer reads: an empty rung is skipped. A walk that
-    stopped at the first gap would leave a repository holding rungs 1 and 5
-    spending only rung 1, with its other credential never attempted."""
+    stopped at the first gap would leave a repository holding rungs 1, 5 and 8
+    spending only rung 1, with its other credentials never attempted."""
     attempts, _ = _walk(
         tmp_path,
-        {1: "one", 5: "five"},
+        {1: OAT_1, 5: OAT_5, 8: PAID},
         log_for=lambda _: _errored(cost=0),
     )
-    assert [index for index, _, _ in attempts] == [1, 2, 5]
+    assert attempts == [(1, OAT_1, False), (5, OAT_5, False), (8, PAID, True)]
 
 
-def test_the_free_retry_re_spends_rung_ones_own_credential(tmp_path: Path) -> None:
-    """Rung 2's slot with no secret of its own is the free same-credential retry.
-    It must carry rung 1's METERED wiring too: rung 1's API key handed to the
-    OAuth variable authenticates as nothing, which turns the advertised retry
-    into a second failure."""
-    attempts, _ = _walk(tmp_path, {1: "one"}, log_for=lambda _: _errored(cost=0))
-    assert attempts == [(1, "one", True), (2, "one", True)]
+def test_the_paid_key_is_spent_last_whichever_slot_holds_it(tmp_path: Path) -> None:
+    """A caller whose secrets still follow the old order passes the paid key in
+    rung 1. It must still be tried after every subscription token, and through
+    ANTHROPIC_API_KEY — handed to the OAuth variable it authenticates as nothing."""
+    attempts, _ = _walk(
+        tmp_path,
+        {1: PAID, 2: OAT_2, 8: OAT_1},
+        log_for=lambda _: _errored(cost=0),
+    )
+    assert attempts == [(2, OAT_2, False), (8, OAT_1, False), (1, PAID, True)]
+
+
+def test_a_subscription_token_that_answers_bills_nothing_paid(tmp_path: Path) -> None:
+    attempts, _ = _walk(tmp_path, {1: OAT_1, 8: PAID}, log_for=lambda _: _clean())
+    assert attempts == [(1, OAT_1, False)]
+
+
+def test_an_empty_last_rung_refuses_before_any_attempt(tmp_path: Path) -> None:
+    """Rung 8 is the required paid backstop. A run without it is a wiring fault,
+    so it stops before spending anything rather than reviewing with no last resort."""
+    with pytest.raises(SystemExit) as stop:
+        _walk(tmp_path, {1: OAT_1}, log_for=lambda _: _clean())
+    assert "rung 8" in str(stop.value)
+
+
+def test_the_first_attempt_waits_for_nothing(tmp_path: Path) -> None:
+    """Rungs before the first configured one are empty, so nothing has failed yet.
+    Waiting by slot number would idle before the very first attempt."""
+    events: list[str] = []
+    _walk(
+        tmp_path,
+        {5: OAT_5, 8: PAID},
+        log_for=lambda _: _errored(cost=0),
+        events=events,
+    )
+    assert events == ["attempt", "wait", "attempt"]
+
+
+def test_the_free_retry_re_spends_the_only_credential(tmp_path: Path) -> None:
+    """With one credential configured, a zero-cost error buys one retry on it. The
+    retry keeps that credential's own wiring: a paid key handed to the OAuth
+    variable turns the advertised retry into a second failure."""
+    attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _errored(cost=0))
+    assert attempts == [(8, PAID, True), (8, PAID, True)]
 
 
 def test_a_paid_failure_buys_no_free_retry(tmp_path: Path) -> None:
     """The retry is free only because nothing was billed. A rung that tried and
     failed on the work itself carries a cost, and re-spending it buys the same
     wall at full price."""
-    attempts, _ = _walk(tmp_path, {1: "one"}, log_for=lambda _: _errored(cost=0.42))
-    assert [index for index, _, _ in attempts] == [1]
+    attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _errored(cost=0.42))
+    assert [index for index, _, _ in attempts] == [8]
 
 
 def test_a_wall_clock_kill_does_not_advance(tmp_path: Path) -> None:
@@ -129,15 +178,10 @@ def test_a_wall_clock_kill_does_not_advance(tmp_path: Path) -> None:
     zero-cost failure would buy a second paid read and no new information."""
     attempts, _ = _walk(
         tmp_path,
-        {1: "one", 2: "two"},
+        {1: OAT_1, 8: PAID},
         log_for=lambda _: [],
         timed_out=(1,),
     )
-    assert [index for index, _, _ in attempts] == [1]
-
-
-def test_a_clean_run_stops_the_walk(tmp_path: Path) -> None:
-    attempts, _ = _walk(tmp_path, {1: "one", 2: "two"}, log_for=lambda _: _clean())
     assert [index for index, _, _ in attempts] == [1]
 
 
