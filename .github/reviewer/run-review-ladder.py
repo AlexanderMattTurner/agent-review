@@ -193,18 +193,35 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
         try:
             subprocess.run(command, stdout=out, timeout=timeout, check=False, env=env)
         except subprocess.TimeoutExpired:
-            print(
-                f"::warning::rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}",
-                flush=True,
-            )
-            return True
+            timed_out = True
         except FileNotFoundError:
             print(
                 "::error::no `claude` on PATH — the CLI install step did not run",
                 file=sys.stderr,
             )
             sys.exit(1)
-    return False
+        else:
+            timed_out = False
+    if timed_out:
+        reason = f"rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}"
+        print(f"::warning::{reason}", flush=True)
+        # The killed CLI wrote no result, so without this the newest log is an
+        # EARLIER rung's and the gate reports that rung's failure as the run's.
+        # No cost field: a killed read may have billed, and the log cannot say.
+        log.write_text(
+            json.dumps(
+                [
+                    {
+                        "type": "result",
+                        "is_error": True,
+                        "timed_out_after_seconds": timeout,
+                        "result": reason,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+    return timed_out
 
 
 def is_metered(token: str) -> bool:

@@ -181,6 +181,16 @@ def report_api_refusal(result: JsonObject, context: str, api_status: str) -> NoR
 def classify_error(result: JsonObject, context: str) -> None:
     """Report an is_error result and stop. Every arm names what the log can and
     cannot prove, because each candidate calls for a different repair."""
+    if "timed_out_after_seconds" in result:
+        # The caller killed the run at its wall clock. It may have billed, so the
+        # log proves nothing about cost, and no credential is implicated.
+        publish("true")
+        fail(
+            f"::error::{context} hit its wall clock after "
+            f"{raw(result['timed_out_after_seconds'])}s and was killed before it "
+            "reported. No credential is implicated: raise the timeout or shrink the "
+            "read, and expect a retry on any credential to hit the same wall."
+        )
     api_status = raw(alt(result.get("api_error_status"), ""))
     if api_status:
         report_api_refusal(result, context, api_status)
