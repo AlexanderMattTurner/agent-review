@@ -203,9 +203,8 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
         else:
             timed_out = False
     if timed_out:
-        print(
-            f"::warning::rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}", flush=True
-        )
+        reason = f"rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}"
+        print(f"::warning::{reason}", flush=True)
         # The killed CLI wrote no result, so without this the newest log is an
         # EARLIER rung's and the gate reports that rung's failure as the run's.
         # No cost field: a killed read may have billed, and the log cannot say.
@@ -216,7 +215,7 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
                         "type": "result",
                         "is_error": True,
                         "timed_out_after_seconds": timeout,
-                        "result": f"rung {index} hit REVIEW_TIMEOUT_SECONDS={timeout}",
+                        "result": reason,
                     }
                 ]
             ),
