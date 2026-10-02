@@ -19,6 +19,7 @@ test is the WALK: which rungs run, with which credential, through which variable
 
 import importlib.util
 import json
+import subprocess
 import os
 import sys
 from pathlib import Path
@@ -252,3 +253,54 @@ def test_the_agent_can_read_its_own_instructions() -> None:
     workspace `Read(./**)` covers. Without this grant the agent is told to follow
     a file it cannot open."""
     assert "Read(/{r}/**)" in _module().TOOL_GRANT
+
+
+def test_a_timed_out_last_rung_is_what_the_gate_reports(tmp_path: Path) -> None:
+    """Rung 1 is refused with a 401 and the paid rung then hits the wall clock. The
+    killed CLI writes nothing, so a gate fed the newest NON-EMPTY log reports rung
+    1's 401 as the run's failure and sends the reader to rotate a dead token
+    instead of the timeout. Driven through the real attempt() and the real gate,
+    with only the CLI replaced, because the bug sits between the two."""
+    module = _module()
+    out = tmp_path / "out"
+
+    def fake_run(*_args, stdout, env, **_kwargs):
+        if "CLAUDE_CODE_OAUTH_TOKEN" in env:
+            refused = {"type": "result", "is_error": True, "total_cost_usd": 0}
+            refused["api_error_status"] = 401
+            stdout.write(json.dumps([refused]).encode())
+            return None
+        raise module.subprocess.TimeoutExpired(cmd="claude", timeout=1500)
+
+    real_run, real_sleep = module.subprocess.run, module.time.sleep
+    module.subprocess.run = fake_run
+    module.time.sleep = lambda _seconds: None
+    old = dict(os.environ)
+    os.environ.update(
+        {
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(out),
+            "PR_INPUT_DIR": str(tmp_path),
+            "PROMPT_FILE": "p.md",
+            "MODEL": "m",
+            "RUNG_1_TOKEN": OAT_1,
+            "RUNG_8_TOKEN": PAID,
+        }
+    )
+    try:
+        module.main()
+    finally:
+        module.subprocess.run, module.time.sleep = real_run, real_sleep
+        os.environ.clear()
+        os.environ.update(old)
+    execution_file = out.read_text(encoding="utf-8").removeprefix("execution_file=")
+    gate = subprocess.run(
+        [sys.executable, str(LADDER.parent / "checks" / "claude-execution.py")],
+        env={"PATH": os.environ["PATH"], "EXECUTION_FILE": execution_file.strip()},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert gate.returncode == 1
+    assert "hit its wall clock after 1500s" in gate.stderr
+    assert "401" not in gate.stderr
