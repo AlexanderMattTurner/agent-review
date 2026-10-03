@@ -25,3 +25,16 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  # This repo's own override of the Claude Code CLI pin, which
+  # .github/scripts/install-claude-cli.sh reads before the template's synced
+  # default in .github/claude-cli-default. Its own package.json, outside the
+  # pnpm workspace, so a bump touches nothing else.
+  - package-ecosystem: "npm"
+    directory: "/.github/claude-cli"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "@anthropic-ai/claude-code"
+    cooldown:
+      default-days: 7

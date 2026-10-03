@@ -55,7 +55,7 @@ had_deltas=true
 block="$(mktemp)"
 {
   printf '%s\n' "$REVIEW_START"
-  printf '## Merge-resolution review (Sonnet 5)\n\n'
+  printf '## Merge-resolution review\n\n'
   if [[ "$had_deltas" == "true" ]]; then
     # Sanitize the model output before it reaches the comment.
     node .github/scripts/sanitize-pr-input.mjs <"$review"
