@@ -25,3 +25,15 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  # The Claude Code CLI pin that .github/scripts/install-claude-cli.sh and
+  # .github/reviewer/install-claude-cli.sh read. Its own package.json, outside
+  # the pnpm workspace, so a bump touches nothing else.
+  - package-ecosystem: "npm"
+    directory: "/.github/claude-cli"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "@anthropic-ai/claude-code"
+    cooldown:
+      default-days: 2

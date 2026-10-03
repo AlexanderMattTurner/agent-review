@@ -12,14 +12,14 @@ set -euo pipefail
 # version read from there would let the repository under review choose which CLI
 # binary reads its diff.
 _reviewer_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-_pin_file="${_reviewer_root}/.github/claude-cli-version"
+_pin_file="${_reviewer_root}/.github/claude-cli/package.json"
 if [[ ! -f "$_pin_file" ]]; then
   echo "no ${_pin_file}: the reviewer has no pinned claude-code version to install" >&2
   exit 1
 fi
-version="$(tr -d '[:space:]' <"$_pin_file")"
-if [[ -z "$version" ]]; then
-  echo "${_pin_file} is empty; it must hold one @anthropic-ai/claude-code version" >&2
+version="$(jq -r '.dependencies["@anthropic-ai/claude-code"]' "$_pin_file" 2>/dev/null || true)"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "${_pin_file} must pin dependencies[\"@anthropic-ai/claude-code\"] to one exact version, got '${version}'" >&2
   exit 1
 fi
 # Idempotent: a claude already at the pin needs no install.

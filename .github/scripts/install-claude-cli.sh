@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 # Install @anthropic-ai/claude-code globally, pinned to the version
-# .github/claude-cli-version names — one file, so every job that reaches for the
-# CLI runs the same build.
+# .github/claude-cli/package.json names — one file, so every job that reaches
+# for the CLI runs the same build, and Dependabot bumps it.
 #
-# The pin is its own file rather than a package.json devDependency because
-# nothing here imports the CLI: it is invoked as a binary. Listing it as a
-# dependency makes `pnpm install` refuse the whole workspace over the package's
-# unapproved install scripts (ERR_PNPM_IGNORED_BUILDS), which fails every job
-# that installs node dependencies for unrelated reasons.
+# The pin is its own package.json, outside the pnpm workspace, rather than a
+# root devDependency: nothing here imports the CLI, and listing it at the root
+# makes `pnpm install` refuse the whole workspace over the package's unapproved
+# install scripts (ERR_PNPM_IGNORED_BUILDS).
 #
-# Reads the pin relative to this script, so it does not depend on the caller's
-# current directory.
+# allow-unsynced: .github/claude-cli/package.json — each repo owns its pin, and
+# a missing file fails below naming the path.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/retry.bash disable=SC1091
 source "$SCRIPT_DIR/lib/retry.bash"
 
-pin_file="${SCRIPT_DIR}/../claude-cli-version"
-version="$(tr -d '[:space:]' <"$pin_file")"
+pin_file="$(cd "${SCRIPT_DIR}/.." && pwd)/claude-cli/package.json"
+version="$(jq -r '.dependencies["@anthropic-ai/claude-code"]' "$pin_file" 2>/dev/null || true)"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "could not read a pinned @anthropic-ai/claude-code version from ${pin_file}, got '${version}'" >&2
   exit 1

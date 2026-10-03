@@ -81,23 +81,55 @@ test("template-sync delivers the mergiraf pin install-mergiraf reads", () => {
   }
 });
 
-test("template-sync delivers the CLI pin install-claude-cli reads", () => {
+// Each repo owns its CLI pin so Dependabot bumps it there; the sync must not
+// deliver one. The installer reads the consumer's own pin, and without one it
+// fails naming the file to create.
+function writeCliPin(root, pin) {
+  const dir = join(root, ".github", "claude-cli");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ dependencies: { "@anthropic-ai/claude-code": pin } }),
+  );
+}
+
+const CLI_STUBS = {
+  npm: 'echo "REACHED-INSTALL $*" >&2\nexit 0',
+  claude: 'echo "2.0.0"',
+};
+
+test("install-claude-cli installs the version the consumer's own pin names", () => {
   const root = consumerTree();
   try {
-    const run = runInstaller(root, "install-claude-cli.sh", {
-      npm: 'echo "REACHED-INSTALL $*" >&2\nexit 0',
-      claude: 'echo "2.0.0"',
-    });
-    assert.doesNotMatch(run.stderr, /No such file or directory/);
+    writeCliPin(root, "9.8.7");
+    const run = runInstaller(root, "install-claude-cli.sh", CLI_STUBS);
     assert.match(
       run.stderr,
-      /REACHED-INSTALL .*@anthropic-ai\/claude-code@\d+\.\d+\.\d+/,
+      /REACHED-INSTALL install -g @anthropic-ai\/claude-code@9\.8\.7$/m,
     );
     assert.equal(run.status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const [name, pin] of [
+  ["no pin file", null],
+  ["a range instead of an exact version", "^9.8.7"],
+]) {
+  test(`install-claude-cli refuses ${name}, naming the pin file`, () => {
+    const root = consumerTree();
+    try {
+      if (pin !== null) writeCliPin(root, pin);
+      const run = runInstaller(root, "install-claude-cli.sh", CLI_STUBS);
+      assert.notEqual(run.status, 0);
+      assert.match(run.stderr, /\.github\/claude-cli\/package\.json/);
+      assert.doesNotMatch(run.stderr, /REACHED-INSTALL/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 // The commit-msg hook passes this path to commitlint with no fallback, and the
 // hook runs under `set -euo pipefail`. Undelivered, every commit in the consumer
