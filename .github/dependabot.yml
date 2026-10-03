@@ -26,9 +26,10 @@ updates:
     cooldown:
       default-days: 7
 
-  # The Claude Code CLI pin that .github/scripts/install-claude-cli.sh and
-  # .github/reviewer/install-claude-cli.sh read. Its own package.json, outside
-  # the pnpm workspace, so a bump touches nothing else.
+  # This repo's own override of the Claude Code CLI pin, which
+  # .github/scripts/install-claude-cli.sh reads before the template's synced
+  # default in .github/claude-cli-default. Its own package.json, outside the
+  # pnpm workspace, so a bump touches nothing else.
   - package-ecosystem: "npm"
     directory: "/.github/claude-cli"
     schedule:
@@ -36,4 +37,4 @@ updates:
     allow:
       - dependency-name: "@anthropic-ai/claude-code"
     cooldown:
-      default-days: 2 # zizmor: ignore[dependabot-cooldown] — Anthropic publishes this CLI, and a new model needs its release fast
+      default-days: 7

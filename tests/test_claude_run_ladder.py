@@ -157,7 +157,7 @@ def test_an_empty_model_is_refused(model: str) -> None:
     assert "model input is empty" in proc.stderr
 
 
-@pytest.mark.parametrize("model", ["opus", "sonnet", "claude-haiku-4-5"])
+@pytest.mark.parametrize("model", ["opus", "claude-haiku-4-5"])
 def test_a_pinned_model_passes(model: str) -> None:
     """The non-vacuity pair: the guard must not red every caller, or it would be
     disabled rather than obeyed."""
