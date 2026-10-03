@@ -60,7 +60,7 @@ def _walk(
         "GITHUB_OUTPUT": str(tmp_path / "out"),
         "PR_INPUT_DIR": str(tmp_path / "pr-input"),
         "PROMPT_FILE": "prompt.md",
-        "MODEL": "claude-opus-5",
+        "MODEL": "opus",
     }
     (tmp_path / "pr-input").mkdir(exist_ok=True)
     for index, value in tokens.items():

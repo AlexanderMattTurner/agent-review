@@ -260,7 +260,7 @@ jobs:
           # first-pass reviewer (base-only checkout, least-privilege token,
           # sanitized data-only input).
           allowed_non_write_users: "*"
-          model: claude-sonnet-5
+          model: sonnet
           claude_args: >-
             --setting-sources user
             --allowedTools "Read,Grep,Glob,Write"

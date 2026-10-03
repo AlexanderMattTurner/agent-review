@@ -37,7 +37,7 @@ on:
       model:
         description: "The model behind every verdict. A PR gets few whole-diff reads and they gate the merge, so this is not a place to economize."
         required: false
-        default: "claude-opus-5"
+        default: "opus"
         type: string
       model-low:
         description: "A cheaper model for the shards of a big pull request that do not need the top one. Empty (the default) reads every shard with `model`. It applies to a SHARDED read only: a pull request small enough for one read is already the cheap case. A shard takes it when every file in it matches `low-tier-paths`, or when the whole diff is over `bulk-diff-lines`."

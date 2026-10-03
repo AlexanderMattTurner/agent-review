@@ -3,7 +3,7 @@
 
 Spends real model cost. NEVER invoked by CI or by any test — run it by hand:
 
-    python3 tests/eval/run-live.py --max-cases 3 --model claude-opus-5
+    python3 tests/eval/run-live.py --max-cases 3 --model opus
 
 For each selected case this builds the same PR_INPUT_DIR layout the production
 reviewer builds (diff.txt, meta.txt, sanitizer-report.txt, context.txt via the
