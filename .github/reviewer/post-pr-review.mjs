@@ -90,6 +90,10 @@ const findings = Array.isArray(review.findings) ? review.findings : [];
 const summary = defuseHtmlComments(
   typeof review.summary === "string" ? review.summary.trim() : "",
 );
+// Optional Mermaid source; GitHub renders a `mermaid` fence in a review body as the diagram.
+const diagram = defuseHtmlComments(
+  typeof review.diagram === "string" ? review.diagram.trim() : "",
+);
 
 // Every review posts as a COMMENT; the review event carries no merge consequence at all. The merge
 // lever is the inline threads the review-findings status gate reads, never an
@@ -239,15 +243,15 @@ const severityMarker = (sev) =>
     ? `\n\n<!-- severity: ${sev} -->${DELTA_READ ? "\n<!-- read: delta -->" : ""}`
     : "";
 
-// A `suggestion` renders as a GitHub suggested-change block the author can apply with one click. Suggestions can only target the new file (RIGHT side), so a finding carrying one is forced RIGHT. A fence longer than any run of backticks in the suggestion keeps code containing ``` from breaking out of the block.
-/** @param {string} text @returns {string} */
-function suggestionBlock(text) {
+// A fence longer than any run of backticks in the text keeps model-authored text containing ``` from breaking out of the block and rendering as markdown.
+/** @param {string} info @param {string} text @returns {string} */
+function fencedBlock(info, text) {
   const longest = Math.max(
     0,
     ...(text.match(/`+/g) || []).map((run) => run.length),
   );
   const fence = "`".repeat(Math.max(3, longest + 1));
-  return `\n\n${fence}suggestion\n${text}\n${fence}`;
+  return `${fence}${info}\n${text}\n${fence}`;
 }
 
 /** @param {string} p @param {number|null} l */
@@ -344,8 +348,9 @@ for (const f of findings) {
       comment.start_line = start;
       comment.start_side = "RIGHT";
     }
+    // A `suggestion` renders as a GitHub suggested-change block the author applies with one click. It can only target the new file, so a finding carrying one is forced RIGHT.
     if (hasSuggestion && anchorSide === "RIGHT")
-      comment.body += suggestionBlock(defuseHtmlComments(f.suggestion));
+      comment.body += `\n\n${fencedBlock("suggestion", defuseHtmlComments(f.suggestion))}`;
     comment.body += severityMarker(sev);
     comments.push(comment);
   } else {
@@ -378,6 +383,7 @@ for (const c of comments) c.body = await scrub(c.body);
 
 const bodyParts = [];
 if (summary) bodyParts.push(summary);
+if (diagram) bodyParts.push(fencedBlock("mermaid", diagram));
 if (spill.length > 0)
   bodyParts.push(`#### Additional notes\n${spill.join("\n")}`);
 const body = (await scrub(bodyParts.join("\n\n"))).trim();
