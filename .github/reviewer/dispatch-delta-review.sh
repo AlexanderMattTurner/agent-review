@@ -110,16 +110,20 @@ gating_count="$(jq 'length' <<<"$gating")"
 [[ "$gating_count" -eq 0 ]] ||
   skip "${gating_count} unresolved reviewer finding(s) still hold it — the author has work to push"
 
-# Readiness, off the rollup in hand: the NEWEST run of each check must have
-# COMPLETED with a conclusion that blocks no merge, and each commit status must be
-# SUCCESS. A run that a later run cancelled stays in the rollup; an unstarted run
-# sorts newest. The review gate is excluded, because it is red exactly while this
-# read is owed and waiting for it would deadlock.
+# Readiness: the NEWEST run of each check (a cancelled older run stays in the
+# rollup) must have COMPLETED without blocking a merge, and each status must be
+# SUCCESS. An unstarted run (gh exports Go's zero time) sorts newest; a check no
+# workflow produced is never merged with a same-named one. The review gate is
+# excluded: it is red exactly while this read is owed, so waiting would deadlock.
 not_ready="$(jq -r --arg gate "$GATE_CONTEXT" '
   [ .statusCheckRollup[]?
     | select((.name // .context // "") != $gate) ]
-  | group_by([.__typename, .workflowName // "", .name // .context // ""])
-  | [ .[] | max_by(.startedAt // "9999")
+  | to_entries
+  | group_by([.value.__typename,
+      (if (.value.workflowName // "") == "" then .key else .value.workflowName end),
+      (.value.name // .value.context // "")])
+  | [ .[] | map(.value)
+    | max_by((.startedAt // "") | if . == "" or startswith("0001-") then "9999" else . end)
     | select(
         if .__typename == "StatusContext"
         then ((.state // "") | ascii_upcase) != "SUCCESS"

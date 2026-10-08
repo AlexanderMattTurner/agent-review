@@ -335,6 +335,27 @@ LATE = "2026-01-02T00:05:00Z"
         ),
         pytest.param(
             [
+                check("Advisory", started=EARLY),
+                check(
+                    "Advisory",
+                    status="QUEUED",
+                    conclusion="",
+                    started="0001-01-01T00:00:00Z",
+                ),
+            ],
+            False,
+            id="passed-then-queued-zero-time",
+        ),
+        pytest.param(
+            [
+                check("lint", workflow="", conclusion="FAILURE", started=EARLY),
+                check("lint", workflow="", started=LATE),
+            ],
+            False,
+            id="same-name-no-workflow-failed",
+        ),
+        pytest.param(
+            [
                 check("decide", workflow="Lint", conclusion="FAILURE", started=EARLY),
                 check("decide", workflow="Tests", started=LATE),
             ],
@@ -349,7 +370,8 @@ def test_only_the_newest_run_of_each_check_decides_readiness(
     """A run that a later run of the same workflow cancelled stays in the rollup.
     Read as a red, it held a green pull request back forever; GitHub's merge box
     reads only the newest run, and so does this. A same-named job of ANOTHER
-    workflow is a different check, so its red still holds the read back."""
+    workflow, or of no workflow at all (another app's check), is a different
+    check, so its red still holds the read back."""
     _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], rollup=rollup)
     assert len(_dispatched(calls)) == (1 if ready else 0), calls
 
