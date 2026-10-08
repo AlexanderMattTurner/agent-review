@@ -12,6 +12,10 @@ the prose from the release's commits.
 
 ## Unreleased
 
+### Added
+
+- A review can now carry a system diagram. When a pull request changes how three or more components talk to each other, the reviewer writes a Mermaid flowchart, and the posted review shows it under the summary, where GitHub draws it. It costs no extra model call: the same read that writes the summary writes the diagram. A sharded read posts none, because each shard sees only part of the diff. A consumer that passes its own `review-prompt` gets a diagram only once that prompt asks for the `diagram` field.
+
 ### Changed
 
 - The reviewer now spends the paid Anthropic API key last, not first. A review tries every Claude Code subscription token before it bills real credits. The paid key moves from `rung_1` to `rung_8`, and rungs 1 to 7 hold the subscription tokens. No single rung is required any more: the review refuses to run only when no rung holds a paid key. A caller that still passes the paid key in `rung_1` keeps working: the reviewer tells a paid key from a subscription token by its prefix, authenticates it the right way, and tries it last. The free same-credential retry now runs only when one credential is configured.

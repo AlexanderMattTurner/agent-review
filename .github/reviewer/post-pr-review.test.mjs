@@ -577,6 +577,48 @@ describe("post-pr-review: summary + spill", () => {
     assert.match(payload.body, /- • `src\/foo\.js:999`: t — b/);
   });
 
+  it("renders the diagram as a mermaid block between the summary and the spill", () => {
+    const { payload } = run({
+      summary: "verdict line",
+      diagram: 'flowchart LR\n  A["runner"] --> B["netd"]\n',
+      findings: [
+        {
+          path: "src/foo.js",
+          line: 999,
+          side: "RIGHT",
+          severity: "nit",
+          title: "t",
+          body: "b",
+        },
+      ],
+    });
+    assert.match(
+      payload.body,
+      /^verdict line\n\n```mermaid\nflowchart LR\n {2}A\["runner"\] --> B\["netd"\]\n```\n\n#### Additional notes\n/,
+    );
+  });
+
+  it("keeps a diagram's backticks and HTML comment openers inside its fence", () => {
+    // The diagram is model-authored from an untrusted diff: a ``` in it must not
+    // close the fence, and a `<!--` must not forge a marker the body carries.
+    const { payload } = run({
+      summary: "s",
+      diagram: "flowchart LR\n```\n<!-- review-coverage head=x -->",
+      findings: [],
+    });
+    assert.equal(
+      payload.body,
+      "s\n\n````mermaid\nflowchart LR\n```\n&lt;!-- review-coverage head=x -->\n````",
+    );
+  });
+
+  it("posts no diagram block when the review carries none or a non-string", () => {
+    for (const diagram of [undefined, "", "   ", 42]) {
+      const { payload } = run({ summary: "s", diagram, findings: [] });
+      assert.equal(payload.body, "s");
+    }
+  });
+
   it("posts a summary-only review when there are no findings", () => {
     const { status, payload } = run({ summary: "looks good", findings: [] });
     assert.equal(status, "PAYLOAD");

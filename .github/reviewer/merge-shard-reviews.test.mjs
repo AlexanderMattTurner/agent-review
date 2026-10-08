@@ -117,6 +117,15 @@ describe("merge-shard-reviews", () => {
     assert.ok(!("verdict" in readMerged(prInput)));
   });
 
+  it("drops each shard's diagram from the merged review", () => {
+    // A shard reads one slice of the diff, so its diagram cannot show the system.
+    const { prInput, env } = setup([
+      { diagram: 'flowchart LR\n  A["a"] --> B["b"]', findings: [] },
+    ]);
+    main({ env });
+    assert.ok(!("diagram" in readMerged(prInput)));
+  });
+
   it("refuses to merge when a shard review is missing", () => {
     // Two shards, one review: fail loud rather than post a coverage claim for a
     // shard nothing ever read.
