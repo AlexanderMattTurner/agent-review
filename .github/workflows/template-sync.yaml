@@ -322,15 +322,19 @@ jobs:
       #
       # After create-pull-request the workspace is back on the base ref and the
       # markers live on the sync branch, so switch to it before resolving.
+      #
+      # The resolver needs marker-bearing files. A sync whose only conflicts are
+      # markerless (CI-loaded paths) sets has_conflicts but emits no
+      # conflict_files, and template-sync-resolve.sh refuses an empty list.
       - name: Install mergiraf (pinned, digest-verified)
-        if: inputs.dry-run != true && steps.sync.outputs.has_conflicts == 'true' && steps.create-pr.outputs.pull-request-number
+        if: inputs.dry-run != true && steps.sync.outputs.conflict_files != '' && steps.create-pr.outputs.pull-request-number
         env:
           SYNC_TOOLS: ${{ steps.tools.outputs.scripts }}
         run: bash "$SYNC_TOOLS/install-mergiraf.sh"
 
       - name: Resolve the sync conflicts
         id: resolve
-        if: inputs.dry-run != true && steps.sync.outputs.has_conflicts == 'true' && steps.create-pr.outputs.pull-request-number
+        if: inputs.dry-run != true && steps.sync.outputs.conflict_files != '' && steps.create-pr.outputs.pull-request-number
         env:
           CONFLICT_FILES: ${{ steps.sync.outputs.conflict_files }}
           PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
