@@ -20,6 +20,7 @@ test is the WALK: which rungs run, with which credential, through which variable
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -252,3 +253,60 @@ def test_the_agent_can_read_its_own_instructions() -> None:
     workspace `Read(./**)` covers. Without this grant the agent is told to follow
     a file it cannot open."""
     assert "Read(/{r}/**)" in _module().TOOL_GRANT
+
+
+@pytest.mark.parametrize(
+    "tokens", [{1: OAT_1, 8: PAID}, {8: PAID}], ids=["after-a-401", "only-rung"]
+)
+def test_a_timed_out_last_rung_is_what_the_gate_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tokens: dict[int, str]
+) -> None:
+    """The paid rung hits the wall clock, after a subscription rung's 401 or as the
+    only attempt. The killed CLI writes nothing, so a gate fed the newest NON-EMPTY
+    log reports the 401 (or no log at all) instead of the timeout, and sends the
+    reader to rotate a token. Driven through the real attempt() and the real gate,
+    with only the CLI replaced, because the bug sits between the two."""
+    module = _module()
+    out = tmp_path / "out"
+
+    def fake_run(*_args, stdout, env, **_kwargs):
+        if "CLAUDE_CODE_OAUTH_TOKEN" in env:
+            refused = {"type": "result", "is_error": True, "total_cost_usd": 0}
+            refused["api_error_status"] = 401
+            stdout.write(json.dumps([refused]).encode())
+            return None
+        raise module.subprocess.TimeoutExpired(cmd="claude", timeout=1500)
+
+    # Both are the stdlib modules themselves; monkeypatch restores them.
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    for key, value in {
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "PR_INPUT_DIR": str(tmp_path),
+        "PROMPT_FILE": "p.md",
+        "MODEL": "m",
+        **{f"RUNG_{index}_TOKEN": token for index, token in tokens.items()},
+    }.items():
+        monkeypatch.setenv(key, value)
+    module.main()
+    monkeypatch.undo()
+
+    execution_file = out.read_text(encoding="utf-8").removeprefix("execution_file=")
+    gate_out = tmp_path / "gate-out"
+    gate = subprocess.run(
+        [sys.executable, str(LADDER.parent / "checks" / "claude-execution.py")],
+        env={
+            "PATH": os.environ["PATH"],
+            "EXECUTION_FILE": execution_file.strip(),
+            "GITHUB_OUTPUT": str(gate_out),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert gate.returncode == 1
+    assert "hit its wall clock after 1500s" in gate.stderr
+    assert "refused with HTTP" not in gate.stderr
+    # A killed read may have billed, so the gate must not grant a free retry.
+    assert gate_out.read_text(encoding="utf-8") == "execution_reached_model=true\n"
