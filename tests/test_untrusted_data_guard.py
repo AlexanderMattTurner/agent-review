@@ -5,8 +5,9 @@ again in each prompt doc, in several different phrasings — so the weakest word
 was the real trust boundary wherever it happened to sit.
 
 Each path now phrases it exactly once:
-  * claude-run callers get .github/prompts/untrusted-data-preamble.md, prepended
-    by the shared action whenever a caller declares untrusted input files.
+  * claude-run callers get .github/actions/claude-run/untrusted-data-preamble.md,
+    prepended by that shared action whenever a caller declares untrusted input
+    files.
   * the reusable PR reviewer (.github/workflows/review.yaml) is self-contained —
     it is cloned into a consumer repository that has neither that action nor that
     file — so its guard lives in run-review-ladder.py's own prompt, which every
@@ -25,8 +26,9 @@ import yaml
 
 from tests._helpers import REPO_ROOT, load_script
 
-SCRIPT = REPO_ROOT / ".github" / "scripts" / "compose-claude-prompt.sh"
-PREAMBLE = REPO_ROOT / ".github" / "prompts" / "untrusted-data-preamble.md"
+ACTION_DIR = REPO_ROOT / ".github" / "actions" / "claude-run"
+SCRIPT = ACTION_DIR / "compose-claude-prompt.sh"
+PREAMBLE = ACTION_DIR / "untrusted-data-preamble.md"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 PROMPTS = REPO_ROOT / ".github" / "prompts"
 REVIEWER = REPO_ROOT / ".github" / "reviewer"
@@ -35,6 +37,7 @@ LADDER = REVIEWER / "run-review-ladder.py"
 # repository content the pull request author chose, so every one must sit under
 # the guard.
 REVIEWER_INPUT_FILES = ("meta.txt", "diff.txt", "sanitizer-report.txt")
+ACTIONS = REPO_ROOT / ".github" / "actions"
 
 # Phrasings that mean "a guard was written here by hand". The canonical file is
 # the only place any of them may appear.
@@ -189,8 +192,15 @@ def test_the_guard_is_not_re_worded_anywhere_else() -> None:
         prompt = str((step.get("with") or {}).get("prompt", ""))
         if prompt:
             model_facing[f"prompt at {step.get('name')}"] = prompt
+    # A second copy can land in any tree: the prompt docs, the reviewer's own
+    # prompts, and the action directories, where an action's own model-facing
+    # data files now live.
     canonical = {PREAMBLE, LADDER}
-    for root, pattern in ((PROMPTS, "*.md"), (REVIEWER, "prompts/*.md")):
+    for root, pattern in (
+        (PROMPTS, "*.md"),
+        (REVIEWER, "prompts/*.md"),
+        (ACTIONS, "*.md"),
+    ):
         for path in root.rglob(pattern):
             if path not in canonical:
                 model_facing[str(path.relative_to(REPO_ROOT))] = path.read_text(

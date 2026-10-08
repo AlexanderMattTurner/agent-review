@@ -29,8 +29,6 @@ CASES = [
     ("template-sync.sh", ["GITHUB_OUTPUT"]),
     # cancel-pr-runs.sh requires REPO, HEAD_REF, HEAD_SHA, GH_TOKEN
     ("cancel-pr-runs.sh", ["REPO", "HEAD_REF", "HEAD_SHA", "GH_TOKEN"]),
-    # label-merge-conflicts.sh requires GH_TOKEN and REPO
-    ("label-merge-conflicts.sh", ["GH_TOKEN", "REPO"]),
     # PR-review suite. The first-pass reviewer's own scripts moved to
     # .github/reviewer/, where the reusable review.yaml runs them.
     ("auto-approve-skipped-pr.sh", ["PR", "GH_REPO"]),

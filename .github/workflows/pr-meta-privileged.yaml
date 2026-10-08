@@ -4,9 +4,10 @@ name: PR meta (privileged)
 #   * cancel — cancel a closed PR's orphaned in-flight runs (actions: write).
 #   * label  — label open PRs that have merge conflicts (pull-requests/issues: write).
 # Both run on pull_request_target so the token is write-capable from forks, and
-# both run NO PR-authored code: each sparse-checks-out only the trusted BASE
-# repo's .github/scripts at the base ref with persist-credentials:false, so the
-# elevated token never touches fork content.
+# both run NO PR-authored code: cancel sparse-checks-out only the trusted BASE
+# repo's .github/scripts, and label runs the resolver's labeler at a pinned SHA,
+# both with persist-credentials:false, so the elevated token never touches fork
+# content.
 #
 # These are kept in a SEPARATE file from the pr-meta gates on purpose: co-locating
 # a pull_request_target trigger with those gates would trip CodeQL's
@@ -69,7 +70,7 @@ jobs:
 
   # ── Merge-conflict labeler ─────────────────────────────────────────────────────────────────────────────────────────
   # pull_request_target (not pull_request) so the label write has a write-scoped
-  # token even from forks; it checks out only base-repo `.github/scripts` with no
+  # token even from forks; it runs the resolver's labeler at a pinned SHA with no
   # persisted credentials and runs no PR-authored code, so the elevated token
   # touches nothing the PR controls. Fires on schedule (6-hourly backstop for
   # lazily-computed UNKNOWN mergeability), push to main (the base moved → every
@@ -98,9 +99,15 @@ jobs:
       group: merge-conflict-labeler-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The labeler ships WITH the resolver it triggers, so no repository keeps a
+      # copy of it to drift from the label the resolver reads. The job holds a
+      # write token, so it runs a pinned commit, never a moving branch.
+      - name: Check out the resolver that provides the labeler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: .github/scripts
+          repository: AlexanderMattTurner/agent-resolve-merge-conflicts
+          ref: f6dea60f29ba915171ac9bf96e7dbcdcc4c819a0 # v1.40.2, same pin as auto-resolve-conflicts.yaml
+          path: resolver
           persist-credentials: false
       - name: Sync merge-conflict labels
         env:
@@ -116,4 +123,8 @@ jobs:
             ${{ github.event_name == 'pull_request_target' && '6'
              || github.event_name == 'push' && '4'
              || '2' }}
-        run: bash .github/scripts/label-merge-conflicts.sh
+          # Turns on the labeler's stale-base check: right after a base push
+          # GitHub may still answer with a verdict computed against the old
+          # base. Every full scan sets it; a PR event leaves it empty.
+          BASE_SHA: ${{ github.event_name != 'pull_request_target' && github.sha || '' }}
+        run: bash resolver/.github/resolver/label-merge-conflicts.sh
