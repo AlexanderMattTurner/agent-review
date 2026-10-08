@@ -303,6 +303,22 @@ LATE = "2026-01-02T00:05:00Z"
         ),
         pytest.param(
             [
+                check("Advisory", started=LATE),
+                check("Advisory", conclusion="CANCELLED", started=EARLY),
+            ],
+            True,
+            id="newest-listed-first",
+        ),
+        pytest.param(
+            [
+                check("Advisory", conclusion="FAILURE", started=LATE),
+                check("Advisory", started=EARLY),
+            ],
+            False,
+            id="newest-failure-listed-first",
+        ),
+        pytest.param(
+            [
                 check("Advisory", started=EARLY),
                 check("Advisory", conclusion="FAILURE", started=LATE),
             ],
