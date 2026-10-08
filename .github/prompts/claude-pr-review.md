@@ -151,7 +151,13 @@ verdict written, and the review step then fails as if you never reviewed. Write
     results from checks that are usually clean, and do not explain why an
     alternative you weighed lost in more than one sentence. Cut the draft, then cut
     it again; the second pass is where the win is.
-11. Write your review as JSON — and nothing else, valid JSON only — to the
+11. **Draw a `diagram` only when the diff changes how three or more components
+    talk to each other** — a new service, a new hop in a request path, a moved
+    trust boundary. Write Mermaid `flowchart LR` source with at most 12 nodes,
+    each label in double quotes, naming the components and the edges this PR
+    adds or changes. Leave the field out for any other diff, and on a shard
+    leg, whose slice cannot show the whole system; the merge step drops it.
+12. Write your review as JSON — and nothing else, valid JSON only — to the
     `review.json` path the caller gives you, in the format below.
 
 ## Output format
@@ -185,6 +191,7 @@ almost never get revisited once merged) — if yes, file it.
 {
   "summary": "<verdict line, then at most 3 sentences, then the ledger line. HARD CAP 120 WORDS — see the budget in step 10; markdown ok>",
   "verdict": "looks_good | needs_changes | blocking",
+  "diagram": "<optional Mermaid flowchart source, no fence — see step 11; omit the key when no diagram is owed>",
   "findings": [
     {
       "path": "<repo-relative file path exactly as it appears in the diff>",
