@@ -110,13 +110,16 @@ gating_count="$(jq 'length' <<<"$gating")"
 [[ "$gating_count" -eq 0 ]] ||
   skip "${gating_count} unresolved reviewer finding(s) still hold it — the author has work to push"
 
-# Readiness, off the rollup already in hand. A check run must have COMPLETED with
-# a conclusion that does not block a merge; a commit status must be SUCCESS. The
-# review gate is excluded by name, because it is red exactly while this read is
-# owed and waiting for it would deadlock.
+# Readiness, off the rollup in hand: the NEWEST run of each check must have
+# COMPLETED with a conclusion that blocks no merge, and each commit status must be
+# SUCCESS. A run that a later run cancelled stays in the rollup; an unstarted run
+# sorts newest. The review gate is excluded, because it is red exactly while this
+# read is owed and waiting for it would deadlock.
 not_ready="$(jq -r --arg gate "$GATE_CONTEXT" '
   [ .statusCheckRollup[]?
-    | select((.name // .context // "") != $gate)
+    | select((.name // .context // "") != $gate) ]
+  | group_by([.__typename, .workflowName // "", .name // .context // ""])
+  | [ .[] | max_by(.startedAt // "9999")
     | select(
         if .__typename == "StatusContext"
         then ((.state // "") | ascii_upcase) != "SUCCESS"

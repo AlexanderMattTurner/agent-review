@@ -68,12 +68,21 @@ def _review(
     }
 
 
-def check(name: str, *, conclusion: str = "SUCCESS", status: str = "COMPLETED") -> dict:
+def check(
+    name: str,
+    *,
+    conclusion: str = "SUCCESS",
+    status: str = "COMPLETED",
+    workflow: str = "CI",
+    started: str | None = "2026-01-02T00:00:00Z",
+) -> dict:
     return {
         "__typename": "CheckRun",
         "name": name,
+        "workflowName": workflow,
         "status": status,
         "conclusion": conclusion,
+        "startedAt": started,
     }
 
 
@@ -275,6 +284,58 @@ def test_a_concluded_check_that_blocks_no_merge_is_ready(
         rollup=[check("Unit tests", conclusion=conclusion)],
     )
     assert len(_dispatched(calls)) == 1, calls
+
+
+EARLY = "2026-01-02T00:00:00Z"
+LATE = "2026-01-02T00:05:00Z"
+
+
+@pytest.mark.parametrize(
+    ("rollup", "ready"),
+    [
+        pytest.param(
+            [
+                check("Advisory", conclusion="CANCELLED", started=EARLY),
+                check("Advisory", started=LATE),
+            ],
+            True,
+            id="cancelled-then-passed",
+        ),
+        pytest.param(
+            [
+                check("Advisory", started=EARLY),
+                check("Advisory", conclusion="FAILURE", started=LATE),
+            ],
+            False,
+            id="passed-then-failed",
+        ),
+        pytest.param(
+            [
+                check("Advisory", started=EARLY),
+                check("Advisory", status="QUEUED", conclusion="", started=None),
+            ],
+            False,
+            id="passed-then-queued-unstarted",
+        ),
+        pytest.param(
+            [
+                check("decide", workflow="Lint", conclusion="FAILURE", started=EARLY),
+                check("decide", workflow="Tests", started=LATE),
+            ],
+            False,
+            id="same-name-other-workflow-failed",
+        ),
+    ],
+)
+def test_only_the_newest_run_of_each_check_decides_readiness(
+    tmp_path: Path, rollup: list[dict], ready: bool
+) -> None:
+    """A run that a later run of the same workflow cancelled stays in the rollup.
+    Read as a red, it held a green pull request back forever; GitHub's merge box
+    reads only the newest run, and so does this. A same-named job of ANOTHER
+    workflow is a different check, so its red still holds the read back."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], rollup=rollup)
+    assert len(_dispatched(calls)) == (1 if ready else 0), calls
 
 
 def test_the_review_gate_being_red_never_blocks_the_read(tmp_path: Path) -> None:
