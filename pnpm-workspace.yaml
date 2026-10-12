@@ -14,5 +14,9 @@ minimumReleaseAgeExclude:
 
 # GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 DoS via malformed TOML (high).
 # Transitive via markdownlint-cli2; override until markdownlint-cli2 bumps it.
+#
+# GHSA-238p-pmpm-9mq7: katex <0.18.2 prototype pollution (low).
+# Transitive via markdownlint-cli2.
 overrides:
   smol-toml: ">=1.7.1"
+  katex: ">=0.18.2"
