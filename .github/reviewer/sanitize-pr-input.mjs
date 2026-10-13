@@ -11,6 +11,11 @@
 // exfil-URL scan is run separately and NON-destructively: suspicious URLs are
 // reported, never removed.
 //
+// Exits 3 when the sanitizer itself throws on this input, with the stack on
+// stderr and nothing on stdout. A PR can trip the base branch's sanitizer with its
+// own text (a fix for that very crash quotes the input), so the caller holds such a
+// PR for a human instead of failing. Any other non-zero exit is a broken install.
+//
 // Usage: node sanitize-pr-input.mjs < raw.txt > cleaned.txt 2> report.txt
 import { sanitize } from "agent-sanitizer";
 import { detectExfil } from "agent-sanitizer/html";
@@ -19,11 +24,20 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const input = Buffer.concat(chunks).toString("utf8");
 
-const { cleaned, found, warnings } = await sanitize(input, { html: false });
+const SANITIZER_THREW = 3;
+
+let cleaned, found, warnings, threats;
+try {
+  ({ cleaned, found, warnings } = await sanitize(input, { html: false }));
+  threats = detectExfil(input) || [];
+} catch (error) {
+  process.stderr.write(`${error?.stack ?? error}\n`);
+  process.exit(SANITIZER_THREW);
+}
 
 const exfilReasons = [
   ...new Set(
-    (detectExfil(input) || []).map(
+    threats.map(
       (threat) =>
         `${threat.isImage ? "image" : "link"} to ${threat.target}: ${threat.reason}`,
     ),

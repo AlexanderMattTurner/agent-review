@@ -184,6 +184,7 @@ def _run(
     log.write_text("", encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT)],
+        check=False,
         capture_output=True,
         text=True,
         env={
@@ -220,6 +221,7 @@ def _assert_finding_comment(post: dict) -> None:
     assert fields["subject_type"] == "file"
     body = fields["body"]
     assert "🔴" in body  # the gate's pre-marker icon fallback
+    assert NOTICE in body  # why the PR could not be read: too large, or a crash
     assert OVERSIZED_MARKER in body  # the rerun-idempotence key
     assert "<!-- severity: blocking -->" in body  # what makes the gate red on it
 
