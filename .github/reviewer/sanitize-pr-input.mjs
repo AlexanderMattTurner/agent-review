@@ -11,10 +11,8 @@
 // exfil-URL scan is run separately and NON-destructively: suspicious URLs are
 // reported, never removed.
 //
-// Exits 3 when the sanitizer itself throws on this input, with the stack on
-// stderr and nothing on stdout. A PR can trip the base branch's sanitizer with its
-// own text (a fix for that very crash quotes the input), so the caller holds such a
-// PR for a human instead of failing. Any other non-zero exit is a broken install.
+// Exits 3 when sanitize or detectExfil throws on this input: the stack goes to
+// stderr and nothing to stdout. Any other non-zero exit is a broken install.
 //
 // Usage: node sanitize-pr-input.mjs < raw.txt > cleaned.txt 2> report.txt
 import { sanitize } from "agent-sanitizer";

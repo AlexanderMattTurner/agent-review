@@ -90,6 +90,15 @@ _REDIRECT_HOOK = """export async function resolve(specifier, context, next) {
 """
 
 
+def _commands_off_block(stderr: str) -> str:
+    """The text the script printed with workflow commands off: from the
+    `::stop-commands::<token>` line to the `::<token>::` line that ends it."""
+    marker = "::stop-commands::"
+    start = stderr.index(marker) + len(marker)
+    token, _, rest = stderr[start:].partition("\n")
+    return rest[: rest.index(f"::{token}::")]
+
+
 def _throwing_sanitizer_node(tmp_path: Path) -> str:
     """A fake `node` body that runs the real script under the throwing stub."""
     real_node = shutil.which("node")
@@ -308,7 +317,7 @@ def _run(
     compare: dict | None = None,
     template_tag: bool = False,
     pr_body: str = "b",
-    node_script: str | None = None,
+    node_script: str = 'tee -a "$SANITIZE_INPUT"',
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
     """Run the script with fakes on PATH; return (proc, GITHUB_OUTPUT map, input dir).
 
@@ -329,7 +338,7 @@ def _run(
         compare=compare,
         template_tag=template_tag,
         pr_body=pr_body,
-        **({"node_script": node_script} if node_script else {}),
+        node_script=node_script,
     )
     extra_env = {}
     if flaky_budget:
@@ -426,16 +435,17 @@ def test_a_broken_sanitizer_reds_the_job_with_its_reason(tmp_path: Path) -> None
     job goes red, and the log carries the reason rather than a report file nobody
     prints."""
     reason = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'agent-sanitizer'"
-    proc, outputs, _ = _run(
+    proc, outputs, input_dir = _run(
         tmp_path,
         files=2,
         max_diff_lines=100,
-        node_script=f'cat >/dev/null\necho "{reason}" >&2\nexit 1',
+        node_script=f'cat >/dev/null\necho partial\necho "{reason}" >&2\nexit 1',
     )
     assert proc.returncode == 1
     assert "::error::the sanitizer crashed on the diff" in proc.stderr
-    assert reason in proc.stderr
+    assert reason in _commands_off_block(proc.stderr)
     assert "unreviewable" not in outputs
+    assert not (input_dir / "diff.txt").exists(), "a partial output must not survive"
 
 
 @pytest.mark.parametrize(
@@ -464,7 +474,7 @@ def test_a_sanitizer_that_throws_on_the_pr_holds_it_for_a_human(
     assert outputs["unreviewable"] == "true"
     assert outputs["sharded"] == "false"
     assert f"::error::the sanitizer crashed on the {what}" in proc.stderr
-    assert "TypeError: cannot parse" in proc.stderr
+    assert "TypeError: cannot parse" in _commands_off_block(proc.stderr)
     notice = (input_dir / "oversized-notice.txt").read_text(encoding="utf-8")
     assert f"crashed on this PR's {what}" in notice
     assert not (input_dir / crashed_file).exists()

@@ -417,7 +417,7 @@ jobs:
           SINCE: ${{ needs.decide.outputs.since }}
         run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
 
-      - name: Post the oversized notice as a review plus a human-review thread
+      - name: Post the human-review notice as a review plus a thread
         # An unreviewable PR gets no automated read, so the notice
         # posts as a COMMENT review plus one thread a HUMAN resolves after
         # reviewing — the PR merges on that sign-off instead of staying blocked.

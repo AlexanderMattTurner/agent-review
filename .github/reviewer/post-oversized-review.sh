@@ -96,9 +96,9 @@ fi
 # (2) The 🔴 finding thread a human resolves after reviewing.
 finding_prose="$(mktemp)"
 {
-  printf '🔴 The automated reviewer could not read this PR — it needs a HUMAN review.\n\n'
+  printf '🔴 The automated reviewer could not read this PR.\n\n'
   cat "$notice"
-  printf '\nNo automated pass has covered it. Review the PR yourself, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
+  printf '\nResolve this thread after your review; the review-findings gate stays red until it is resolved.\n'
 } >"$finding_prose"
 raise_human_review_finding "$OVERSIZED_REVIEW_MARKER" "$finding_prose"
 rm -f "$finding_prose"

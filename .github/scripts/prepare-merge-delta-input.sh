@@ -73,8 +73,12 @@ fi
 if [[ -s "$raw" ]]; then
   if ! node .github/scripts/sanitize-pr-input.mjs \
     <"$raw" >"${PR_INPUT_DIR}/merge-delta.txt" 2>"$err"; then
+    # Workflow commands are off while the error prints: it can quote PR text.
     echo "::error::the sanitizer crashed on the merge deltas:" >&2
+    token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    echo "::stop-commands::${token}" >&2
     cat "$err" >&2
+    echo "::${token}::" >&2
     exit 1
   fi
   mv "$err" "${PR_INPUT_DIR}/merge-delta.report.txt"
