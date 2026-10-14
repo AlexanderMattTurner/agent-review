@@ -11,8 +11,9 @@
 // exfil-URL scan is run separately and NON-destructively: suspicious URLs are
 // reported, never removed.
 //
-// Exits 3 when sanitize or detectExfil throws on this input: the stack goes to
-// stderr and nothing to stdout. Any other non-zero exit is a broken install.
+// Exits 3 when sanitize throws on this input: the stack goes to stderr and
+// nothing to stdout. Any other non-zero exit is a broken install. A throw in the
+// exfil scan only adds a report line, because that scan never changes the text.
 //
 // Usage: node sanitize-pr-input.mjs < raw.txt > cleaned.txt 2> report.txt
 import { sanitize } from "agent-sanitizer";
@@ -24,13 +25,22 @@ const input = Buffer.concat(chunks).toString("utf8");
 
 const SANITIZER_THREW = 3;
 
-let cleaned, found, warnings, threats;
+let cleaned, found, warnings;
 try {
   ({ cleaned, found, warnings } = await sanitize(input, { html: false }));
-  threats = detectExfil(input) || [];
 } catch (error) {
   process.stderr.write(`${error?.stack ?? error}\n`);
   process.exit(SANITIZER_THREW);
+}
+
+// The report reaches the model, so it names only the error's class: the message
+// can quote the input.
+let threats = [];
+let scanFailure = "";
+try {
+  threats = detectExfil(input) || [];
+} catch (error) {
+  scanFailure = `Exfil URL scan failed (${error?.name ?? "Error"}), so no URL in this input was checked`;
 }
 
 const exfilReasons = [
@@ -49,4 +59,5 @@ if (found.length > 0)
   report.unshift(`Neutralized categories: ${found.join(", ")}`);
 if (exfilReasons.length > 0)
   report.push(`Exfil-shaped URLs detected: ${exfilReasons.join("; ")}`);
+if (scanFailure) report.push(scanFailure);
 if (report.length > 0) process.stderr.write(`${report.join("\n")}\n`);

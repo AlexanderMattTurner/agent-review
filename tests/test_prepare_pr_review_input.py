@@ -69,18 +69,23 @@ open(path, "w", encoding="utf-8").writelines(out)
 
 
 # The markup `main`'s sanitizer threw on in agent-sanitizer#451. That PR fixed the
-# crash, so its fixtures and its description both quoted this text.
+# crash, so its fixtures and its description both quoted this text. The stub below
+# throws from `sanitize` on the first and from the exfil scan on the second.
 TEMPLATE_TAG = "<svg><template>"
+SCAN_CRASH_TAG = "<template.x>"
 
 # Stands in for the `agent-sanitizer` package so the REAL sanitize-pr-input.mjs runs
-# against a sanitizer that throws. A stub is the only option: the published package
+# against a sanitizer and an exfil scan that throw. A stub is the only option: the published package
 # no longer throws on any input known to break it. A loader hook redirects both of
 # the script's imports here.
 _THROWING_SANITIZER = f"""export async function sanitize(input) {{
   if (input.includes("{TEMPLATE_TAG}")) throw new TypeError(`cannot parse: ${{input}}`);
   return {{ cleaned: input, found: [], warnings: [] }};
 }}
-export const detectExfil = () => [];
+export function detectExfil(input) {{
+  if (input.includes("{SCAN_CRASH_TAG}")) throw new RangeError(`too deep: ${{input}}`);
+  return [];
+}}
 """
 _REDIRECT_HOOK = """export async function resolve(specifier, context, next) {
   if (specifier === "agent-sanitizer" || specifier === "agent-sanitizer/html")
@@ -149,7 +154,7 @@ def _fake_bins(
     quoted_file: bool = False,
     live_head: str = HEAD_SHA,
     compare: dict | None = None,
-    template_tag: bool = False,
+    added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
 ) -> None:
@@ -161,9 +166,8 @@ def _fake_bins(
     "other" with an unrelated error. `flaky_budget` makes the first N calls of
     ANY shape answer GitHub's 504, which is what the real API did on 2026-08-09.
     `escape_byte` adds one hunk holding a literal ESC byte, mirroring the
-    payload `gh pr diff` would otherwise refuse to print. `template_tag` adds
-    a hunk holding the markup that crashed the sanitizer in agent-sanitizer#451,
-    and `pr_body` is the PR description. `node_script` replaces the fake
+    payload `gh pr diff` would otherwise refuse to print. `added_line` adds
+    a hunk adding that one line, and `pr_body` is the PR description. `node_script` replaces the fake
     `node`'s body.
     """
     flaky = ""
@@ -209,12 +213,12 @@ def _fake_bins(
             '  echo "@@ -0,0 +1,1 @@"\n'
             '  echo "+accented"\n'
         )
-    template = ""
-    if template_tag:
-        template = (
+    added = ""
+    if added_line:
+        added = (
             '  echo "diff --git a/fixture.html b/fixture.html"\n'
             '  echo "@@ -0,0 +1,1 @@"\n'
-            f"  echo '+{TEMPLATE_TAG}'\n"
+            f"  echo '+{added_line}'\n"
         )
     gh = tmp_path / "gh"
     gh.write_text(
@@ -264,7 +268,7 @@ def _fake_bins(
         f"{bundle}"
         f"{escape}"
         f"{quoted}"
-        f"{template}"
+        f"{added}"
         'elif [[ "$2" == "view" ]]; then\n'
         # Two different `pr view` reads, told apart by the fields they ask for:
         # the metadata the sanitizer renders, and the live head the staleness
@@ -315,7 +319,7 @@ def _run(
     live_head: str = HEAD_SHA,
     env: dict[str, str] | None = None,
     compare: dict | None = None,
-    template_tag: bool = False,
+    added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
@@ -336,7 +340,7 @@ def _run(
         quoted_file=quoted_file,
         live_head=live_head,
         compare=compare,
-        template_tag=template_tag,
+        added_line=added_line,
         pr_body=pr_body,
         node_script=node_script,
     )
@@ -451,7 +455,7 @@ def test_a_broken_sanitizer_reds_the_job_with_its_reason(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("what", "where", "crashed_file"),
     [
-        ("diff", {"template_tag": True}, "diff.txt"),
+        ("diff", {"added_line": TEMPLATE_TAG}, "diff.txt"),
         ("metadata", {"pr_body": f"Fixes the crash on {TEMPLATE_TAG}."}, "meta.txt"),
     ],
 )
@@ -484,6 +488,29 @@ def test_a_sanitizer_that_throws_on_the_pr_holds_it_for_a_human(
         if p.is_file() and TEMPLATE_TAG in p.read_text(encoding="utf-8")
     ]
     assert leaked == []
+
+
+def test_an_exfil_scan_that_throws_still_reviews_the_cleaned_diff(
+    tmp_path: Path,
+) -> None:
+    """The exfil scan only reports and never changes the text, so its throw costs
+    one report line, not the review. The model gets the cleaned diff, and the
+    report tells it that no URL was checked, without quoting the input."""
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=2,
+        max_diff_lines=100,
+        node_script=_throwing_sanitizer_node(tmp_path),
+        added_line=SCAN_CRASH_TAG,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["unreviewable"] == "false"
+    assert not (input_dir / "oversized-notice.txt").exists()
+    assert f"+{SCAN_CRASH_TAG}" in (input_dir / "diff.txt").read_text(encoding="utf-8")
+    report = (input_dir / "diff.report.txt").read_text(encoding="utf-8")
+    assert report == (
+        "Exfil URL scan failed (RangeError), so no URL in this input was checked\n"
+    )
 
 
 def test_meta_lists_every_file_the_diff_contains(tmp_path: Path) -> None:
