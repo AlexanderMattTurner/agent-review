@@ -43,7 +43,7 @@ GRAPHQL
 
 # PROBLEM CLASS — the reviewer read the PR but could not report its findings as inline
 # threads, so the gate would go green with nothing for anyone to resolve. Two consumers raise
-# the same hold: post-oversized-review.sh (the diff is too large, or the sanitizer crashed on it) and
+# the same hold: post-oversized-review.sh (the diff is too large to read at all) and
 # post-pr-review.sh (GitHub rejected the structured review, so some finding has no thread of
 # its own). MARKER stamps a gating thread that ONLY ITS OWNER may resolve — the generic LLM
 # thread resolver excludes a thread carrying one, because it reads only the PR diff and a

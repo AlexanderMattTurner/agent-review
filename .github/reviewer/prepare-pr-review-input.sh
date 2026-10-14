@@ -24,8 +24,7 @@
 # covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
 # size bounds below are optional.
 # Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
-# shard_count (the last two written by shard-pr-diff.py). A sanitizer that throws
-# on the PR's text sets unreviewable=true, like an oversized diff. Writes into
+# shard_count (the last two written by shard-pr-diff.py). Writes into
 # $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
 # sanitizer-report.txt, shards/, oversized-notice.txt.
 set -euo pipefail
@@ -79,8 +78,8 @@ gh_err="$(mktemp)"
 meta_pr="$(mktemp)"
 meta_pages="$(mktemp)"
 meta_raw="$(mktemp)"
-sanitizer_err="$(mktemp)"
-trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$sanitizer_err"' EXIT
+sanitizer_crash="$(mktemp)"
+trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$sanitizer_crash"' EXIT
 
 # `gh pr diff` asks for the REST diff media type, which GitHub refuses with HTTP
 # 406 above 300 CHANGED FILES — a cap on file count, not diff size, so even a
@@ -163,9 +162,6 @@ if [[ "$live_head" != "$HEAD_SHA" ]]; then
 fi
 emit_output "stale=false"
 
-# The sanitizer's exit when it THROWS on this input, as opposed to flagging it.
-SANITIZER_THREW=3
-
 # Printed with workflow commands off: the sanitizer's error can quote the PR's own
 # text, and a `::add-mask::` line in that text must not act on this log.
 print_untrusted() {
@@ -177,29 +173,20 @@ print_untrusted() {
 }
 
 # sanitize_into <diff|metadata> <out> <report> — stdin is the raw text.
-# PROBLEM CLASS — the base branch's sanitizer throws on this PR's own text. A PR
-# that fixes such a crash quotes the input that causes it, in its fixtures and in
-# its description, so failing the job would block exactly that fix. A throw holds
-# the PR for a human through the notice path instead. The raw text never reaches
-# the model, and the error stays outside PR_INPUT_DIR because it can quote that
-# text. Any other failure is a broken install and stays red.
+# The sanitizer fails open when the package throws on this input, so a non-zero
+# exit is a broken install: the job goes red with the reason in the log.
 sanitize_into() {
-  local what="$1" out="$2" report="$3" rc=0
-  node "$here/sanitize-pr-input.mjs" >"$out" 2>"$sanitizer_err" || rc=$?
-  if ((rc == 0)); then
-    mv "$sanitizer_err" "$report"
-    return 0
+  local what="$1" out="$2" report="$3"
+  if ! SANITIZER_CRASH_LOG="$sanitizer_crash" node "$here/sanitize-pr-input.mjs" >"$out" 2>"$report"; then
+    echo "::error::the sanitizer crashed on the ${what}" >&2
+    print_untrusted "$report"
+    exit 1
   fi
-  rm -f "$out"
-  echo "::error::the sanitizer crashed on the ${what}" >&2
-  print_untrusted "$sanitizer_err"
-  ((rc == SANITIZER_THREW)) || exit 1
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: the reviewer's input sanitizer crashed on this PR's ${what}, so no sanitized copy exists for the model to read, and the unsanitized text is never sent to it. This PR needs a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  exit 0
+  if [[ -s "$sanitizer_crash" ]]; then
+    echo "::warning::agent-sanitizer threw on the ${what}; it was passed through as the report describes" >&2
+    print_untrusted "$sanitizer_crash"
+    : >"$sanitizer_crash"
+  fi
 }
 
 # The caller's own elider, run BEFORE the sanitizer, whose cost is per byte: a

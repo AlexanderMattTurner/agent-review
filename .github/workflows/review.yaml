@@ -386,9 +386,8 @@ jobs:
       - name: Fetch and sanitize the untrusted PR input
         # Writes the sanitized files the agent reads, and ROUTES the review by
         # size: a diff over max-diff-lines no longer fits one model context, so it
-        # is split per file and the shard matrix below reads the pieces. A diff
-        # too large even to shard, or PR text the sanitizer throws on, sets
-        # unreviewable=true.
+        # is split per file and the shard matrix below reads the pieces. Only a
+        # diff too large even to shard sets unreviewable=true.
         id: prepare
         # The one gate that matters: every step below keys off this step's outputs
         # or its conclusion, so a skipped prepare skips the whole read.
@@ -417,8 +416,8 @@ jobs:
           SINCE: ${{ needs.decide.outputs.since }}
         run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
 
-      - name: Post the human-review notice as a review plus a thread
-        # An unreviewable PR gets no automated read, so the notice
+      - name: Post the oversized notice as a review plus a human-review thread
+        # A diff too large even to shard gets no automated read, so the notice
         # posts as a COMMENT review plus one thread a HUMAN resolves after
         # reviewing — the PR merges on that sign-off instead of staying blocked.
         if: steps.prepare.outputs.unreviewable == 'true'

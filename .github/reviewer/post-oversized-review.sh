@@ -2,9 +2,8 @@
 # kcov-exclude: a GitHub Actions step body with a behavioral suite: the suite runs the real
 #   script as `bash <script>` against stubbed CLIs on PATH, so the branches are asserted but
 #   no run is ever traced.
-# A PR too large even to shard, or one whose text the sanitizer crashed on, gets
-# no automated read — but the review-findings gate stays red until SOME completed
-# reviewer review exists, so a bare comment
+# A PR too large even to shard gets no automated read — but the review-findings
+# gate stays red until SOME completed reviewer review exists, so a bare comment
 # (the old shape) would leave an oversized PR permanently unmergeable with no
 # thread to resolve. This posts the oversized notice as a real COMMENT review
 # (satisfying the gate's reviewed-at-all leg) plus ONE 🔴 file-level finding
@@ -96,9 +95,8 @@ fi
 # (2) The 🔴 finding thread a human resolves after reviewing.
 finding_prose="$(mktemp)"
 {
-  printf '🔴 The automated reviewer could not read this PR.\n\n'
-  cat "$notice"
-  printf '\nResolve this thread after your review; the review-findings gate stays red until it is resolved.\n'
+  printf '🔴 This PR is too large for the automated reviewer — it needs a HUMAN review.\n\n'
+  printf 'The diff exceeds what the reviewer can read even sharded, so no automated pass has covered it. Review the PR yourself, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
 } >"$finding_prose"
 raise_human_review_finding "$OVERSIZED_REVIEW_MARKER" "$finding_prose"
 rm -f "$finding_prose"
