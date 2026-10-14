@@ -77,7 +77,9 @@ raw_diff="$(mktemp)"
 gh_err="$(mktemp)"
 meta_pr="$(mktemp)"
 meta_pages="$(mktemp)"
-trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages"' EXIT
+meta_raw="$(mktemp)"
+sanitizer_crash="$(mktemp)"
+trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$sanitizer_crash"' EXIT
 
 # `gh pr diff` asks for the REST diff media type, which GitHub refuses with HTTP
 # 406 above 300 CHANGED FILES — a cap on file count, not diff size, so even a
@@ -160,7 +162,32 @@ if [[ "$live_head" != "$HEAD_SHA" ]]; then
 fi
 emit_output "stale=false"
 
-sanitize() { node "$here/sanitize-pr-input.mjs"; }
+# Printed with workflow commands off: the sanitizer's error can quote the PR's own
+# text, and a `::add-mask::` line in that text must not act on this log.
+print_untrusted() {
+  local token
+  token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  echo "::stop-commands::${token}" >&2
+  cat "$1" >&2
+  echo "::${token}::" >&2
+}
+
+# sanitize_into <diff|metadata> <out> <report> — stdin is the raw text.
+# The sanitizer fails open when the package throws on this input, so a non-zero
+# exit is a broken install: the job goes red with the reason in the log.
+sanitize_into() {
+  local what="$1" out="$2" report="$3"
+  if ! SANITIZER_CRASH_LOG="$sanitizer_crash" node "$here/sanitize-pr-input.mjs" >"$out" 2>"$report"; then
+    echo "::error::the sanitizer crashed on the ${what}" >&2
+    print_untrusted "$report"
+    exit 1
+  fi
+  if [[ -s "$sanitizer_crash" ]]; then
+    echo "::warning::agent-sanitizer threw on the ${what}; it was passed through as the report describes" >&2
+    print_untrusted "$sanitizer_crash"
+    : >"$sanitizer_crash"
+  fi
+}
 
 # The caller's own elider, run BEFORE the sanitizer, whose cost is per byte: a
 # 14.7 MB diff that was 97% generated output spent 29 minutes there and hit the
@@ -174,7 +201,7 @@ if [[ -n "${ELIDE_COMMAND:-}" ]]; then
   bash -c "$ELIDE_COMMAND" -- "$raw_diff"
 fi
 
-sanitize <"$raw_diff" >"${PR_INPUT_DIR}/diff.txt" 2>"${PR_INPUT_DIR}/diff.report.txt"
+sanitize_into diff "${PR_INPUT_DIR}/diff.txt" "${PR_INPUT_DIR}/diff.report.txt" <"$raw_diff"
 
 # A delta read covers the pushes after SINCE. GitHub's compare API is the
 # authority on which files those pushes touched, and the narrowing runs on the
@@ -253,8 +280,8 @@ retry_stdout gh api --paginate --slurp "repos/{owner}/{repo}/pulls/${PR}/files" 
 # mapping to the GraphQL `changeType` enum, which would invent values GitHub never emits
 # for the members that do not correspond.
 jq -n --slurpfile pr "$meta_pr" --slurpfile pages "$meta_pages" \
-  '$pr[0] + {files: [$pages[0][][] | {path: .filename, additions, deletions, status}]}' |
-  sanitize >"${PR_INPUT_DIR}/meta.txt" 2>"${PR_INPUT_DIR}/meta.report.txt"
+  '$pr[0] + {files: [$pages[0][][] | {path: .filename, additions, deletions, status}]}' >"$meta_raw"
+sanitize_into metadata "${PR_INPUT_DIR}/meta.txt" "${PR_INPUT_DIR}/meta.report.txt" <"$meta_raw"
 
 report="${PR_INPUT_DIR}/sanitizer-report.txt"
 {

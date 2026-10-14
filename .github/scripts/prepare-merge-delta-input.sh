@@ -71,8 +71,17 @@ fi
 # rc 0 with empty output is the honest "no hand-authored deltas" case (no merge
 # commits, or only clean mechanical merges) — that legitimately skips the review.
 if [[ -s "$raw" ]]; then
-  node .github/scripts/sanitize-pr-input.mjs \
-    <"$raw" >"${PR_INPUT_DIR}/merge-delta.txt" 2>"${PR_INPUT_DIR}/merge-delta.report.txt"
+  if ! node .github/scripts/sanitize-pr-input.mjs \
+    <"$raw" >"${PR_INPUT_DIR}/merge-delta.txt" 2>"$err"; then
+    # Workflow commands are off while the error prints: it can quote PR text.
+    echo "::error::the sanitizer crashed on the merge deltas:" >&2
+    token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    echo "::stop-commands::${token}" >&2
+    cat "$err" >&2
+    echo "::${token}::" >&2
+    exit 1
+  fi
+  mv "$err" "${PR_INPUT_DIR}/merge-delta.report.txt"
   emit_output "has_deltas=true"
 else
   emit_output "has_deltas=false"

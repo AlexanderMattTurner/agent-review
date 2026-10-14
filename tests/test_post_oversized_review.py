@@ -184,6 +184,7 @@ def _run(
     log.write_text("", encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(SCRIPT)],
+        check=False,
         capture_output=True,
         text=True,
         env={
