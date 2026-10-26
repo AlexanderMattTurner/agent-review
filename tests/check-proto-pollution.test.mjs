@@ -166,7 +166,7 @@ test("does NOT flag a computed write appearing inside a string or comment", () =
 test("isScannable includes the hook/CI-script surface", () => {
   for (const rel of [
     ".claude/hooks/parallelism-nudge.mjs",
-    ".github/scripts/sanitize-pr-input.mjs",
+    ".github/scripts/pr-review-advisory.mjs",
     ".github/scripts/ci-failure-notify.js",
   ])
     assert.equal(isScannable(rel), true, rel);
@@ -215,7 +215,7 @@ test("the CLI's scan set is non-vacuous and covers the hook/CI-script surface", 
   assert.ok(scanned.length > 0, "scan set is empty — enumeration is vacuous");
   for (const f of [
     ".claude/hooks/lib-control-plane.mjs",
-    ".github/scripts/sanitize-pr-input.mjs",
+    ".github/scripts/pr-review-advisory.mjs",
   ]) {
     assert.ok(scanned.includes(f), `scan set is missing ${f}`);
   }

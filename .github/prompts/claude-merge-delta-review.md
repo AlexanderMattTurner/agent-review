@@ -10,7 +10,7 @@ changes; you scrutinize only the resolutions.
 ## Trust boundary
 
 The merge-delta report was rendered by trusted repository code and run through
-this project's agent-input-sanitizer before being written to a file for you.
+this project's agent-sanitizer before being written to a file for you.
 
 ## Input (path given by the caller)
 
