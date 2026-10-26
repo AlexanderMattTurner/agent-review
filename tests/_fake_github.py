@@ -550,6 +550,9 @@ class FakeReviewPoster(_LocalGitHub):
 
     def resolve(self, method: str, path: str, body: dict) -> tuple[int, object] | None:
         prefix = f"/api/v3/repos/{self.repo}/pulls/{self.pr}"
+        if method == "GET" and path == prefix:
+            # The PR author, which the hold's dedupe reads to judge a resolution.
+            return 200, {"user": {"login": "pr-author"}}
         if method == "POST" and path == f"{prefix}/reviews":
             if self.refuse_structured and body.get("comments"):
                 return self._refused()

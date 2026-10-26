@@ -114,6 +114,9 @@ if path and "/pulls/" in path and path.endswith("/reviews"):
     with open(os.environ["GH_PULL_REVIEWS"], encoding="utf-8") as f:
         emit(json.load(f))
 
+if path and path.endswith("/pulls/5"):
+    emit({"user": {"login": "pr-author"}})
+
 if path and "/files" in path:
     with open(os.environ["GH_FILES"], encoding="utf-8") as f:
         emit(json.load(f))
@@ -130,12 +133,15 @@ def _rest_review(body: str, rid: int = 100, login: str = "github-actions[bot]") 
     return {"id": rid, "body": body, "user": {"login": login}}
 
 
-def _thread(body: str, *, resolved: bool, tid: str = "PRRT_over") -> dict:
+def _thread(
+    body: str, *, resolved: bool, tid: str = "PRRT_over", resolved_by: str = "a-human"
+) -> dict:
     """A review-thread node, shaped per REVIEW_THREADS_QUERY in
     lib/review-threads.bash; `body` is the ROOT comment's."""
     return {
         "id": tid,
         "isResolved": resolved,
+        "resolvedBy": {"login": resolved_by} if resolved else None,
         "isOutdated": False,
         "path": "src/big.py",
         "line": None,
@@ -151,11 +157,12 @@ def _thread(body: str, *, resolved: bool, tid: str = "PRRT_over") -> dict:
     }
 
 
-def _finding_thread(*, resolved: bool) -> dict:
+def _finding_thread(*, resolved: bool, resolved_by: str = "a-human") -> dict:
     """A previously-raised oversized finding thread (marker-stamped root)."""
     return _thread(
         f"🔴 needs a human review\n\n{OVERSIZED_MARKER}\n",
         resolved=resolved,
+        resolved_by=resolved_by,
     )
 
 
@@ -307,6 +314,20 @@ def test_rerun_after_a_resolve_re_raises_only_the_thread(tmp_path: Path) -> None
     assert proc.returncode == 0, proc.stderr
     assert len(posted) == 1, posted
     _assert_finding_comment(posted[0])
+
+
+def test_a_hold_its_author_resolved_still_holds_and_is_not_raised_twice(
+    tmp_path: Path,
+) -> None:
+    # The author's own Resolve leaves the hold holding the gate, so it is the open
+    # hold for this PR. Raising another would stack a duplicate on every re-read.
+    proc, posted = _run(
+        tmp_path,
+        reviews=[_rest_review(f"{NOTICE}\n\n{OVERSIZED_MARKER}\n{HEAD_MARKER}\n")],
+        threads=[_finding_thread(resolved=True, resolved_by="pr-author")],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert posted == []
 
 
 @pytest.mark.parametrize("notice", [None, ""], ids=["missing", "empty"])

@@ -8,7 +8,8 @@
 #
 # API:
 #   fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walk EVERY page, applying <jq> to each page's nodes ARRAY. Non-zero once retries exhaust.
-#   raise_human_review_finding <marker> <prose-file> — open ONE file-level finding thread stamped <marker>, unless an open thread already carries it. Requires GH_REPO, PR, HEAD_SHA and an exported REVIEWER_LOGIN_BARE.
+#   raise_human_review_finding <marker> <prose-file> — open ONE file-level finding thread stamped <marker>, unless a thread that still holds (not REVIEW_THREAD_CLEARED) already carries it. Requires GH_REPO, PR, HEAD_SHA and an exported REVIEWER_LOGIN_BARE.
+#   pr_author_login <owner> <name> <pr> — the PR author's login, which REVIEW_THREAD_CLEARED reads as PR_AUTHOR.
 #   REVIEW_THREAD_CLEARED — jq predicate: this thread holds nothing any more. Reads an exported PR_AUTHOR.
 #   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's threads that still HOLD a merge, as a JSON array of {path, line}.
 
@@ -59,14 +60,18 @@ raise_human_review_finding() {
   (
     export HUMAN_REVIEW_FINDING_MARKER="$marker"
     local threads open_thread anchor_path body
+    # A hold its author resolved still holds, so it counts here too: deduping on
+    # `isResolved` alone would open a second hold on every later run.
+    PR_AUTHOR="$(pr_author_login "$owner" "$name" "$PR")"
+    export PR_AUTHOR
     threads="$(fetch_review_threads "$owner" "$name" "$PR" \
-      ".[] | select(.isResolved == false)
+      ".[] | select($REVIEW_THREAD_CLEARED | not)
            | $REVIEW_THREAD_ROOT_IS_REVIEWER
            | select((.comments.nodes[0].body // \"\") | contains(env.HUMAN_REVIEW_FINDING_MARKER))
            | .id")"
     open_thread="${threads%%$'\n'*}"
     if [[ -n "$open_thread" ]]; then
-      echo "an unresolved ${marker} finding thread already exists (${open_thread}); not re-raising" >&2
+      echo "a ${marker} finding thread that still holds already exists (${open_thread}); not re-raising" >&2
       exit 0
     fi
     anchor_path="$(retry_stdout gh api "repos/${GH_REPO}/pulls/${PR}/files?per_page=1" --jq '.[0].filename')"
@@ -168,7 +173,7 @@ unresolved_gating_findings() {
   local owner="$1" name="$2" pr="$3" config="$4" predicate delta_predicate author
   predicate="$(gating_severity_predicate "$config")"
   delta_predicate="$(gating_severity_predicate "$config" '(.delta_gating // .gating)')"
-  author="$(retry_stdout gh api "repos/${owner}/${name}/pulls/${pr}" --jq '.user.login // ""')"
+  author="$(pr_author_login "$owner" "$name" "$pr")"
   PR_AUTHOR="$author" fetch_review_threads "$owner" "$name" "$pr" \
     "[.[] | select($REVIEW_THREAD_CLEARED | not)
           | $REVIEW_THREAD_ROOT_IS_REVIEWER
@@ -178,6 +183,11 @@ unresolved_gating_findings() {
                      then (${delta_predicate}) else (${predicate}) end)
           | {path, line}]" |
     jq -s 'add // []'
+}
+
+# pr_author_login <owner> <name> <pr> — the PR author's login, `""` when GitHub names nobody.
+pr_author_login() {
+  retry_stdout gh api "repos/${1}/${2}/pulls/${3}" --jq '.user.login // ""'
 }
 
 # fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walks every page, applying <jq> to each page's nodes ARRAY.
