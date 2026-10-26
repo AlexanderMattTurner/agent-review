@@ -11,7 +11,7 @@
 # hand-authored resolution).
 #
 # Requires: GH_TOKEN, PR, PR_INPUT_DIR; a base checkout with fetch-depth: 0 (so
-# the merge-base is present) and node + agent-input-sanitizer on the module path.
+# the merge-base is present) and node + agent-sanitizer on the module path.
 # Emits to GITHUB_OUTPUT:
 #   has_deltas=true|false      — whether there is a hand-authored merge delta
 # Writes into $PR_INPUT_DIR (only when has_deltas=true):
@@ -71,7 +71,7 @@ fi
 # rc 0 with empty output is the honest "no hand-authored deltas" case (no merge
 # commits, or only clean mechanical merges) — that legitimately skips the review.
 if [[ -s "$raw" ]]; then
-  if ! node .github/scripts/sanitize-pr-input.mjs \
+  if ! node .github/reviewer/sanitize-pr-input.mjs \
     <"$raw" >"${PR_INPUT_DIR}/merge-delta.txt" 2>"$err"; then
     # Workflow commands are off while the error prints: it can quote PR text.
     echo "::error::the sanitizer crashed on the merge deltas:" >&2

@@ -53,12 +53,21 @@ export OVERSIZED_REVIEW_MARKER
 # same precision as the gate's own read — so a non-reviewer comment quoting the
 # marker cannot fool them into skipping the real post. GraphQL returns an app
 # bot's login without the REST `[bot]` suffix (see the lib headers).
-# shellcheck disable=SC2031 # false positive across the source-follow: the only
-# subshell assignment of this name is settled_merge_delta_shas's deliberate one in
-# lib/review-threads.bash, which exists to keep that login off callers like this.
 export REVIEWER_LOGIN_BARE="github-actions"
 
-# (1) The notice as a completed COMMENT review — the gate's reviewed-at-all leg.
+# (1) The 🔴 finding thread a human resolves after reviewing. INVARIANT — it lands
+# BEFORE the notice review: that review greens the gate's reviewed-at-all leg, so a
+# notice posted ahead of a thread GitHub then refuses leaves the gate green with no
+# hold. A refused thread exits red here, and the notice is never posted.
+finding_prose="$(mktemp)"
+{
+  printf '🔴 This PR is too large for the automated reviewer — it needs a HUMAN review.\n\n'
+  printf 'The diff exceeds what the reviewer can read even sharded, so no automated pass has covered it. Review the PR yourself, then resolve this thread; the review-findings gate stays red until somebody other than the PR author resolves it.\n'
+} >"$finding_prose"
+raise_human_review_finding "$OVERSIZED_REVIEW_MARKER" "$finding_prose"
+rm -f "$finding_prose"
+
+# (2) The notice as a completed COMMENT review — the gate's reviewed-at-all leg.
 # Capture then split, never `… | head` (an early-exiting reader SIGPIPEs the
 # still-writing gh under pipefail).
 # Keyed on the HEAD too, not on the PR alone. The notice is what makes an oversized run
@@ -91,12 +100,3 @@ else
   rm -f "$review_body"
   echo "posted the oversized-PR notice as a COMMENT review" >&2
 fi
-
-# (2) The 🔴 finding thread a human resolves after reviewing.
-finding_prose="$(mktemp)"
-{
-  printf '🔴 This PR is too large for the automated reviewer — it needs a HUMAN review.\n\n'
-  printf 'The diff exceeds what the reviewer can read even sharded, so no automated pass has covered it. Review the PR yourself, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
-} >"$finding_prose"
-raise_human_review_finding "$OVERSIZED_REVIEW_MARKER" "$finding_prose"
-rm -f "$finding_prose"

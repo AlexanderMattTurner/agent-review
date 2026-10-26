@@ -452,6 +452,21 @@ def test_an_accumulated_read_does_not_spend_the_first_read_budget(github):
     assert _deltas(github) == 1
 
 
+def test_the_trusted_stamp_appended_last_wins_over_an_echoed_one(github):
+    """The poster appends its own stamp AFTER the model's text, which comes from
+    an untrusted diff. A stamp the model echoed earlier in the body must not be
+    read: here it claims a delta read of another head, which would hide the first
+    read from its budget and report a head nobody read. Both the raw and the
+    defused spelling of the echo are in the body."""
+    echoed = _stamp(HEAD_B, read="delta", scope=f"since:{HEAD_A}")
+    defused = echoed.replace("<!--", "&lt;!--")
+    github.add_review(body=f"{echoed}\n{defused}\n{_stamped(HEAD_A)}")
+    coverage = _coverage(github)
+    assert (coverage["head"], coverage["read"]) == (HEAD_A, "first")
+    assert _spent(github) == 1
+    assert _deltas(github) == 0
+
+
 def test_a_pr_with_no_review_at_all_reports_no_coverage(github):
     """Empty, not a zero-valued record: the gate's clause (c) and the dispatcher
     both key on "nothing covers this yet" to stand down, and a record claiming

@@ -21,6 +21,8 @@ GATE_DEPS = (
     ".github/reviewer/review-findings-gate.sh",
     ".github/reviewer/lib/review-threads.bash",
     ".github/reviewer/lib/pr-reviews.bash",
+    ".github/reviewer/lib/review-markers.bash",
+    ".github/reviewer/lib/shared-names.json",
     ".github/reviewer/lib/review-skip-set.bash",
     ".github/reviewer/lib-ci-retry.sh",
     "config/review-severities.json",
@@ -29,6 +31,10 @@ HOLD_CLEAR_DEPS = (
     ".github/scripts/approve-if-reviewer-hold-clear.sh",
     LOGIN_LIB_REL,
     ".github/scripts/lib/github-token-ladder.bash",
+    ".github/reviewer/lib/review-threads.bash",
+    ".github/reviewer/lib/review-markers.bash",
+    ".github/reviewer/lib/shared-names.json",
+    ".github/reviewer/lib-ci-retry.sh",
 )
 # The dispatcher re-posts the gate verdict when it abandons a read, so the gate
 # and everything it reads must reach the same runner.
@@ -36,6 +42,11 @@ DELTA_DEPS = (".github/reviewer/dispatch-delta-review.sh", *GATE_DEPS)
 # The sweep runs all three per PR, so its runner needs the union.
 REVIEWER_SCRIPT_DEPS = {
     "review-findings-gate.sh": GATE_DEPS,
+    "merge-group-gate.sh": (
+        ".github/reviewer/merge-group-gate.sh",
+        ".github/reviewer/merge-group-prs.sh",
+        *GATE_DEPS,
+    ),
     "approve-if-reviewer-hold-clear.sh": HOLD_CLEAR_DEPS,
     "dispatch-delta-review-for-sha.sh": (
         ".github/scripts/dispatch-delta-review-for-sha.sh",

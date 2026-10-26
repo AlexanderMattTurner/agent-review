@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._helpers import reviewer_marker
+
 REPO_ROOT = Path(
     subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -40,6 +42,7 @@ def thread(
     resolved: bool = True,
     resolved_by: str | None = OTHER,
     opened_by_review_at: str = CYCLE_1,
+    body: str = "a finding",
 ) -> dict:
     """One review thread. `resolved_by` is the login GitHub records on Resolve;
     it is null on an unresolved thread, and on a resolved one whose resolver the
@@ -53,6 +56,7 @@ def thread(
             "nodes": [
                 {
                     "author": {"login": author},
+                    "body": body,
                     "pullRequestReview": {"submittedAt": opened_by_review_at},
                 }
             ]
@@ -60,11 +64,20 @@ def thread(
     }
 
 
-def review(state: str, author: str = BOT, at: str = CYCLE_1, rid: int = 1) -> dict:
+def review(
+    state: str,
+    author: str = BOT,
+    at: str = CYCLE_1,
+    rid: int = 1,
+    body: str = "Automated review.",
+) -> dict:
+    """One review node. `body=""` is the review GitHub synthesizes around a
+    standalone review-comment POST, which is how a hold thread is opened."""
     return {
         "databaseId": rid,
         "author": {"login": author},
         "state": state,
+        "body": body,
         "submittedAt": at,
     }
 
@@ -363,7 +376,7 @@ def test_an_unresolved_thread_blocks_both_approval_and_dismissal(tmp_path: Path)
     assert res.returncode == 0
     assert not dismissed(calls)
     assert "pr review" not in calls, "a live hold must not even attempt an approval"
-    assert "still open; not approving" in res.stderr
+    assert "still hold; not approving" in res.stderr
 
 
 @pytest.mark.parametrize("state", ["APPROVED", "DISMISSED"])
@@ -407,6 +420,27 @@ def test_one_thread_resolved_by_somebody_else_still_clears(tmp_path: Path):
     )
     assert res.returncode == 0, res.stderr
     assert dismissed(calls)
+
+
+def test_a_needs_a_human_hold_the_author_resolved_still_holds(tmp_path: Path):
+    # A hold thread asks for a reader other than the author. The author's own
+    # Resolve on it leaves it holding, so another thread resolved by somebody
+    # else does not make the whole hold clear. The merge gate reads the same
+    # predicate, so the two agree.
+    marker = reviewer_marker("HUMAN_HOLD_MARKER")
+    res, calls = run(
+        tmp_path,
+        threads=[
+            thread(resolved_by=AUTHOR, body=f"too large to read\n{marker}"),
+            thread(resolved_by=OTHER),
+        ],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert "pr review" not in calls
+    assert "1 reviewer thread(s) still hold" in res.stderr
 
 
 def test_the_two_api_spellings_of_one_login_are_one_author(tmp_path: Path):
@@ -488,6 +522,30 @@ def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Pa
     assert res.returncode == 0, res.stderr
     assert not dismissed(calls)
     assert "opened no thread" in res.stderr
+
+
+@pytest.mark.parametrize("earlier", [[], [CYCLE_1]], ids=["first-hold", "second-hold"])
+def test_a_hold_thread_posted_before_its_notice_review_belongs_to_that_hold(
+    tmp_path: Path, earlier: list[str]
+):
+    """The oversized and degraded paths open their hold thread FIRST, as a
+    standalone comment, and post the notice review after it. GitHub wraps that
+    comment in a body-less review that is OLDER than the notice. Timing alone
+    would put the hold thread outside its own hold, and nothing could clear it."""
+    thread_at, notice_at = "2026-03-01T00:00:00Z", "2026-03-01T00:00:05Z"
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=OTHER, opened_by_review_at=thread_at)],
+        reviews=[
+            *[review("COMMENTED", at=at, rid=9) for at in earlier],
+            review("COMMENTED", at=thread_at, rid=10, body=""),
+            review("COMMENTED", at=notice_at, rid=11),
+        ],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "opened no thread" not in res.stderr, res.stderr
+    assert "pr review" in calls, "the cleared hold must reach the approval"
 
 
 def test_the_current_holds_own_thread_still_clears(tmp_path: Path):

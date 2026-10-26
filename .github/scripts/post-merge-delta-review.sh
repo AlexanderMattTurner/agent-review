@@ -8,7 +8,7 @@
 # comment without clobbering each other.
 #
 # The model's text is derived from the untrusted merge delta, so it is run
-# through the SAME agent-input-sanitizer as the input before it reaches a posted
+# through the SAME agent-sanitizer as the input before it reaches a posted
 # comment — a hidden payload the model echoed from the delta can't ride into the
 # comment.
 #
@@ -57,8 +57,9 @@ block="$(mktemp)"
   printf '%s\n' "$REVIEW_START"
   printf '## Merge-resolution review\n\n'
   if [[ "$had_deltas" == "true" ]]; then
-    # Sanitize the model output before it reaches the comment.
-    node .github/scripts/sanitize-pr-input.mjs <"$review"
+    # Clean the model output before it reaches the comment: a `<!--` it echoed from the
+    # merge deltas could otherwise close this block early with a forged $REVIEW_END.
+    node .github/reviewer/lib-model-text.mjs <"$review"
   else
     printf 'No merge-resolution deltas on the current head.\n'
   fi

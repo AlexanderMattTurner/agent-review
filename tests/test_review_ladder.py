@@ -137,12 +137,15 @@ def test_a_subscription_token_that_answers_bills_nothing_paid(tmp_path: Path) ->
     assert attempts == [(1, OAT_1, False)]
 
 
-def test_no_paid_key_in_any_rung_refuses_before_any_attempt(tmp_path: Path) -> None:
-    """The paid key is the backstop. A run without one is a wiring fault, so it
-    stops before spending anything rather than reviewing with no last resort."""
-    with pytest.raises(SystemExit) as stop:
-        _walk(tmp_path, {1: OAT_1, 8: OAT_2}, log_for=lambda _: _clean())
-    assert "metered" in str(stop.value)
+def test_a_ladder_with_no_paid_key_walks_every_subscription_token(
+    tmp_path: Path,
+) -> None:
+    """A metered key is optional. A caller that passes only subscription tokens
+    reviews with them, and nothing in the walk authenticates as metered."""
+    attempts, _ = _walk(
+        tmp_path, {1: OAT_1, 8: OAT_2}, log_for=lambda _: _errored(cost=0)
+    )
+    assert attempts == [(1, OAT_1, False), (8, OAT_2, False)]
 
 
 def test_a_paid_key_alone_in_rung_one_still_walks(tmp_path: Path) -> None:

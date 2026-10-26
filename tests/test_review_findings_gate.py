@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, reviewer_marker
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "review-findings-gate.sh"
 SEVERITIES = REPO_ROOT / "config" / "review-severities.json"
@@ -37,11 +37,20 @@ def review(state: str, *, author: str = BOT, body: str = "Automated review.") ->
     }
 
 
+PR_AUTHOR = "pr-author"
+
+
 def thread(
-    body: str, *, resolved: bool = False, author: str = BOT, path: str = "a.py"
+    body: str,
+    *,
+    resolved: bool = False,
+    author: str = BOT,
+    path: str = "a.py",
+    resolved_by: str | None = "a-human",
 ) -> dict:
     return {
         "isResolved": resolved,
+        "resolvedBy": {"login": resolved_by} if resolved and resolved_by else None,
         "path": path,
         "line": 1,
         "comments": {"nodes": [{"body": body, "author": {"login": author}}]},
@@ -59,6 +68,7 @@ def _gate_proc(
     live_head: str = HEAD_SHA,
     severity_config: Path = SEVERITIES,
     report_sha: str | None = HEAD_SHA,
+    pr_author: str = PR_AUTHOR,
 ) -> tuple[subprocess.CompletedProcess, Path]:
     """Run the gate against a `gh` stub; return the process and its call log.
 
@@ -107,6 +117,7 @@ case "$filter" in
     exit 0 ;;
   *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
   .headRefOid)           printf '%s\\n' "{live_head}"; exit 0 ;;
+  .user.login*)          printf '%s\\n' "{pr_author}"; exit 0 ;;
 esac
 exit 0
 """
@@ -342,6 +353,51 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
         )
         == "success"
     )
+
+
+@pytest.mark.parametrize(
+    ("marker", "resolved_by", "expected"),
+    [
+        ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
+        ("OVERSIZED_REVIEW_MARKER", PR_AUTHOR, "failure"),
+        ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
+        # GraphQL spells a login bare, so the reviewer is excluded by name.
+        ("HUMAN_HOLD_MARKER", "github-actions", "failure"),
+        ("HUMAN_HOLD_MARKER", None, "failure"),
+        ("HUMAN_HOLD_MARKER", "a-human", "success"),
+    ],
+)
+def test_only_somebody_else_clears_a_needs_a_human_hold(
+    tmp_path: Path, marker: str, resolved_by: str | None, expected: str
+) -> None:
+    """A hold that asks for a human read — the diff was too large, or GitHub
+    refused the findings — is not the author's to clear. GitHub lets the author
+    resolve it anyway, so the gate must read WHO resolved it. The pair: an
+    ordinary finding the author resolves stops gating (below)."""
+    body = f"needs a human read\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
+    hold = thread(body, resolved=True, resolved_by=resolved_by)
+    assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
+
+
+def test_a_bot_author_resolving_its_own_hold_under_the_bare_login_holds(
+    tmp_path: Path,
+) -> None:
+    """REST names a bot author `x[bot]`, and GraphQL names the same account `x`
+    when it resolves a thread. The two spellings are one author."""
+    body = f"too large\n{reviewer_marker('HUMAN_HOLD_MARKER')}\n<!-- severity: blocking -->"
+    hold = thread(body, resolved=True, resolved_by="pr-author")
+    state = run_gate(
+        tmp_path, [review("COMMENTED")], [hold], pr_author="pr-author[bot]"
+    )
+    assert state == "failure"
+
+
+def test_the_author_may_resolve_an_ordinary_finding(tmp_path: Path) -> None:
+    """The pair for the hold case: a finding with no hold marker clears on any
+    resolution, the author's included."""
+    body = "<!-- severity: blocking -->\nthis breaks"
+    finding = thread(body, resolved=True, resolved_by=PR_AUTHOR)
+    assert run_gate(tmp_path, [review("COMMENTED")], [finding]) == "success"
 
 
 def test_a_gating_thread_rooted_by_someone_else_does_not_gate(tmp_path: Path) -> None:

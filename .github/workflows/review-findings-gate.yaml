@@ -34,7 +34,9 @@
 # or review comment would overwrite a red gate with a passing skipped instance.
 #
 # That local job clones this repository the same way the job below does and runs
-# the same script, once per pull request in the queued batch:
+# merge-group-gate.sh, which evaluates the gate once per pull request in the
+# queued batch and exits non-zero on any red one. This repository's own queue
+# job, review-gate-context.yaml, runs the same script:
 #
 #   jobs:
 #     merge_gate:
@@ -52,15 +54,12 @@
 #             # payload field is the previous queue entry, so a range from it
 #             # covers only the last pull request in the batch.
 #             MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
-#           run: |
-#             prs="$(bash "$RUNNER_TEMP/r/.github/reviewer/merge-group-prs.sh")"
-#             while IFS= read -r pr; do
-#               PR="$pr" bash "$RUNNER_TEMP/r/.github/reviewer/review-findings-gate.sh" </dev/null
-#             done <<<"$prs"
+#             SEVERITY_CONFIG: <your severity SSOT, from your default branch>
+#           run: bash "$RUNNER_TEMP/r/.github/reviewer/merge-group-gate.sh"
 #
-# merge-group-prs.sh is why the loop exists: the queue's ref names only the LAST
-# pull request of a batch, so evaluating the ref alone lets every other pull
-# request in a multi-entry batch reach the default branch with no verdict.
+# The script loops because the queue's ref names only the LAST pull request of a
+# batch, so evaluating the ref alone lets every other pull request in a
+# multi-entry batch reach the default branch with no verdict.
 #
 # ── The first consumer ────────────────────────────────────────────────────────
 #

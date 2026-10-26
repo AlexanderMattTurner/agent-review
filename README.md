@@ -42,8 +42,8 @@ jobs:
       reviewer-ref: main
       extra-instructions: .github/prompts/review-extra-instructions.md
     secrets:
-      rung_8: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
-      # ... the other 7; see `.github/workflows/claude-review.yaml` in this
+      rung_1: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
+      # ... the other 6; see `.github/workflows/claude-review.yaml` in this
       # repository for a block a consumer can copy verbatim.
 ```
 
@@ -53,7 +53,7 @@ Three parts of that block need a word of explanation before you copy it.
 
 **The `permissions:` block, which is a ceiling.** A called workflow may request only what the calling job already holds. The block above is therefore the maximum, and the jobs inside narrow themselves from it. Granting less than this list does not merely limit the run. It ends the run with the status `startup_failure` before any job starts, and you get no red check to read.
 
-**The eight `rung_` secrets, which are a fallback chain.** Each rung holds one credential, and the workflow tries them in order. Rungs 1 to 7 are Claude Code OAuth tokens, and an empty rung is skipped rather than fatal. `rung_8` is a metered Anthropic API key: a run reaches it only once every subscription token has errored. A metered key in any other rung is also tried last. The review refuses to run when no rung holds a metered key.
+**The `rung_` secrets, which are a fallback chain.** Each rung holds one Claude Code OAuth token, and the workflow tries them in order. An empty rung is skipped rather than fatal, so you can pass as few as one. A metered Anthropic API key is optional and bills real credits. Whatever rung holds one, the review tries it only after every subscription token has failed.
 
 Both `uses:` and `reviewer-ref:` end in a ref, which is the branch name, tag or commit sha the reviewer runs at. Pin a commit sha rather than `main` once this repository cuts its first release: a branch ref runs whatever landed on it since you last read it. Two lines carry that ref, `uses:` and `reviewer-ref:`, and they must name the same one.
 
