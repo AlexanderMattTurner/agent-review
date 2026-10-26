@@ -22,7 +22,8 @@ Env:
                      written here (required)
   PROMPT_FILE        the review instructions the agent follows (required)
   EXTRA_INSTRUCTIONS_FILE  the caller's additions to PROMPT_FILE, winning where
-                     they conflict; empty adds none, a missing file stops the run
+                     they conflict (required, empty adds none; a path outside
+                     the checkout stops the run)
   PR_NUMBER, REPO    named in the prompt so the agent can say what it reviewed
   REVIEW_TIMEOUT_SECONDS  wall clock ONE attempt may spend (default 1500)
   RUNNER_TEMP        where each attempt's execution log is written (required)
@@ -51,7 +52,7 @@ from lib_credential_ladder import (  # pylint: disable=wrong-import-position
     BACKOFF_SECONDS,
     FREE_RETRY_BACKOFF_SECONDS,
 )
-from lib_credential_ladder import (
+from lib_credential_ladder import (  # pylint: disable=wrong-import-position
     rungs as ladder_slots,
 )
 
@@ -187,7 +188,7 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
             os.environ["PROMPT_FILE"],
             os.environ.get("PR_NUMBER", ""),
             os.environ.get("REPO", ""),
-            os.environ.get("EXTRA_INSTRUCTIONS_FILE", ""),
+            os.environ["EXTRA_INSTRUCTIONS_FILE"],
         ),
         "--model",
         os.environ["MODEL"],
@@ -250,7 +251,9 @@ def is_metered(token: str) -> bool:
 def main() -> None:
     runner_temp = Path(os.environ["RUNNER_TEMP"])
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1500"))
-    extra_file = os.environ.get("EXTRA_INSTRUCTIONS_FILE", "")
+    # Required although it may be empty: a workflow step that forgets to pass it
+    # would otherwise review without the caller's rules and raise nothing.
+    extra_file = os.environ["EXTRA_INSTRUCTIONS_FILE"]
     # Checked before any rung spends: an agent told to follow a file it cannot read
     # reviews without the caller's conventions and still posts a verdict. Its
     # `Read(./**)` grant reaches only the checkout, so a path outside it is refused.

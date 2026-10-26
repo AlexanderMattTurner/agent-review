@@ -62,6 +62,7 @@ def _walk(
         "PR_INPUT_DIR": str(tmp_path / "pr-input"),
         "PROMPT_FILE": "prompt.md",
         "MODEL": "opus",
+        "EXTRA_INSTRUCTIONS_FILE": os.environ.get("EXTRA_INSTRUCTIONS_FILE", ""),
     }
     (tmp_path / "pr-input").mkdir(exist_ok=True)
     for index, value in tokens.items():
@@ -230,7 +231,12 @@ def test_each_attempt_starts_with_no_review(tmp_path: Path) -> None:
     module.subprocess.run = fake_run
     old = dict(os.environ)
     os.environ.update(
-        {"PR_INPUT_DIR": str(tmp_path), "PROMPT_FILE": "p.md", "MODEL": "m"}
+        {
+            "PR_INPUT_DIR": str(tmp_path),
+            "PROMPT_FILE": "p.md",
+            "MODEL": "m",
+            "EXTRA_INSTRUCTIONS_FILE": "",
+        }
     )
     try:
         module.attempt(1, "token", True, tmp_path / "log.json", 1)
@@ -286,6 +292,7 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
         "PR_INPUT_DIR": str(tmp_path),
         "PROMPT_FILE": "p.md",
         "MODEL": "m",
+        "EXTRA_INSTRUCTIONS_FILE": "",
         **{f"RUNG_{index}_TOKEN": token for index, token in tokens.items()},
     }.items():
         monkeypatch.setenv(key, value)
@@ -361,3 +368,22 @@ def test_a_missing_extra_instructions_file_stops_the_run_before_any_rung(
     monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", "present.md")
     attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean())
     assert attempts == [(8, PAID, True)]
+
+
+def test_a_step_that_forgets_the_extra_instructions_variable_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every workflow step that runs the ladder must pass EXTRA_INSTRUCTIONS_FILE,
+    even empty. A step that leaves it out would review without the caller's rules
+    and raise nothing, so the ladder refuses before any rung spends."""
+    module = _module()
+    module.attempt = lambda *_args: pytest.fail("a rung ran")
+    for key, value in {
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "out"),
+        "RUNG_8_TOKEN": PAID,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("EXTRA_INSTRUCTIONS_FILE", raising=False)
+    with pytest.raises(KeyError, match="EXTRA_INSTRUCTIONS_FILE"):
+        module.main()
