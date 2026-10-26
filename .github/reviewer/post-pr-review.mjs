@@ -7,7 +7,7 @@
 //
 // Contract with the caller: prints `PAYLOAD` on stdout when it wrote a payload to post, or `SKIP` (exit 0) when the reviewer ran but produced nothing. A MISSING or unparsable review.json means the reviewer crashed before writing its output, so this exits NON-ZERO instead of masquerading as a clean pass. Diagnostics go to stderr.
 import { readFileSync, writeFileSync } from "node:fs";
-import { sanitize } from "agent-sanitizer";
+import { modelText } from "./lib-model-text.mjs";
 import {
   readRunCost,
   readShardedRunCost,
@@ -16,20 +16,7 @@ import {
 } from "./lib-review-cost.mjs";
 
 // INVARIANT — every model-authored string passes through modelText exactly once, before any
-// trusted marker joins it. The text is MODEL output derived from the untrusted PR diff, and the
-// posted body also carries the records the reviewer reads back: the coverage stamp, the read and
-// severity markers, the cost footnote. Two steps, in this order:
-//   1. Layer-1 sanitize: strip invisible/format (Cf) characters and ANSI escapes. Visible bytes —
-//      code, markdown, emoji — stay, so a legitimate suggestion is never corrupted.
-//   2. Defuse every `<!--`, so the text opens no HTML comment and forges no record. The text stays
-//      visible, and a fenced suggestion gets the same treatment, since readers match raw bodies.
-// Step 1 must run first: `<\u200B!--` contains no `<!--` until the strip removes the U+200B.
-/** @param {unknown} text @returns {Promise<string>} */
-async function modelText(text) {
-  if (typeof text !== "string" || !text) return "";
-  const { cleaned } = await sanitize(text, { html: false });
-  return cleaned.replaceAll("<!--", "&lt;!--");
-}
+// trusted marker joins it; lib-model-text.mjs says why the order of its two steps matters.
 
 // The marker strings, from the table the bash readers also load.
 const MARKERS = JSON.parse(

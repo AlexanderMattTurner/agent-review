@@ -57,8 +57,9 @@ block="$(mktemp)"
   printf '%s\n' "$REVIEW_START"
   printf '## Merge-resolution review\n\n'
   if [[ "$had_deltas" == "true" ]]; then
-    # Sanitize the model output before it reaches the comment.
-    node .github/reviewer/sanitize-pr-input.mjs <"$review"
+    # Clean the model output before it reaches the comment: a `<!--` it echoed from the
+    # merge deltas could otherwise close this block early with a forged $REVIEW_END.
+    node .github/reviewer/lib-model-text.mjs <"$review"
   else
     printf 'No merge-resolution deltas on the current head.\n'
   fi
