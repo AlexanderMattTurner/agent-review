@@ -37,11 +37,20 @@ def review(state: str, *, author: str = BOT, body: str = "Automated review.") ->
     }
 
 
+PR_AUTHOR = "pr-author"
+
+
 def thread(
-    body: str, *, resolved: bool = False, author: str = BOT, path: str = "a.py"
+    body: str,
+    *,
+    resolved: bool = False,
+    author: str = BOT,
+    path: str = "a.py",
+    resolved_by: str | None = "a-human",
 ) -> dict:
     return {
         "isResolved": resolved,
+        "resolvedBy": {"login": resolved_by} if resolved and resolved_by else None,
         "path": path,
         "line": 1,
         "comments": {"nodes": [{"body": body, "author": {"login": author}}]},
@@ -107,6 +116,7 @@ case "$filter" in
     exit 0 ;;
   *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
   .headRefOid)           printf '%s\\n' "{live_head}"; exit 0 ;;
+  .user.login*)          printf '%s\\n' "{PR_AUTHOR}"; exit 0 ;;
 esac
 exit 0
 """
@@ -342,6 +352,42 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
         )
         == "success"
     )
+
+
+HOLD_MARKERS = json.loads(
+    (REPO_ROOT / ".github/reviewer/lib/shared-names.json").read_text(encoding="utf-8")
+)["review_markers"]
+
+
+@pytest.mark.parametrize(
+    ("marker", "resolved_by", "expected"),
+    [
+        ("human_hold", PR_AUTHOR, "failure"),
+        ("oversized_review", PR_AUTHOR, "failure"),
+        ("degraded_review", "PR-Author", "failure"),
+        ("human_hold", "renovate[bot]", "failure"),
+        ("human_hold", None, "failure"),
+        ("human_hold", "a-human", "success"),
+    ],
+)
+def test_only_somebody_else_clears_a_needs_a_human_hold(
+    tmp_path: Path, marker: str, resolved_by: str | None, expected: str
+) -> None:
+    """A hold that asks for a human read — the diff was too large, or GitHub
+    refused the findings — is not the author's to clear. GitHub lets the author
+    resolve it anyway, so the gate must read WHO resolved it. The pair: an
+    ordinary finding the author resolves stops gating (below)."""
+    body = f"needs a human read\n{HOLD_MARKERS[marker]}\n<!-- severity: blocking -->"
+    hold = thread(body, resolved=True, resolved_by=resolved_by)
+    assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
+
+
+def test_the_author_may_resolve_an_ordinary_finding(tmp_path: Path) -> None:
+    """The pair for the hold case: a finding with no hold marker clears on any
+    resolution, the author's included."""
+    body = "<!-- severity: blocking -->\nthis breaks"
+    finding = thread(body, resolved=True, resolved_by=PR_AUTHOR)
+    assert run_gate(tmp_path, [review("COMMENTED")], [finding]) == "success"
 
 
 def test_a_gating_thread_rooted_by_someone_else_does_not_gate(tmp_path: Path) -> None:

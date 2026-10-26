@@ -13,8 +13,9 @@
 # Approves ONLY when the reviewer's LATEST review is a live hold — CHANGES_REQUESTED
 # or COMMENTED; any other latest state means nothing to clear, so an unrelated
 # thread-resolved event mints no approval — AND all three thread conditions hold:
-# no reviewer thread is unresolved, that latest hold opened at least one thread,
-# and somebody other than the author resolved one of those. A hold whose concern
+# no reviewer thread still holds (REVIEW_THREAD_CLEARED, the predicate the merge
+# gate also reads), that latest hold opened at least one thread, and somebody other
+# than the author resolved one of those. A hold whose concern
 # lived only in the review body opens no thread, so it clears on the reviewer's
 # own re-review instead.
 #
@@ -48,6 +49,10 @@ export GH_TOKEN
 # shellcheck source=lib/reviewer-login.bash disable=SC1091
 source "$SCRIPT_DIR/lib/reviewer-login.bash"
 reviewer_login_init
+# fetch_review_threads and REVIEW_THREAD_CLEARED: the thread read and the "does this
+# thread still hold?" predicate the merge gate uses, so the two cannot disagree.
+# shellcheck source=../reviewer/lib/review-threads.bash disable=SC1091
+source "$SCRIPT_DIR/../reviewer/lib/review-threads.bash"
 
 owner="${GH_REPO%%/*}"
 name="${GH_REPO##*/}"
@@ -104,39 +109,21 @@ if [[ -z "$HOLD_SINCE" || "$HOLD_SINCE" == "null" ]]; then
   exit 1
 fi
 
-# Count the reviewer's threads three ways. Paginated: a PR can accrue >100
-# threads, and an unpaginated first:100 would miss a thread on a later page. The
-# per-page --jq emits one {unresolved, in_hold, cleared_by_other} object; the
+# Count the reviewer's threads three ways, through the shared paginated walk. The
+# per-page projection emits one {unresolved, in_hold, cleared_by_other} object; the
 # trailing reduce sums them.
-# shellcheck disable=SC2016 # GraphQL query + jq program are literal, not shell
-remaining_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100, after: $endCursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          isResolved
-          resolvedBy { login }
-          comments(first: 1) { nodes { author { login } pullRequestReview { submittedAt } } }
-        }
-      }
-    }
-  }
-}'
 # A thread belongs to the current hold when the review that opened its root
 # comment is that hold or newer. The root comment's own createdAt cannot answer
 # this: a comment drafted into a pending review is created BEFORE that review is
 # submitted, so it can predate the very hold it belongs to.
 thread_in_hold='((.comments.nodes[0].pullRequestReview.submittedAt // "") >= env.HOLD_SINCE)'
 
-# `unresolved` spans the whole PR — a thread left open in any cycle blocks. The
+# `unresolved` spans the whole PR — a thread still holding from any cycle blocks. The
 # other two are scoped to this hold, so an earlier cycle cannot vouch for it.
 # shellcheck disable=SC2016 # jq program is literal, not shell ($p is a jq var)
-counts="$(gh api graphql --paginate \
-  -f query="$remaining_query" -f owner="$owner" -f name="$name" -F pr="$PR" \
-  --jq "[.data.repository.pullRequest.reviewThreads.nodes[]
-         | ${REVIEWER_MATCH_THREAD_ROOT}]
-        | {unresolved: (map(select(.isResolved == false)) | length),
+counts="$(fetch_review_threads "$owner" "$name" "$PR" \
+  "[.[] | ${REVIEWER_MATCH_THREAD_ROOT}]
+        | {unresolved: (map(select(${REVIEW_THREAD_CLEARED} | not)) | length),
            in_hold: (map(select(${thread_in_hold})) | length),
            cleared_by_other: (map(select(${thread_in_hold}
                                          and .isResolved == true
@@ -150,7 +137,7 @@ in_hold="$(jq -r '.in_hold' <<<"$counts")"
 cleared_by_other="$(jq -r '.cleared_by_other' <<<"$counts")"
 
 if [[ "${unresolved:-0}" -ne 0 ]]; then
-  echo "${unresolved} reviewer thread(s) still open; not approving" >&2
+  echo "${unresolved} reviewer thread(s) still hold; not approving" >&2
   exit 0
 fi
 

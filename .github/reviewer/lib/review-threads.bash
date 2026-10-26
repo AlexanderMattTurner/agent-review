@@ -4,21 +4,23 @@
 # The PR review-thread read, in ONE place: the GraphQL document plus the
 # `gh api graphql --paginate` call that walks it. INVARIANT: every step that needs a PR's review threads goes through fetch_review_threads, so no caller can ship a `reviewThreads(first: 100)` with no cursor — a query that silently drops every thread past the first page and reports the truncated slice as the whole set. Callers differ only in the jq they project each page's nodes through.
 #
-# Consumers: review_findings_gate.py, prepare-merge-delta-input.sh, post-merge-delta-review.sh.
+# Consumers: review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh, post-oversized-review.sh, and .github/scripts/approve-if-reviewer-hold-clear.sh.
 #
 # API:
 #   fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walk EVERY page, applying <jq> to each page's nodes ARRAY. Non-zero once retries exhaust.
-#   raise_human_review_finding <marker> <prose-file> — open ONE file-level finding thread stamped <marker>, unless an UNRESOLVED thread already carries it. Requires GH_REPO, PR, HEAD_SHA and an exported REVIEWER_LOGIN_BARE.
-#   settled_merge_delta_shas <owner> <name> <pr> — every merge sha a merge-delta finding thread was raised about, replied to by a non-reviewer, and resolved.
-#   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's unresolved threads that HOLD a merge, as a JSON array of {path, line}.
+#   raise_human_review_finding <marker> <prose-file> — open ONE file-level finding thread stamped <marker>, unless an open thread already carries it. Requires GH_REPO, PR, HEAD_SHA and an exported REVIEWER_LOGIN_BARE.
+#   REVIEW_THREAD_CLEARED — jq predicate: this thread holds nothing any more. Reads an exported PR_AUTHOR.
+#   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's threads that still HOLD a merge, as a JSON array of {path, line}.
 
 # retry_stdout, sourced here rather than assumed, so a consumer gets the retry ladder by
 # sourcing this file alone. lib-ci-retry.sh guards against a double source.
 # shellcheck source=.github/reviewer/lib-ci-retry.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib-ci-retry.sh"
+# shellcheck source=.github/reviewer/lib/review-markers.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-markers.bash"
 
 # `$endCursor` and `pageInfo` are what let `gh api graphql --paginate` walk: gh feeds endCursor back in and stops on hasNextPage=false, so drop either and it has no cursor to advance and returns page one forever, reporting a truncated thread set as the whole one. That set feeds the review-findings merge gate, so an under-read greens a gate that should be red.
-# A comment's own fullDatabaseId is the REST id of that comment, which is what a consumer needs to EDIT a thread's root comment (`pulls/comments/<id>`); a string, for the same Int32 reason as the review id below. The node selection is the UNION of what the consumers project, because one shared document is the point. `comments` is the one field whose per-page cost is proportional to its size, so it is a variable: a caller keying on who OPENED each thread takes the root comment alone, and one rendering the whole conversation asks for more.
+# The node selection is the UNION of what the consumers project, because one shared document is the point. `resolvedBy` is what tells a hold cleared by somebody else from one its author cleared. The root comment's `pullRequestReview.submittedAt` ties a thread to the review that opened it. `comments` is the one field whose per-page cost grows with its size, so it is a variable: a caller keying on who OPENED each thread takes the root comment alone.
 REVIEW_THREADS_QUERY=$(
   cat <<'GRAPHQL'
 query($owner: String!, $name: String!, $pr: Int!, $comments: Int!, $endCursor: String) {
@@ -29,10 +31,10 @@ query($owner: String!, $name: String!, $pr: Int!, $comments: Int!, $endCursor: S
         nodes {
           id
           isResolved
-          isOutdated
+          resolvedBy { login }
           path
           line
-          comments(first: $comments) { nodes { fullDatabaseId author { login } body pullRequestReview { fullDatabaseId } } }
+          comments(first: $comments) { nodes { author { login } body pullRequestReview { submittedAt } } }
         }
       }
     }
@@ -45,13 +47,11 @@ GRAPHQL
 # threads, so the gate would go green with nothing for anyone to resolve. Two consumers raise
 # the same hold: post-oversized-review.sh (the diff is too large to read at all) and
 # post-pr-review.sh (GitHub rejected the structured review, so some finding has no thread of
-# its own). MARKER stamps a gating thread that ONLY ITS OWNER may resolve — the generic LLM
-# thread resolver excludes a thread carrying one, because it reads only the PR diff and a
-# "does the diff resolve this?" judgement would clear an evil-merge or needs-a-human hold the
-# diff cannot speak to. The caller writes the prose; this appends the marker, the resolver
-# exemption and the blocking severity, so no caller can raise a hold the LLM resolver may
-# clear or the gate may ignore. It anchors to the PR's first changed file with
-# subject_type=file: the concern is PR-wide, and all the gate needs is a RESOLVABLE thread.
+# its own). The caller writes the prose and names its MARKER; this appends that marker, the
+# HUMAN_HOLD_MARKER and the blocking severity, so no caller can raise a hold the gate ignores or
+# the PR's author may clear alone (see REVIEW_THREAD_CLEARED). It anchors to the PR's first
+# changed file with subject_type=file: the concern is PR-wide, and all the gate needs is a
+# RESOLVABLE thread.
 raise_human_review_finding() {
   local marker="$1" prose="$2"
   local owner="${GH_REPO%%/*}" name="${GH_REPO##*/}"
@@ -74,7 +74,8 @@ raise_human_review_finding() {
     {
       cat "$prose"
       printf '\n<sub>PR-wide finding: anchored to this file only to open a resolvable thread.</sub>\n\n'
-      printf '%s\n<!-- severity: blocking -->\n' "$marker"
+      printf '%s\n%s\n' "$marker" "$HUMAN_HOLD_MARKER"
+      severity_marker blocking
     } >"$body"
     retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/comments" \
       -f "commit_id=${HEAD_SHA}" \
@@ -86,7 +87,7 @@ raise_human_review_finding() {
   )
 }
 
-# jq projection: the thread's ROOT comment's author login, `""` when absent. GraphQL returns an app bot's login WITHOUT the REST `[bot]` suffix (`github-actions`, not `github-actions[bot]`), so the suffix is stripped here and every consumer compares the BARE login. One normalization, spliced by both predicates below and by any consumer that must know WHICH reviewer rooted a thread.
+# jq projection: the thread's ROOT comment's author login, `""` when absent. GraphQL returns an app bot's login WITHOUT the REST `[bot]` suffix (`github-actions`, not `github-actions[bot]`), so the suffix is stripped here and every consumer compares the BARE login. One normalization, spliced by the predicate below.
 # shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
 REVIEW_THREAD_ROOT_LOGIN='(.comments.nodes[0].author.login // "" | sub("\\[bot\\]$"; ""))'
 
@@ -94,63 +95,29 @@ REVIEW_THREAD_ROOT_LOGIN='(.comments.nodes[0].author.login // "" | sub("\\[bot\\
 # shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
 REVIEW_THREAD_ROOT_IS_REVIEWER="select($REVIEW_THREAD_ROOT_LOGIN == env.REVIEWER_LOGIN_BARE)"
 
-# jq predicate: the thread's ROOT comment was authored by one of the logins in the newline-separated GATING_REVIEWER_LOGINS the caller EXPORTED. The review-findings gate reads the repo's own reviewer and every external review bot (Codex) in ONE walk, then judges each thread against the model its author posts under; which logins gate comes from config/review-severities.json. An empty or unset variable matches nothing, so a caller that forgets the export reads no threads rather than every thread.
-# shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
-REVIEW_THREAD_ROOT_IS_A_GATING_REVIEWER="select($REVIEW_THREAD_ROOT_LOGIN as \$login | [env.GATING_REVIEWER_LOGINS // \"\" | split(\"\\n\")[] | select(length > 0)] | index(\$login) != null)"
+# The hidden markers a needs-a-human hold thread carries. HUMAN_HOLD_MARKER is on every hold
+# raise_human_review_finding opens; the two older markers cover a hold opened before it existed.
+_HUMAN_HOLD_MARKERS_JSON="$(jq -cn --arg a "$HUMAN_HOLD_MARKER" --arg b "$OVERSIZED_REVIEW_MARKER" \
+  --arg c "$DEGRADED_REVIEW_MARKER" '[$a, $b, $c]')"
 
-# jq expression: somebody other than the reviewer answered on the thread. Same login normalization and the same EXPORTED REVIEWER_LOGIN_BARE as the root-author predicate above. `.nodes[1:]` skips the root, so a thread nobody answered never passes — which also means the caller must have asked for more than one comment per thread (fetch_review_threads' 5th argument): with the default page of one, `.nodes[1:]` is empty for EVERY thread.
-# shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
-REVIEW_THREAD_NON_REVIEWER_REPLY_EXISTS='([.comments.nodes[1:][]
-       | select((.author.login // "" | sub("\\[bot\\]$"; "")) != env.REVIEWER_LOGIN_BARE)] | length > 0)'
-# The same question as a thread FILTER. A caller that needs the boolean itself — to branch on it rather than drop the thread — splices the expression above, so the two surfaces cannot disagree about what counts as an answer.
-# shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
-REVIEW_THREAD_HAS_NON_REVIEWER_REPLY="select($REVIEW_THREAD_NON_REVIEWER_REPLY_EXISTS)"
-
-# jq projection: the id of the review this thread's ROOT comment was submitted with — i.e. which review OWNS the thread — as a STRING, `""` when the field is absent. fullDatabaseId, not databaseId: review ids exceed Int32 (e.g. 4802416227) and GraphQL's Int-typed databaseId errors on them, while fullDatabaseId is a string, so consumers compare it string-vs-string against pr-reviews.bash's reviewId (both scripts project the same way by splicing this).
-# shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
-REVIEW_THREAD_ROOT_REVIEW_ID='(.comments.nodes[0].pullRequestReview.fullDatabaseId // "" | tostring)'
-
-# Stamped on the merge-delta finding thread's root comment, recording which merges that finding was raised about. Exported because the jq programs that read it run in external `gh` processes.
-export MERGE_DELTA_FINDING_MARKER="<!-- merge-delta-finding -->"
-# The login of the automated reviewer that roots every merge-delta finding thread, without the REST `[bot]` suffix GraphQL omits. NOT exported at this scope, unlike the marker above. A consumer sets
-# REVIEWER_LOGIN_BARE for its own queries, and one derives it from a variable BEFORE sourcing this file, so a top-level export here would silently replace the login it matches on. settled_merge_delta_shas exports it inside a subshell instead.
-MERGE_DELTA_REVIEWER_LOGIN="github-actions"
-
-# Which of a PR's merge commits somebody already traced to its parents, so neither the
-# reviewer nor the gate asks about them a second time. Both consumers read it here:
-# prepare-merge-delta-input.sh keeps a settled merge out of the model's input, and
-# post-merge-delta-review.sh keeps it out of a fresh finding's scope. THREE gates, each
-# closing a way a merge could be retired without anyone judging it:
-#   * The reviewer must be the thread's ROOT author, because the stamp is an HTML comment
-#     invisible in a rendered body — without this, anyone who can comment could plant one and
-#     retire a merge nobody looked at.
-#   * The thread must carry a REPLY from someone other than the reviewer, which puts the
-#     finding's escape hatch in evidence rather than in identity: the hold is cleared by
-#     tracing each flagged hunk to a parent IN A REPLY and then resolving, so resolving in
-#     silence must not buy the same result. It is an existence check, never a judgement of the
-#     reply's prose. The
-#     reviewer's own replies do not count: a bot cannot answer for the actor whose resolution
-#     is under review.
-#   * The thread must be RESOLVED. The reply gate alone prices the hold at a comment, and any
-#     commenter can pay it, including one who replies to object. Resolving is the deliberate
-#     act that says the evidence in the reply settles the merge.
-# Fails in the RAISE direction: an exhausted thread query yields an empty set, so nothing is
-# treated as settled rather than something being retired by an error.
-settled_merge_delta_shas() {
-  local owner="$1" name="$2" pr="$3"
-  local projection=".[] | select(.isResolved == true) | $REVIEW_THREAD_ROOT_IS_REVIEWER
-         | $REVIEW_THREAD_HAS_NON_REVIEWER_REPLY
-         | (.comments.nodes[0].body // \"\")
-         | select(contains(env.MERGE_DELTA_FINDING_MARKER))
-         | capture(\"<!-- merge-delta-reviewed:(?<shas>[^>]*)-->\").shas
-         | splits(\"[[:space:]]+\") | select(length > 0)"
-  # The subshell keeps this export off the caller. 100 comments per thread, not the
-  # root-only default: a thread truncated to its root reads as unanswered.
-  (
-    export REVIEWER_LOGIN_BARE="$MERGE_DELTA_REVIEWER_LOGIN"
-    fetch_review_threads "$owner" "$name" "$pr" "$projection" 100
-  ) | sort -u
-}
+# PROBLEM CLASS — a pull request's author clearing a hold that needs somebody else. GitHub lets
+# the author resolve any thread on their own pull request. A finding thread is theirs to settle,
+# but a needs-a-human hold (the diff was too large to read, or GitHub refused the findings) asks
+# for a reader the author is not. Both the merge gate and the hold-clear approver ask "does this
+# thread still hold?" through this one predicate, so the two cannot disagree.
+#
+# jq predicate over one thread: it is resolved, and when its root comment carries a hold marker,
+# the resolver is somebody other than the PR's author, the reviewer, or any bot. INVARIANT — this
+# is what stops the author from greening the gate on a hold alone. It reads PR_AUTHOR from `env`;
+# an empty one, or a resolution GitHub attributes to nobody, leaves the hold in place.
+# shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$b`, `$r` and `$a` belong to jq
+REVIEW_THREAD_CLEARED='(.isResolved == true
+  and ((((.comments.nodes[0].body // "") as $b | '"$_HUMAN_HOLD_MARKERS_JSON"'
+          | any(.[]; . as $m | $b | contains($m))) | not)
+       or ((.resolvedBy.login // "" | ascii_downcase) as $r
+           | (env.PR_AUTHOR // "" | ascii_downcase | sub("\\[bot\\]$"; "")) as $a
+           | $r != "" and $a != "" and ($r | endswith("[bot]") | not)
+             and $r != $a and $r != (env.REVIEWER_LOGIN_BARE // "" | ascii_downcase))))'
 
 # Which severities HOLD a merge, as a jq predicate over `$body`. <list> is the jq
 # path in the consumer's config that names them (`.gating` by default). Each
@@ -169,7 +136,7 @@ gating_severity_predicate() {
     # blank row would append `startswith("")` — true of every body.
     [[ -n "$sev" && -n "$sev_icon" ]] || continue
     [[ -n "$predicate" ]] && predicate+=" or "
-    predicate+="(\$body | split(\"\\n\") | any(. == \"<!-- severity: ${sev} -->\"))"
+    predicate+="(\$body | split(\"\\n\") | any(. == \"$(severity_marker "$sev")\"))"
     predicate+=" or (\$body | startswith(\"${sev_icon}\"))"
   done <<<"$rows"
   [[ -n "$predicate" ]] || {
@@ -179,29 +146,30 @@ gating_severity_predicate() {
   printf '%s' "$predicate"
 }
 
-# The line post-pr-review.mjs stamps on each finding of an accumulated read. The
-# poster defuses every HTML comment in model-written text, so only the poster can
-# write this line.
-DELTA_READ_FINDING_MARKER='<!-- read: delta -->'
+# DELTA_READ_FINDING_MARKER (review-markers.bash) is the line post-pr-review.mjs stamps on each
+# finding of an accumulated read. The poster defuses every HTML comment in model-written text, so
+# only the poster can write this line.
 
 # unresolved_gating_findings <owner> <name> <pr> <severity-config> — the
-# reviewer's unresolved threads carrying a gating finding, as a JSON array of
-# {path, line}. The merge gate reds on a non-empty answer and the delta-read
-# dispatcher declines on one, so both read the same threads through the same
-# predicate: a PR still holding findings is one whose next read would be of a
-# head its author is about to change.
+# reviewer's threads that still hold a gating finding (not REVIEW_THREAD_CLEARED),
+# as a JSON array of {path, line}. The merge gate reds on a non-empty answer and
+# the delta-read dispatcher declines on one, so both read the same threads through
+# the same predicate: a PR still holding findings is one whose next read would be
+# of a head its author is about to change.
 #
 # A finding of the accumulated read gates by `delta_gating` (else `gating`). That
 # read runs when the pull request is otherwise ready to merge, so a severity it
 # leaves out posts a thread that informs and does not hold the merge a second time.
 #
-# The caller must have EXPORTED REVIEWER_LOGIN_BARE.
+# The caller must have EXPORTED REVIEWER_LOGIN_BARE. The PR's author is read here, for
+# REVIEW_THREAD_CLEARED; a read that returns nobody leaves every hold thread holding.
 unresolved_gating_findings() {
-  local owner="$1" name="$2" pr="$3" config="$4" predicate delta_predicate
+  local owner="$1" name="$2" pr="$3" config="$4" predicate delta_predicate author
   predicate="$(gating_severity_predicate "$config")"
   delta_predicate="$(gating_severity_predicate "$config" '(.delta_gating // .gating)')"
-  fetch_review_threads "$owner" "$name" "$pr" \
-    "[.[] | select(.isResolved == false)
+  author="$(retry_stdout gh api "repos/${owner}/${name}/pulls/${pr}" --jq '.user.login // ""')"
+  PR_AUTHOR="$author" fetch_review_threads "$owner" "$name" "$pr" \
+    "[.[] | select($REVIEW_THREAD_CLEARED | not)
           | $REVIEW_THREAD_ROOT_IS_REVIEWER
           | . + {rootBody: (.comments.nodes[0].body // \"\")}
           | select(.rootBody as \$body

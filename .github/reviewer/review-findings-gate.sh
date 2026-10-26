@@ -4,8 +4,8 @@
 # merge when
 #   (a) the automated reviewer has read it at least once, or owes it no read at
 #       all, AND
-#   (b) no unresolved reviewer-rooted review thread still carries a merge-gating
-#       finding, AND
+#   (b) no reviewer-rooted review thread that still holds (REVIEW_THREAD_CLEARED
+#       in lib/review-threads.bash) carries a merge-gating finding, AND
 #   (c) no push after the covered head is still owed an accumulated read.
 # Resolving the last gating thread is what flips the gate — there is no approval
 # to mint, no sticky verdict to supersede, and no state beyond what the pull
@@ -120,13 +120,9 @@ GATE_CONTEXT="${GATE_CONTEXT:-$(jq -er '.gate_context' "$SEVERITY_CONFIG")}"
 # omits the REST `[bot]` suffix, and the shared jq predicates read this out of
 # `env`.
 #
-# ONE login, not a set. lib/review-threads.bash also ships
-# REVIEW_THREAD_ROOT_IS_A_GATING_REVIEWER, which walks a list so an external
-# review bot's threads gate too. That predicate needs a per-login severity model
-# — an external bot marks priority with its own badge, not with this reviewer's
-# `<!-- severity: … -->` marker — and no consumer config here carries one, so
-# wiring the walk without it would read those threads and gate on none of them.
-# Single-login is the honest shape until a config defines that model.
+# ONE login, not a set: an external review bot marks priority with its own badge,
+# not with this reviewer's `<!-- severity: … -->` marker, and no consumer config
+# here carries a per-login severity model to read its threads with.
 REVIEWER_LOGIN_BARE="${REVIEWER_LOGIN:-github-actions}"
 REVIEWER_LOGIN_BARE="${REVIEWER_LOGIN_BARE%'[bot]'}"
 export REVIEWER_LOGIN_BARE
@@ -234,7 +230,7 @@ else
   else
     verdict=red
     where="$(jq -r '[.[] | (.path // "(general)") + (if .line then ":" + (.line|tostring) else "" end)] | join(", ")' <<<"$gating")"
-    reason="${count} unresolved reviewer finding(s) still gate the merge: ${where} — resolve each thread (fix and let the resolver judge it, or resolve it with a reply) to clear"
+    reason="${count} unresolved reviewer finding(s) still gate the merge: ${where} — fix each one, reply, then resolve its thread"
   fi
 fi
 
