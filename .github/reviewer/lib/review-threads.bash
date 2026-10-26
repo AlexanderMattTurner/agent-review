@@ -107,16 +107,17 @@ _HUMAN_HOLD_MARKERS_JSON="$(jq -cn --arg a "$HUMAN_HOLD_MARKER" --arg b "$OVERSI
 # thread still hold?" through this one predicate, so the two cannot disagree.
 #
 # jq predicate over one thread: it is resolved, and when its root comment carries a hold marker,
-# the resolver is somebody other than the PR's author, the reviewer, or any bot. INVARIANT — this
-# is what stops the author from greening the gate on a hold alone. It reads PR_AUTHOR from `env`;
-# an empty one, or a resolution GitHub attributes to nobody, leaves the hold in place.
+# the resolver is somebody other than the PR's author or the reviewer. INVARIANT — this is what
+# stops the author from greening the gate on a hold alone. It reads PR_AUTHOR from `env`; an
+# empty one, or a resolution GitHub attributes to nobody, leaves the hold in place. GraphQL types
+# `resolvedBy` as a User and spells every login bare, so no field here can tell a bot apart.
 # shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$b`, `$r` and `$a` belong to jq
 REVIEW_THREAD_CLEARED='(.isResolved == true
   and ((((.comments.nodes[0].body // "") as $b | '"$_HUMAN_HOLD_MARKERS_JSON"'
           | any(.[]; . as $m | $b | contains($m))) | not)
        or ((.resolvedBy.login // "" | ascii_downcase) as $r
            | (env.PR_AUTHOR // "" | ascii_downcase | sub("\\[bot\\]$"; "")) as $a
-           | $r != "" and $a != "" and ($r | endswith("[bot]") | not)
+           | $r != "" and $a != ""
              and $r != $a and $r != (env.REVIEWER_LOGIN_BARE // "" | ascii_downcase))))'
 
 # Which severities HOLD a merge, as a jq predicate over `$body`. <list> is the jq

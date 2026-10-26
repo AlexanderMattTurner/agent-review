@@ -360,7 +360,9 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
         ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
         ("OVERSIZED_REVIEW_MARKER", PR_AUTHOR, "failure"),
         ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
-        ("HUMAN_HOLD_MARKER", "renovate[bot]", "failure"),
+        # GraphQL spells a login bare: the reviewer's own resolution is excluded
+        # by name, and an author whose REST login is `x[bot]` resolves as `x`.
+        ("HUMAN_HOLD_MARKER", "github-actions", "failure"),
         ("HUMAN_HOLD_MARKER", None, "failure"),
         ("HUMAN_HOLD_MARKER", "a-human", "success"),
     ],
