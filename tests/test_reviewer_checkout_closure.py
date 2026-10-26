@@ -42,6 +42,11 @@ DELTA_DEPS = (".github/reviewer/dispatch-delta-review.sh", *GATE_DEPS)
 # The sweep runs all three per PR, so its runner needs the union.
 REVIEWER_SCRIPT_DEPS = {
     "review-findings-gate.sh": GATE_DEPS,
+    "merge-group-gate.sh": (
+        ".github/reviewer/merge-group-gate.sh",
+        ".github/reviewer/merge-group-prs.sh",
+        *GATE_DEPS,
+    ),
     "approve-if-reviewer-hold-clear.sh": HOLD_CLEAR_DEPS,
     "dispatch-delta-review-for-sha.sh": (
         ".github/scripts/dispatch-delta-review-for-sha.sh",

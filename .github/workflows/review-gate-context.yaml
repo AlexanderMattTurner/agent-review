@@ -35,11 +35,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read # sparse-checkout the trusted gate script
-      pull-requests: read # read the PR's reviews
+      contents: read # sparse-checkout the trusted gate script, compare the batch
+      pull-requests: read # read the PRs' reviews and each commit's pull requests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The DEFAULT BRANCH, never the queued commit: the batch under test
+          # carries pull-request code, and the gate that judges it must not come
+          # from that code.
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
           # review-findings-gate.sh sources the shared review-thread, review
           # and skip-set libraries and reads the severity SSOT, so every one
@@ -47,6 +51,8 @@ jobs:
           # at its `source` line, or at the `jq` that reads the severities,
           # under `set -e`.
           sparse-checkout: |
+            .github/reviewer/merge-group-gate.sh
+            .github/reviewer/merge-group-prs.sh
             .github/reviewer/review-findings-gate.sh
             .github/reviewer/lib/review-threads.bash
             .github/reviewer/lib/pr-reviews.bash
@@ -64,20 +70,14 @@ jobs:
           # Through the environment, never spliced into the script body: a
           # `${{ }}` expansion inside `run:` is textual substitution, so a ref
           # carrying shell metacharacters would execute as code.
-          QUEUE_REF: ${{ github.ref }}
+          MG_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          # The BASE BRANCH, never merge_group.base_sha: under batching that
+          # field is the previous queue entry (see merge-group-prs.sh).
+          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
           # No MAX_DELTA_REVIEWS_PER_PR: the gate reads `max_delta_reviews_per_pr`
           # from the severity config, which review-gate.yaml's leg reads too, so
           # the queue cannot red a pull request its own head gate let in.
-        # The queue branch name carries the pull request number.
-        run: |
-          PR="$(sed -n 's|.*/pr-\([0-9]\{1,\}\)-.*|\1|p' <<<"$QUEUE_REF")"
-          if [[ -z "$PR" ]]; then
-            echo "::error::could not read a PR number from ${QUEUE_REF}" >&2
-            exit 1
-          fi
-          export PR
-          # REPORT_SHA unset: in the merge queue this job's own conclusion is
-          # the report, so the gate exits non-zero on a red verdict rather than
-          # posting a status.
-          SEVERITY_CONFIG=config/review-severities.json \
-            bash .github/reviewer/review-findings-gate.sh
+          SEVERITY_CONFIG: config/review-severities.json
+        # One evaluation per pull request in the batch; red on any red one.
+        run: bash .github/reviewer/merge-group-gate.sh
