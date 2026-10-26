@@ -91,6 +91,10 @@ def emit(doc):
 
 
 if method == "POST":
+    # A POST GitHub refuses: recorded nowhere, exactly as a lost request leaves nothing.
+    if path == os.environ.get("GH_FAIL_POST"):
+        sys.stderr.write("fake gh: HTTP 502 on %s\n" % path)
+        sys.exit(1)
     with open(os.environ["POST_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"path": path, "fields": fields}) + "\n")
     sys.exit(0)
@@ -162,6 +166,7 @@ def _run(
     threads: list[dict],
     notice: str | None = NOTICE,
     read: str = "first",
+    fail_post: str = "",
 ) -> tuple[subprocess.CompletedProcess, list[dict]]:
     """Run the real script against canned reviews/threads; return the process
     and the POSTs the fake gh recorded. notice=None leaves the file absent,
@@ -201,6 +206,7 @@ def _run(
             "GH_THREADS": str(tmp_path / "threads.json"),
             "GH_FILES": str(tmp_path / "files.json"),
             "POST_LOG": str(log),
+            "GH_FAIL_POST": fail_post,
         },
     )
     posted = [
@@ -234,16 +240,29 @@ def test_first_run_posts_the_notice_review_and_the_finding_thread(
         tmp_path, reviews=[_rest_review("lgtm from a human", rid=7)], threads=[]
     )
     assert proc.returncode == 0, proc.stderr
+    # The hold first: the review greens the gate's reviewed-at-all leg, so it
+    # must not land before the thread that holds the merge.
     assert [p["path"] for p in posted] == [
-        "repos/o/r/pulls/5/reviews",
         "repos/o/r/pulls/5/comments",
+        "repos/o/r/pulls/5/reviews",
     ]
-    review = posted[0]["fields"]
+    review = posted[1]["fields"]
     assert review["event"] == "COMMENT"
     assert NOTICE in review["body"]
     assert OVERSIZED_MARKER in review["body"]
     assert HEAD_MARKER in review["body"]
-    _assert_finding_comment(posted[1])
+    _assert_finding_comment(posted[0])
+
+
+def test_a_lost_hold_thread_posts_no_notice_review(tmp_path: Path) -> None:
+    """The notice review alone greens the gate, because the gate sees a read and
+    no thread to hold on. So when GitHub refuses the hold thread, the run must
+    stop red before the review, and leave nothing that reads as reviewed."""
+    proc, posted = _run(
+        tmp_path, reviews=[], threads=[], fail_post="repos/o/r/pulls/5/comments"
+    )
+    assert proc.returncode != 0
+    assert posted == []
 
 
 def test_a_notice_from_an_earlier_head_does_not_suppress_this_one(
@@ -258,10 +277,10 @@ def test_a_notice_from_an_earlier_head_does_not_suppress_this_one(
     proc, posted = _run(tmp_path, reviews=[_rest_review(stale)], threads=[])
     assert proc.returncode == 0, proc.stderr
     assert [p["path"] for p in posted] == [
-        "repos/o/r/pulls/5/reviews",
         "repos/o/r/pulls/5/comments",
+        "repos/o/r/pulls/5/reviews",
     ]
-    assert HEAD_MARKER in posted[0]["fields"]["body"]
+    assert HEAD_MARKER in posted[1]["fields"]["body"]
 
 
 def test_rerun_with_both_surfaces_live_posts_nothing(tmp_path: Path) -> None:
@@ -318,8 +337,8 @@ def test_a_non_reviewer_marker_quote_does_not_satisfy_idempotence(
     )
     assert proc.returncode == 0, proc.stderr
     assert [p["path"] for p in posted] == [
-        "repos/o/r/pulls/5/reviews",
         "repos/o/r/pulls/5/comments",
+        "repos/o/r/pulls/5/reviews",
     ]
 
 
@@ -332,7 +351,7 @@ def test_the_notice_stamps_the_head_it_decided_and_says_it_read_no_diff(
     an oversized run succeeds."""
     proc, posted = _run(tmp_path, reviews=[], threads=[])
     assert proc.returncode == 0, proc.stderr
-    body = posted[0]["fields"]["body"]
+    body = posted[1]["fields"]["body"]
     assert (
         f"<!-- review-coverage head={HEAD_SHA} base= reviewer={REVIEWER_SHA} "
         "read=first scope=oversized -->" in body
@@ -346,4 +365,4 @@ def test_an_oversized_accumulated_read_stamps_the_budget_that_paid(
     first-read budget, so a pull request too large to read is still bounded."""
     proc, posted = _run(tmp_path, reviews=[], threads=[], read="delta")
     assert proc.returncode == 0, proc.stderr
-    assert "read=delta scope=oversized -->" in posted[0]["fields"]["body"]
+    assert "read=delta scope=oversized -->" in posted[1]["fields"]["body"]
