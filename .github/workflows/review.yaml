@@ -64,6 +64,11 @@ on:
         required: false
         default: ""
         type: string
+      extra-instructions:
+        description: "Repo-relative path IN THE CALLING repository to review instructions the reviewer follows AFTER its prompt (this reviewer's own, or `review-prompt`'s). Use it to add your tree's conventions without forking the whole prompt; where the two conflict, these win. Empty adds none. A path that names no file stops the read before it spends a credential."
+        required: false
+        default: ""
+        type: string
       review-label:
         description: "The label that asks for a review on a pull request the CALLER's own `if:` skips — a low-risk title, a bot author. The caller must also list `labeled` in its `pull_request_target` types, or GitHub fires no run for the label."
         required: false
@@ -460,6 +465,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          EXTRA_INSTRUCTIONS_FILE: ${{ inputs.extra-instructions }}
           PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
@@ -661,6 +667,7 @@ jobs:
           MODEL: ${{ env.SHARD_MODEL || inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          EXTRA_INSTRUCTIONS_FILE: ${{ inputs.extra-instructions }}
           PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
@@ -696,6 +703,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           PROMPT_FILE: ${{ inputs.review-prompt || format('{0}/prompts/claude-pr-review.md', env.REVIEWER_DIR) }}
+          EXTRA_INSTRUCTIONS_FILE: ${{ inputs.extra-instructions }}
           PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}

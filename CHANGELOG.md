@@ -14,7 +14,9 @@ the prose from the release's commits.
 
 ### Added
 
-- A review can now carry a system diagram. When a pull request changes how three or more components talk to each other, the reviewer writes a Mermaid flowchart, and the posted review shows it under the summary, where GitHub draws it. It costs no extra model call: the same read that writes the summary writes the diagram. A sharded read posts none, because each shard sees only part of the diff. A consumer that passes its own `review-prompt` gets a diagram only once that prompt asks for the `diagram` field.
+- A caller can now add its own review instructions without replacing the reviewer's prompt. Pass a file in your repository as `extra-instructions`, and the reviewer follows it after its own prompt, with your file winning where the two conflict. A caller that copied the whole prompt into `review-prompt` to add a few rules kept the copy it made, and missed every later change to the reviewer's prompt. A path that names no file stops the read before it spends a credential.
+
+- A review can now carry a system diagram. When a pull request changes how three or more components talk to each other, the reviewer writes a Mermaid flowchart, and the posted review shows it under the summary, where GitHub draws it. It costs no extra model call: the same read that writes the summary writes the diagram. A sharded read posts none, because each shard sees only part of the diff. A consumer that replaces the prompt with its own `review-prompt` gets a diagram only once that prompt asks for the `diagram` field; one that passes `extra-instructions` gets it with no change.
 
 ### Changed
 

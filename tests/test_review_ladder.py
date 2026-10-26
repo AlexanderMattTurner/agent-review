@@ -70,7 +70,7 @@ def _walk(
     attempts: list[tuple[int, str, bool]] = []
     events = [] if events is None else events
 
-    def fake_attempt(index, token, metered, log, timeout):  # noqa: ARG001
+    def fake_attempt(index, token, metered, log, timeout):
         attempts.append((index, token, metered))
         events.append("attempt")
         Path(log).write_text(json.dumps(log_for(index)), encoding="utf-8")
@@ -274,7 +274,7 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
             refused = {"type": "result", "is_error": True, "total_cost_usd": 0}
             refused["api_error_status"] = 401
             stdout.write(json.dumps([refused]).encode())
-            return None
+            return
         raise module.subprocess.TimeoutExpired(cmd="claude", timeout=1500)
 
     # Both are the stdlib modules themselves; monkeypatch restores them.
@@ -310,3 +310,49 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
     assert "refused with HTTP" not in gate.stderr
     # A killed read may have billed, so the gate must not grant a free retry.
     assert gate_out.read_text(encoding="utf-8") == "execution_reached_model=true\n"
+
+
+@pytest.mark.parametrize("extra", ["house-rules.md", ""], ids=["named", "unset"])
+def test_the_agent_is_told_to_follow_the_callers_extra_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str
+) -> None:
+    """A caller's `extra-instructions` reach the agent only through the prompt the
+    CLI is handed, so drive the real attempt() and read that argv."""
+    module = _module()
+    prompts: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        prompts.append(command[command.index("-p") + 1])
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    for key, value in {
+        "PR_INPUT_DIR": str(tmp_path),
+        "PROMPT_FILE": "p.md",
+        "MODEL": "m",
+        "EXTRA_INSTRUCTIONS_FILE": extra,
+    }.items():
+        monkeypatch.setenv(key, value)
+    module.attempt(1, "token", True, tmp_path / "log.json", 1)
+    monkeypatch.undo()
+
+    told = "Then follow the instructions in house-rules.md as well."
+    assert (told in prompts[0]) == bool(extra)
+    assert "Follow the instructions in p.md" in prompts[0]
+
+
+def test_a_missing_extra_instructions_file_stops_the_run_before_any_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent told to follow a file it cannot read reviews without the caller's
+    conventions and still posts a verdict, so the ladder refuses unspent."""
+    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", str(tmp_path / "absent.md"))
+    events: list[str] = []
+    with pytest.raises(SystemExit, match="extra-instructions names no file"):
+        _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean(), events=events)
+    assert events == []
+    monkeypatch.delenv("EXTRA_INSTRUCTIONS_FILE")
+    present = tmp_path / "present.md"
+    present.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", str(present))
+    attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean())
+    assert attempts == [(8, PAID, True)]
