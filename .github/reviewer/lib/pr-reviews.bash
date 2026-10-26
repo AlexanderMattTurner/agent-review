@@ -12,7 +12,8 @@
 # one — nor a fold that picks by array order instead of submittedAt.
 #
 # Consumers: decide-pr-review-trigger.sh, recheck-pr-review-owed.sh,
-# review-findings-gate.sh.
+# review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh,
+# post-oversized-review.sh, and .github/scripts/auto-approve-skipped-pr.sh.
 
 # retry_stdout: sourced here rather than assumed, so a consumer gets the retry
 # ladder by sourcing this file alone. lib-ci-retry.sh guards against double-source.

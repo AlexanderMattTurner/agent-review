@@ -28,7 +28,7 @@ SCRIPT = REPO_ROOT / ".github" / "reviewer" / "post-pr-review.sh"
 HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
 BASE_SHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
 REVIEWER_SHA = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
-DEGRADED_MARKER = "<!-- degraded-review -->"
+DEGRADED_MARKER = reviewer_marker("DEGRADED_REVIEW_MARKER")
 
 # Two added lines per file, so both findings below anchor for real.
 DIFF = """\

@@ -166,9 +166,10 @@ def current_path() -> str:
 
 
 def reviewer_marker(name: str) -> str:
-    """A marker string out of .github/reviewer/lib/pr-reviews.bash, which is the one
-    home for it. Read through bash rather than copied here, so a rename reds the
-    tests that assert on the marker instead of silently splitting them from it."""
+    """A marker string as the bash side binds it: pr-reviews.bash sources
+    review-markers.bash, which reads the one table in lib/shared-names.json. Read
+    through bash rather than copied here, so a rename reds the tests that assert on
+    the marker instead of silently splitting them from it."""
     lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"
     proc = subprocess.run(
         ["bash", "-c", 'source "$1"; printf %s "${!2}"', "_", str(lib), name],

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, reviewer_marker
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "review-findings-gate.sh"
 SEVERITIES = REPO_ROOT / "config" / "review-severities.json"
@@ -354,20 +354,15 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
     )
 
 
-HOLD_MARKERS = json.loads(
-    (REPO_ROOT / ".github/reviewer/lib/shared-names.json").read_text(encoding="utf-8")
-)["review_markers"]
-
-
 @pytest.mark.parametrize(
     ("marker", "resolved_by", "expected"),
     [
-        ("human_hold", PR_AUTHOR, "failure"),
-        ("oversized_review", PR_AUTHOR, "failure"),
-        ("degraded_review", "PR-Author", "failure"),
-        ("human_hold", "renovate[bot]", "failure"),
-        ("human_hold", None, "failure"),
-        ("human_hold", "a-human", "success"),
+        ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
+        ("OVERSIZED_REVIEW_MARKER", PR_AUTHOR, "failure"),
+        ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
+        ("HUMAN_HOLD_MARKER", "renovate[bot]", "failure"),
+        ("HUMAN_HOLD_MARKER", None, "failure"),
+        ("HUMAN_HOLD_MARKER", "a-human", "success"),
     ],
 )
 def test_only_somebody_else_clears_a_needs_a_human_hold(
@@ -377,7 +372,7 @@ def test_only_somebody_else_clears_a_needs_a_human_hold(
     refused the findings — is not the author's to clear. GitHub lets the author
     resolve it anyway, so the gate must read WHO resolved it. The pair: an
     ordinary finding the author resolves stops gating (below)."""
-    body = f"needs a human read\n{HOLD_MARKERS[marker]}\n<!-- severity: blocking -->"
+    body = f"needs a human read\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
     hold = thread(body, resolved=True, resolved_by=resolved_by)
     assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
 

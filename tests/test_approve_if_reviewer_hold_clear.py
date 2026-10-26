@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._helpers import reviewer_marker
+
 REPO_ROOT = Path(
     subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -416,9 +418,7 @@ def test_a_needs_a_human_hold_the_author_resolved_still_holds(tmp_path: Path):
     # Resolve on it leaves it holding, so another thread resolved by somebody
     # else does not make the whole hold clear. The merge gate reads the same
     # predicate, so the two agree.
-    marker = json.loads(
-        (REPO_ROOT / ".github/reviewer/lib/shared-names.json").read_text()
-    )["review_markers"]["human_hold"]
+    marker = reviewer_marker("HUMAN_HOLD_MARKER")
     res, calls = run(
         tmp_path,
         threads=[

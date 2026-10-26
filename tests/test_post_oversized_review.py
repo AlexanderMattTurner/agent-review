@@ -27,12 +27,12 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, reviewer_marker
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "post-oversized-review.sh"
 
 HEAD_SHA = "cafef00dcafef00dcafef00dcafef00dcafef00d"
-OVERSIZED_MARKER = "<!-- oversized-review -->"
+OVERSIZED_MARKER = reviewer_marker("OVERSIZED_REVIEW_MARKER")
 # The notice review is idempotent per HEAD, not per PR: an oversized run spends the
 # PR's read budget, so one notice per PR would pin that count at 1 and let every later
 # push re-run the whole job forever.
