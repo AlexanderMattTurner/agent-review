@@ -264,14 +264,6 @@ def main() -> None:
         )
     slots = rungs()
     tokens = {s.index: os.environ.get(f"RUNG_{s.index}_TOKEN", "") for s in slots}
-    if not any(is_metered(token) for token in tokens.values() if token):
-        # The paid key is the backstop once every subscription token has failed, in
-        # whichever rung it sits. No metered credential anywhere is a wiring fault, so
-        # the run says so rather than quietly reviewing with no last resort.
-        sys.exit(
-            "::error::no rung holds a metered Anthropic API key — the reviewer has no paid key to fall back to"
-        )
-
     # CONFIGURED rungs only. An unset rung is skipped rather than fatal — that is the
     # contract the workflow's own input descriptions state. A metered key goes LAST,
     # whichever slot holds it, so a review spends every subscription token before it
