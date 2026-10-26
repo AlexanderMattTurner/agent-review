@@ -51,9 +51,7 @@ from _ladder import (  # pylint: disable=wrong-import-position
 from lib_credential_ladder import (  # pylint: disable=wrong-import-position
     BACKOFF_SECONDS,
     FREE_RETRY_BACKOFF_SECONDS,
-)
-from lib_credential_ladder import (  # pylint: disable=wrong-import-position
-    rungs as ladder_slots,
+    rungs,
 )
 
 OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -167,7 +165,7 @@ def attempt(index: int, token: str, metered: bool, log: Path, timeout: int) -> b
     # The rung's own credential and nothing else: every other rung's token is
     # dropped, so the CLI cannot authenticate with a credential this attempt is not
     # spending, and the log's cost is attributable to one token.
-    for slot in ladder_slots():
+    for slot in rungs():
         env.pop(f"RUNG_{slot.index}_TOKEN", None)
     env.pop(OAUTH_ENV, None)
     env.pop(METERED_ENV, None)
@@ -264,7 +262,7 @@ def main() -> None:
         sys.exit(
             f"::error::extra-instructions names no file in the checkout: {extra_file!r}"
         )
-    slots = ladder_slots()
+    slots = rungs()
     tokens = {s.index: os.environ.get(f"RUNG_{s.index}_TOKEN", "") for s in slots}
     if not any(is_metered(token) for token in tokens.values() if token):
         # The paid key is the backstop once every subscription token has failed, in
@@ -282,14 +280,14 @@ def main() -> None:
         (s for s in slots if tokens[s.index]),
         key=lambda s: is_metered(tokens[s.index]),
     )
-    rungs: list[Rung] = [
+    ladder: list[Rung] = [
         Rung(name=f"rung_{s.index}", token_env=s.env_var, configured=True) for s in walk
     ]
     # The free same-credential retry, only when one credential is configured: with a
     # second one, a fresh credential is the better next attempt. `_ladder.advances`
     # lets it run only on a proven zero-cost error.
     if len(walk) == 1:
-        rungs.append(
+        ladder.append(
             Rung(
                 name=f"rung_{walk[0].index}_retry",
                 token_env=walk[0].env_var,
@@ -300,7 +298,7 @@ def main() -> None:
 
     outcomes: dict[str, RungOutcome] = {}
     newest_log = ""
-    for position, (rung, slot) in enumerate(zip(rungs, walk)):
+    for position, (rung, slot) in enumerate(zip(ladder, walk)):
         token = tokens[slot.index]
         # The wait follows the attempt's POSITION, not its slot: the first attempt
         # waits for nothing, whichever slot it spends.
@@ -314,11 +312,11 @@ def main() -> None:
             newest_log = str(log)
         outcome = TIMED_OUT if timed_out else outcome_of(log)
         outcomes[rung.name] = outcome
-        following = rungs[position + 1] if position + 1 < len(rungs) else None
+        following = ladder[position + 1] if position + 1 < len(ladder) else None
         if following is None or not advances(position, outcome, following.configured):
             break
 
-    verdict = evaluate(rungs, outcomes)
+    verdict = evaluate(ladder, outcomes)
     print(
         f"ladder ran {list(verdict.ran)}; winner {verdict.winner or 'none'}", flush=True
     )
