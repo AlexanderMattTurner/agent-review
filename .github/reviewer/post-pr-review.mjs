@@ -15,29 +15,26 @@ import {
   plansLine,
 } from "./lib-review-cost.mjs";
 
-// INVARIANT — every model-authored string bound for a posted comment passes through this Layer-1
-// sanitizer first. The review text is MODEL output derived from the untrusted PR diff, so a hidden
-// payload the model echoed from that diff must not ride into the posted review. Layer 1 strips
-// invisible/format (Cf) characters and ANSI escapes and leaves visible bytes — code, markdown,
-// emoji — untouched, so it never corrupts a legitimate suggestion.
-/** @param {string} text @returns {Promise<string>} */
-async function scrub(text) {
-  if (typeof text !== "string" || !text) return text;
+// INVARIANT — every model-authored string passes through modelText exactly once, before any
+// trusted marker joins it. The text is MODEL output derived from the untrusted PR diff, and the
+// posted body also carries the records the reviewer reads back: the coverage stamp, the read and
+// severity markers, the cost footnote. Two steps, in this order:
+//   1. Layer-1 sanitize: strip invisible/format (Cf) characters and ANSI escapes. Visible bytes —
+//      code, markdown, emoji — stay, so a legitimate suggestion is never corrupted.
+//   2. Defuse every `<!--`, so the text opens no HTML comment and forges no record. The text stays
+//      visible, and a fenced suggestion gets the same treatment, since readers match raw bodies.
+// Step 1 must run first: `<\u200B!--` contains no `<!--` until the strip removes the U+200B.
+/** @param {unknown} text @returns {Promise<string>} */
+async function modelText(text) {
+  if (typeof text !== "string" || !text) return "";
   const { cleaned } = await sanitize(text, { html: false });
-  return cleaned;
+  return cleaned.replaceAll("<!--", "&lt;!--");
 }
 
-// INVARIANT — a model-authored string opens no HTML comment. This body carries the records the
-// reviewer's own machinery reads back off it: the coverage stamp, the read markers, the severity
-// marker, the cost footnote. The model's text sits in the SAME body, derived from an untrusted
-// diff, so a pull request that talks it into echoing one forges the record — a `review-coverage`
-// stamp in the summary is captured AHEAD of the trusted one, which spends the accumulated budget
-// or claims a head nobody read. Escaping the opener leaves the text visible and readable, and
-// every reader of a marker then finds nothing. It applies to a fenced suggestion too: a forged
-// stamp inside a fence is read exactly like one outside it.
-/** @param {string} text @returns {string} */
-const defuseHtmlComments = (text) =>
-  typeof text === "string" ? text.replaceAll("<!--", "&lt;!--") : text;
+// The marker strings, from the table the bash readers also load.
+const MARKERS = JSON.parse(
+  readFileSync(new URL("./lib/shared-names.json", import.meta.url), "utf8"),
+).review_markers;
 
 const dir = process.env.PR_INPUT_DIR;
 if (!dir) throw new Error("PR_INPUT_DIR required");
@@ -87,13 +84,9 @@ try {
 }
 
 const findings = Array.isArray(review.findings) ? review.findings : [];
-const summary = defuseHtmlComments(
-  typeof review.summary === "string" ? review.summary.trim() : "",
-);
+const summary = (await modelText(review.summary)).trim();
 // Optional Mermaid source; GitHub renders a `mermaid` fence in a review body as the diagram.
-const diagram = defuseHtmlComments(
-  typeof review.diagram === "string" ? review.diagram.trim() : "",
-);
+const diagram = (await modelText(review.diagram)).trim();
 
 // Every review posts as a COMMENT; the review event carries no merge consequence at all. The merge
 // lever is the inline threads the review-findings status gate reads, never an
@@ -240,7 +233,7 @@ const DELTA_READ = process.env.REVIEW_READ === "delta";
 /** @param {string} sev */
 const severityMarker = (sev) =>
   ICON[sev]
-    ? `\n\n<!-- severity: ${sev} -->${DELTA_READ ? "\n<!-- read: delta -->" : ""}`
+    ? `\n\n${MARKERS.severity_marker.replace("%s", () => sev)}${DELTA_READ ? `\n${MARKERS.delta_read_finding}` : ""}`
     : "";
 
 // A fence longer than any run of backticks in the text keeps model-authored text containing ``` from breaking out of the block and rendering as markdown.
@@ -296,15 +289,15 @@ function syntheticAnchor(findingPath) {
 const comments = [];
 const spill = [];
 for (const f of findings) {
-  const detail = defuseHtmlComments(
-    [f.title, f.body].filter(Boolean).join(" — ").trim(),
-  );
+  const detail = (
+    await modelText([f.title, f.body].filter(Boolean).join(" — "))
+  ).trim();
   // A detail-less finding is dropped and never gates: there is nothing to resolve.
   if (!detail) continue;
   const sev = normSeverity(f.severity);
   const line = Number.isInteger(f.line) ? f.line : null;
-  const hasSuggestion =
-    typeof f.suggestion === "string" && f.suggestion.length > 0;
+  const suggestion = await modelText(f.suggestion);
+  const hasSuggestion = suggestion.length > 0;
   const side = hasSuggestion || f.side !== "LEFT" ? "RIGHT" : "LEFT";
   const ok = side === "LEFT" ? leftOk : rightOk;
 
@@ -350,12 +343,12 @@ for (const f of findings) {
     }
     // A `suggestion` renders as a GitHub suggested-change block the author applies with one click. It can only target the new file, so a finding carrying one is forced RIGHT.
     if (hasSuggestion && anchorSide === "RIGHT")
-      comment.body += `\n\n${fencedBlock("suggestion", defuseHtmlComments(f.suggestion))}`;
+      comment.body += `\n\n${fencedBlock("suggestion", suggestion)}`;
     comment.body += severityMarker(sev);
     comments.push(comment);
   } else {
     const where = f.path
-      ? defuseHtmlComments(`\`${f.path}${line ? `:${line}` : ""}\``)
+      ? await modelText(`\`${f.path}${line ? `:${line}` : ""}\``)
       : "(general)";
     // Per the SEVERITY_CONFIG a gating finding that cannot anchor gets a synthetic anchor: the
     // gate reads only threads, so spilling it into the review body would let it ride through
@@ -376,17 +369,12 @@ for (const f of findings) {
   }
 }
 
-// Sanitize the model-authored strings before they reach the payload: each inline
-// comment body (which already carries its suggestion block) and the composite
-// summary/spill body.
-for (const c of comments) c.body = await scrub(c.body);
-
 const bodyParts = [];
 if (summary) bodyParts.push(summary);
 if (diagram) bodyParts.push(fencedBlock("mermaid", diagram));
 if (spill.length > 0)
   bodyParts.push(`#### Additional notes\n${spill.join("\n")}`);
-const body = (await scrub(bodyParts.join("\n\n"))).trim();
+const body = bodyParts.join("\n\n").trim();
 
 // A review with nothing to say is noise, so skip it. The status gate does not
 // count a skipped run as a review, so a PR whose reviewer produced nothing

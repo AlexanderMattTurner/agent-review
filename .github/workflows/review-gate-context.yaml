@@ -50,6 +50,8 @@ jobs:
             .github/reviewer/review-findings-gate.sh
             .github/reviewer/lib/review-threads.bash
             .github/reviewer/lib/pr-reviews.bash
+            .github/reviewer/lib/review-markers.bash
+            .github/reviewer/lib/shared-names.json
             .github/reviewer/lib/review-skip-set.bash
             .github/reviewer/lib-ci-retry.sh
             config/review-severities.json

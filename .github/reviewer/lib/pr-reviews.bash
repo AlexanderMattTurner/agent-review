@@ -12,12 +12,14 @@
 # one — nor a fold that picks by array order instead of submittedAt.
 #
 # Consumers: decide-pr-review-trigger.sh, recheck-pr-review-owed.sh,
-# review_findings_gate.py.
+# review-findings-gate.sh.
 
 # retry_stdout: sourced here rather than assumed, so a consumer gets the retry
 # ladder by sourcing this file alone. lib-ci-retry.sh guards against double-source.
 # shellcheck source=.github/reviewer/lib-ci-retry.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib-ci-retry.sh"
+# shellcheck source=.github/reviewer/lib/review-markers.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-markers.bash"
 
 # $endCursor + pageInfo are what make `gh api graphql --paginate` able to walk:
 # gh feeds the previous page's endCursor back in and stops on hasNextPage=false.
@@ -64,38 +66,23 @@ reviewer_reviews_ndjson() {
              reviewedSha: (.commit.oid // "")}'
 }
 
-# The markers that say a review SPENT this PR's read budget. Both are stamped by
-# the producer and read back here, so the string has one home. HTML comments, so
-# GitHub renders nothing and a human reading the review sees the prose alone.
+# The markers that say a review SPENT this PR's read budget come from
+# review-markers.bash. WHOLE_DIFF_READ_MARKER goes on the summary review
+# post-pr-review.sh posts once the agent has read the diff. OVERSIZED_REVIEW_MARKER
+# goes on the notice post-oversized-review.sh posts for a diff too large to read;
+# that run still spent a job, so it still spends budget. AUTO_APPROVAL_MARKER is on
+# the stand-in approval auto-approve-skipped-pr.sh posts, the one non-read this
+# library can name.
 #
-# WHOLE_DIFF_READ_MARKER goes on the summary review post-pr-review.sh posts once
-# the agent has read the diff — on the structured payload and on the degraded
-# path alike. OVERSIZED_REVIEW_MARKER goes on the notice post-oversized-review.sh
-# posts for a diff too large to read; that run still spent a job, so it still
-# spends budget, and its notice is stamped per head for the same reason.
-WHOLE_DIFF_READ_MARKER='<!-- whole-diff-read -->'
-OVERSIZED_REVIEW_MARKER='<!-- oversized-review -->'
-
-# The stand-in approval auto-approve-skipped-pr.sh posts carries this marker in its
-# body. It is the SSOT for that string, and the one non-read this library can name:
-# `real_reviewer_reviews` excludes it on the dated path, where selecting IN by the two
-# markers above is not what decides.
-AUTO_APPROVAL_MARKER='<!-- automated-approval-no-read -->'
-
 # COVERAGE STAMP — what a review READ, on the body of every review a read posts.
 # One line, produced by `coverage_stamp` and parsed by `coverage_of_reviews`
-# below, so the format has one home. Without it a reader can tell that the
-# reviewer spoke and not WHICH commits it spoke about, so an unreviewed push and
-# an unresolved finding look the same from outside.
+# below, so the format has one home:
 #
 #   <!-- review-coverage head=<sha> base=<sha> reviewer=<sha> read=first|delta scope=whole|since:<sha> -->
 #
-# `head` is the commit the diff was fetched at, `base` the merge target it was
-# fetched against, `reviewer` the reviewer commit that read it, `read` which
-# budget paid, and `scope` whether the read saw the whole diff or only the
-# pushes after <sha>. An HTML comment, so a human reading the review sees the
-# prose alone.
-COVERAGE_MARKER_PREFIX='<!-- review-coverage '
+# `head` is the commit the diff was fetched at, `base` the merge target, `reviewer`
+# the reviewer commit that read it, `read` which budget paid, and `scope` whether
+# the read saw the whole diff or only the pushes after <sha>.
 
 # The scope of a stamp posted by a read that was ABANDONED — the give-up notice
 # in dispatch-delta-review.sh. It is the one stamp that keeps the head an EARLIER
@@ -121,10 +108,14 @@ coverage_stamp_of() {
     "$(jq -r '.scope // "whole"' "$1")"
 }
 
-# The jq that reads the stamp back off a review body. `capture` emits NOTHING for
-# a body without one, so an unstamped review drops out of every fold below rather
-# than folding in as an empty record.
-_COVERAGE_CAPTURE='capture("<!-- review-coverage head=(?<head>[0-9a-f]+) base=(?<base>[0-9a-f]*) reviewer=(?<reviewer>[0-9a-f]*) read=(?<read>[a-z]+) scope=(?<scope>[^ ]+) -->")'
+# The jq that reads the stamp back off a review body. It emits NOTHING for a body
+# without one, so an unstamped review drops out of every fold below rather than
+# folding in as an empty record.
+#
+# INVARIANT — the LAST stamp in a body is the one read. The poster appends the
+# trusted stamp after every model-written string, so a stamp the model echoed from
+# the untrusted diff can only come earlier. Taking the first match would let it win.
+_COVERAGE_CAPTURE="([capture(\"${COVERAGE_MARKER_PREFIX}head=(?<head>[0-9a-f]+) base=(?<base>[0-9a-f]*) reviewer=(?<reviewer>[0-9a-f]*) read=(?<read>[a-z]+) scope=(?<scope>[^ ]+) -->\"; \"g\")] | last // empty)"
 
 # coverage_of_reviews — stdin is `reviewer_reviews_ndjson` output; prints the
 # NEWEST review's coverage as one JSON object {head, base, reviewer, read,
@@ -137,9 +128,9 @@ _COVERAGE_CAPTURE='capture("<!-- review-coverage head=(?<head>[0-9a-f]+) base=(?
 coverage_of_reviews() {
   jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" \
     --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
-    "[.[] | (.body // \"\") as \$b
-           | if (\$b | test(\"review-coverage \"))
-             then ((\$b | $_COVERAGE_CAPTURE) | select(.scope != \$abandoned))
+    "[.[] | (.body // \"\") as \$b | [\$b | $_COVERAGE_CAPTURE] as \$stamp
+           | if (\$stamp | length) > 0
+             then (\$stamp[0] | select(.scope != \$abandoned))
                   + {submittedAt: (.submittedAt // \"\")}
              elif ((\$b | contains(\$read)) and ((.reviewedSha // \"\") != \"\"))
              then {head: .reviewedSha, base: \"\", reviewer: \"\", read: \"first\",
@@ -152,8 +143,7 @@ coverage_of_reviews() {
 # ACCUMULATED-delta reads this PR has spent, which is the budget
 # `max-delta-reviews-per-pr` bounds.
 delta_reviews_count() {
-  jq -rs "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
-                | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length"
+  jq -rs "[.[] | (.body // \"\") | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length"
 }
 
 # delta_read_abandoned — stdin is `reviewer_reviews_ndjson` output; prints `true`
@@ -165,8 +155,7 @@ delta_reviews_count() {
 # exists to end, arriving one budget unit later.
 delta_read_abandoned() {
   jq -rs --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
-    "[.[] | (.body // \"\") | select(test(\"review-coverage \"))
-           | $_COVERAGE_CAPTURE
+    "[.[] | (.body // \"\") | $_COVERAGE_CAPTURE
            | select(.read == \"delta\" and .scope == \$abandoned)] | length > 0"
 }
 
@@ -236,11 +225,11 @@ real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
     jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
       --arg marked_from "${READS_MARKED_FROM:-}" --arg approval "$AUTO_APPROVAL_MARKER" \
-      'select((.body // "") as $b
-              | (($b | test("review-coverage [^>]*read=delta")) | not)
-              and (($b | contains($read)) or ($b | contains($oversized))
-                or ($marked_from != "" and (($b | contains($approval)) | not)
-                    and ((.submittedAt // "") < $marked_from))))'
+      "select((.body // \"\") as \$b
+              | ([\$b | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length == 0)
+              and ((\$b | contains(\$read)) or (\$b | contains(\$oversized))
+                or (\$marked_from != \"\" and ((\$b | contains(\$approval)) | not)
+                    and ((.submittedAt // \"\") < \$marked_from))))"
 }
 
 # require_review_budget — bind MAX_REVIEWS_PER_PR from the environment, or refuse.

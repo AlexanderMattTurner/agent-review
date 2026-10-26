@@ -1,4 +1,5 @@
 {
+  "comment": "PROBLEM CLASS \u2014 a name or hidden marker string that two LANGUAGES must spell identically. The reviewer writes HTML-comment markers onto reviews and threads from bash and from JavaScript, and reads them back with jq. A rename that updates one spelling leaves the other side looking for a string nobody writes, so a hold never fires or a read is never counted. Every consumer reads the string here: lib/review-markers.bash for bash, JSON.parse for JavaScript and Python. `oauth_ladder_vars` names the credential slots in slot order. `severity_marker` holds `%s` where the severity name goes.",
   "oauth_ladder_vars": [
     "CLAUDE_CODE_OAUTH_TOKEN_FALLBACK",
     "CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_2",
@@ -8,5 +9,15 @@
     "CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_6",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "FAR_ANTHROPIC_API_KEY"
-  ]
+  ],
+  "review_markers": {
+    "whole_diff_read": "<!-- whole-diff-read -->",
+    "oversized_review": "<!-- oversized-review -->",
+    "degraded_review": "<!-- degraded-review -->",
+    "automated_approval": "<!-- automated-approval-no-read -->",
+    "coverage_prefix": "<!-- review-coverage ",
+    "delta_read_finding": "<!-- read: delta -->",
+    "severity_marker": "<!-- severity: %s -->",
+    "human_hold": "<!-- needs-human-resolver -->"
+  }
 }
