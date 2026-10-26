@@ -40,6 +40,7 @@ jobs:
       # EMPTY in the expression context, so it refuses to clone rather than run
       # unpinned code.
       reviewer-ref: main
+      extra-instructions: .github/prompts/review-extra-instructions.md
     secrets:
       rung_8: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       # ... the other 7; see `.github/workflows/claude-review.yaml` in this
@@ -63,7 +64,8 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `reviewer-repository`      | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                                                                                                                   |
 | `reviewer-ref`             | required in practice  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins. An empty value stops the run at the clone step.                                                                                                    |
 | `model`                    | `opus`                | The model behind every verdict.                                                                                                                                                                                                     |
-| `review-prompt`            | the reviewer's own    | A path in YOUR repository to the review instructions, so a reviewer of your tree holds it to your conventions.                                                                                                                      |
+| `review-prompt`            | the reviewer's own    | A path in YOUR repository to review instructions that REPLACE the reviewer's own. Prefer `extra-instructions`: a replaced prompt misses every later change to the reviewer's.                                                       |
+| `extra-instructions`       | none                  | A path in YOUR repository to instructions the reviewer follows after its prompt, winning where they conflict. Put your tree's conventions here. A path that names no file stops the read.                                           |
 | `setup-command`            | none                  | A dependency sync run in your base checkout before the model call.                                                                                                                                                                  |
 | `setup-cache-path`         | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                                                                                                                      |
 | `setup-cache-key-files`    | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry.                                                                                                |

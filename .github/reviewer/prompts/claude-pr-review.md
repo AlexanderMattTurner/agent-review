@@ -48,8 +48,9 @@ reviewed. Write `review.json` with the file-edit tools directly.
    understand how the changed code fits: cross-file impact, invariants, and the
    repo's documented conventions. For those conventions read
    `.claude/rules/code-style.md`, which carries the cross-language rules and the
-   `## Readability` section, plus the `.claude/rules/` file for each language the
-   diff touches (`shell-style.md`, `python-style.md`) — not `CLAUDE.md`, whose
+   `## Readability` section, plus every other `.claude/rules/` file whose
+   `paths:` front matter matches a file the diff touches (`shell-style.md` for a
+   shell script, `hooks.md` for a hook) — not `CLAUDE.md`, whose
    bulk governs how an agent runs a working session and says nothing about
    whether this diff is good.
 6. Review for: correctness bugs; security issues (this repo IS a security tool —
