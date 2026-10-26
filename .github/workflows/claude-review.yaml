@@ -123,7 +123,6 @@ jobs:
       # `github.sha` names that commit. Do not drop this: the called workflow's
       # `github.job_workflow_sha` fallback is empty and it would refuse to clone.
       reviewer-ref: ${{ github.sha }}
-      review-prompt: .github/prompts/claude-pr-review.md
       # Empty on every pull_request_target event, which is what keeps the first
       # read on its own budget; set only by the sweep's dispatch.
       pr-number: ${{ inputs.pr || '' }}

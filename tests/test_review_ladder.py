@@ -62,6 +62,7 @@ def _walk(
         "PR_INPUT_DIR": str(tmp_path / "pr-input"),
         "PROMPT_FILE": "prompt.md",
         "MODEL": "opus",
+        "EXTRA_INSTRUCTIONS_FILE": os.environ.get("EXTRA_INSTRUCTIONS_FILE", ""),
     }
     (tmp_path / "pr-input").mkdir(exist_ok=True)
     for index, value in tokens.items():
@@ -70,7 +71,7 @@ def _walk(
     attempts: list[tuple[int, str, bool]] = []
     events = [] if events is None else events
 
-    def fake_attempt(index, token, metered, log, timeout):  # noqa: ARG001
+    def fake_attempt(index, token, metered, log, timeout):
         attempts.append((index, token, metered))
         events.append("attempt")
         Path(log).write_text(json.dumps(log_for(index)), encoding="utf-8")
@@ -230,7 +231,12 @@ def test_each_attempt_starts_with_no_review(tmp_path: Path) -> None:
     module.subprocess.run = fake_run
     old = dict(os.environ)
     os.environ.update(
-        {"PR_INPUT_DIR": str(tmp_path), "PROMPT_FILE": "p.md", "MODEL": "m"}
+        {
+            "PR_INPUT_DIR": str(tmp_path),
+            "PROMPT_FILE": "p.md",
+            "MODEL": "m",
+            "EXTRA_INSTRUCTIONS_FILE": "",
+        }
     )
     try:
         module.attempt(1, "token", True, tmp_path / "log.json", 1)
@@ -274,7 +280,7 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
             refused = {"type": "result", "is_error": True, "total_cost_usd": 0}
             refused["api_error_status"] = 401
             stdout.write(json.dumps([refused]).encode())
-            return None
+            return
         raise module.subprocess.TimeoutExpired(cmd="claude", timeout=1500)
 
     # Both are the stdlib modules themselves; monkeypatch restores them.
@@ -286,6 +292,7 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
         "PR_INPUT_DIR": str(tmp_path),
         "PROMPT_FILE": "p.md",
         "MODEL": "m",
+        "EXTRA_INSTRUCTIONS_FILE": "",
         **{f"RUNG_{index}_TOKEN": token for index, token in tokens.items()},
     }.items():
         monkeypatch.setenv(key, value)
@@ -310,3 +317,73 @@ def test_a_timed_out_last_rung_is_what_the_gate_reports(
     assert "refused with HTTP" not in gate.stderr
     # A killed read may have billed, so the gate must not grant a free retry.
     assert gate_out.read_text(encoding="utf-8") == "execution_reached_model=true\n"
+
+
+@pytest.mark.parametrize("extra", ["house-rules.md", ""], ids=["named", "unset"])
+def test_the_agent_is_told_to_follow_the_callers_extra_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str
+) -> None:
+    """A caller's `extra-instructions` reach the agent only through the prompt the
+    CLI is handed, so drive the real attempt() and read that argv."""
+    module = _module()
+    prompts: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        prompts.append(command[command.index("-p") + 1])
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    for key, value in {
+        "PR_INPUT_DIR": str(tmp_path),
+        "PROMPT_FILE": "p.md",
+        "MODEL": "m",
+        "EXTRA_INSTRUCTIONS_FILE": extra,
+    }.items():
+        monkeypatch.setenv(key, value)
+    module.attempt(1, "token", True, tmp_path / "log.json", 1)
+    monkeypatch.undo()
+
+    told = "Then follow the instructions in house-rules.md as well."
+    assert (told in prompts[0]) == bool(extra)
+    assert "Follow the instructions in p.md" in prompts[0]
+
+
+def test_a_missing_extra_instructions_file_stops_the_run_before_any_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent told to follow a file it cannot read reviews without the caller's
+    conventions and still posts a verdict, so the ladder refuses unspent. The
+    agent reads only the checkout, so a real file outside it is refused too."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("x", encoding="utf-8")
+    (checkout / "present.md").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    for refused in ["absent.md", str(outside), "../outside.md"]:
+        monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", refused)
+        events: list[str] = []
+        with pytest.raises(SystemExit, match="extra-instructions names no file"):
+            _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean(), events=events)
+        assert events == [], refused
+    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", "present.md")
+    attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean())
+    assert attempts == [(8, PAID, True)]
+
+
+def test_a_step_that_forgets_the_extra_instructions_variable_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every workflow step that runs the ladder must pass EXTRA_INSTRUCTIONS_FILE,
+    even empty. A step that leaves it out would review without the caller's rules
+    and raise nothing, so the ladder refuses before any rung spends."""
+    module = _module()
+    module.attempt = lambda *_args: pytest.fail("a rung ran")
+    for key, value in {
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "out"),
+        "RUNG_8_TOKEN": PAID,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("EXTRA_INSTRUCTIONS_FILE", raising=False)
+    with pytest.raises(KeyError, match="EXTRA_INSTRUCTIONS_FILE"):
+        module.main()
