@@ -60,7 +60,7 @@ on:
         default: 0
         type: number
       review-prompt:
-        description: "Repo-relative path IN THE CALLING repository to the review instructions. Empty uses this reviewer's own prompts/claude-pr-review.md, which is generic; name your own to add the conventions a reviewer of your tree should hold it to."
+        description: "Repo-relative path IN THE CALLING repository to the review instructions. Empty uses this reviewer's own prompts/claude-pr-review.md. A file named here REPLACES that prompt and misses every later change to it; to add your tree's conventions, pass `extra-instructions` instead."
         required: false
         default: ""
         type: string

@@ -344,15 +344,20 @@ def test_a_missing_extra_instructions_file_stops_the_run_before_any_rung(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An agent told to follow a file it cannot read reviews without the caller's
-    conventions and still posts a verdict, so the ladder refuses unspent."""
-    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", str(tmp_path / "absent.md"))
-    events: list[str] = []
-    with pytest.raises(SystemExit, match="extra-instructions names no file"):
-        _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean(), events=events)
-    assert events == []
-    monkeypatch.delenv("EXTRA_INSTRUCTIONS_FILE")
-    present = tmp_path / "present.md"
-    present.write_text("x", encoding="utf-8")
-    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", str(present))
+    conventions and still posts a verdict, so the ladder refuses unspent. The
+    agent reads only the checkout, so a real file outside it is refused too."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("x", encoding="utf-8")
+    (checkout / "present.md").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    for refused in ["absent.md", str(outside), "../outside.md"]:
+        monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", refused)
+        events: list[str] = []
+        with pytest.raises(SystemExit, match="extra-instructions names no file"):
+            _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean(), events=events)
+        assert events == [], refused
+    monkeypatch.setenv("EXTRA_INSTRUCTIONS_FILE", "present.md")
     attempts, _ = _walk(tmp_path, {8: PAID}, log_for=lambda _: _clean())
     assert attempts == [(8, PAID, True)]

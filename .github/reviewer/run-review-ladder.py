@@ -252,9 +252,15 @@ def main() -> None:
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1500"))
     extra_file = os.environ.get("EXTRA_INSTRUCTIONS_FILE", "")
     # Checked before any rung spends: an agent told to follow a file it cannot read
-    # reviews without the caller's conventions and still posts a verdict.
-    if extra_file and not Path(extra_file).is_file():
-        sys.exit(f"::error::extra-instructions names no file: {extra_file!r}")
+    # reviews without the caller's conventions and still posts a verdict. Its
+    # `Read(./**)` grant reaches only the checkout, so a path outside it is refused.
+    if extra_file and not (
+        Path(extra_file).is_file()
+        and Path(extra_file).resolve().is_relative_to(Path.cwd().resolve())
+    ):
+        sys.exit(
+            f"::error::extra-instructions names no file in the checkout: {extra_file!r}"
+        )
     slots = ladder_slots()
     tokens = {s.index: os.environ.get(f"RUNG_{s.index}_TOKEN", "") for s in slots}
     if not any(is_metered(token) for token in tokens.values() if token):
