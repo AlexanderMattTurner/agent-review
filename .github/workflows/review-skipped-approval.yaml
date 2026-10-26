@@ -12,8 +12,9 @@ name: Reviewer skip routing (reusable)
 #
 # ── The skip class ────────────────────────────────────────────────────────────
 #
-# A bot author, a same-repo head, not a draft — and every commit bot-authored,
-# which classify-review-skip.sh adds by reading the pull request. Every field is
+# A bot author, a same-repo head, not a draft, an event a bot fired — and every
+# commit bot-authored and signed by GitHub, which classify-review-skip.sh adds by
+# reading the pull request. Every field is
 # one the pull request cannot choose, because a skipped pull request is APPROVED
 # unread. The TITLE is not such a field, so no title reaches this class. A draft
 # is out because the reviewer reads it on `ready_for_review`.
@@ -113,6 +114,9 @@ jobs:
               github.event.pull_request.head.repo.full_name == github.repository &&
               github.event.pull_request.user.type == 'Bot'
             }}
+          # The account that fired this event. On `synchronize` it is the pusher,
+          # which no commit field can forge.
+          SENDER_TYPE: ${{ github.event.sender.type }}
         run: bash "${REVIEWER_ROOT}/.github/scripts/classify-review-skip.sh"
 
   approve:
