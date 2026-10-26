@@ -25,7 +25,9 @@ SEVERITIES = REPO_ROOT / "config" / "review-severities.json"
 # Commit aaa is also on #9, a stacked draft that is NOT in the merge queue.
 REF = "refs/heads/gh-readonly-queue/main/pr-7-abcdef1"
 SHAS = {"aaa": [5, 9], "bbb": [7]}
-QUEUED = [5, 7, 12]
+# #7 is left OUT of the listing on purpose: the ref names it, so it is gated
+# whatever the listing says.
+QUEUED = [5, 12]
 
 STUB = r"""#!/usr/bin/env bash
 filter=""; pr=""; path=""
@@ -46,7 +48,7 @@ esac
 if [[ "$path" == graphql ]]; then
   case "$filter" in
     *reviewThreads.nodes*) jq -r "$filter" "$D/threads-$pr.json"; exit ;;
-    *mergeQueue*) jq -r "$filter" "$D/queue.json"; exit ;;
+    *mergeQueue*) [[ -s "$D/queue-fails" ]] && exit 1; jq -r "$filter" "$D/queue.json"; exit ;;
     *reviews.nodes*) jq -r "$filter" "$D/reviews.json"; exit ;;
   esac
 fi
@@ -58,7 +60,10 @@ def _page(key: str, nodes: list) -> dict:
     return {"data": {"repository": {"pullRequest": {key: {"nodes": nodes}}}}}
 
 
-def _run(tmp_path: Path, red_prs: set[int]) -> subprocess.CompletedProcess:
+def _run(
+    tmp_path: Path, red_prs: set[int], *, queue_fails: bool = False
+) -> subprocess.CompletedProcess:
+    (tmp_path / "queue-fails").write_text("x" if queue_fails else "")
     (tmp_path / "compare.json").write_text(
         json.dumps({"commits": [{"sha": s} for s in SHAS]})
     )
@@ -136,3 +141,11 @@ def test_every_pull_request_in_the_batch_is_judged(
     if rc:
         named = proc.stderr.split("red for pull request(s): ")[1].split()
         assert sorted(int(n) for n in named) == sorted(red_prs)
+
+
+def test_an_unreadable_merge_queue_fails_closed(tmp_path: Path) -> None:
+    """Without the queue's membership no batch can be judged, so the leg reds
+    rather than gating a guessed set."""
+    proc = _run(tmp_path, set(), queue_fails=True)
+    assert proc.returncode == 1, proc.stderr
+    assert "review-findings gate on" not in proc.stderr, proc.stderr

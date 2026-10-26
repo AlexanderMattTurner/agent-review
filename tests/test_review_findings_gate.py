@@ -68,6 +68,7 @@ def _gate_proc(
     live_head: str = HEAD_SHA,
     severity_config: Path = SEVERITIES,
     report_sha: str | None = HEAD_SHA,
+    pr_author: str = PR_AUTHOR,
 ) -> tuple[subprocess.CompletedProcess, Path]:
     """Run the gate against a `gh` stub; return the process and its call log.
 
@@ -116,7 +117,7 @@ case "$filter" in
     exit 0 ;;
   *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
   .headRefOid)           printf '%s\\n' "{live_head}"; exit 0 ;;
-  .user.login*)          printf '%s\\n' "{PR_AUTHOR}"; exit 0 ;;
+  .user.login*)          printf '%s\\n' "{pr_author}"; exit 0 ;;
 esac
 exit 0
 """
@@ -360,8 +361,7 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
         ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
         ("OVERSIZED_REVIEW_MARKER", PR_AUTHOR, "failure"),
         ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
-        # GraphQL spells a login bare: the reviewer's own resolution is excluded
-        # by name, and an author whose REST login is `x[bot]` resolves as `x`.
+        # GraphQL spells a login bare, so the reviewer is excluded by name.
         ("HUMAN_HOLD_MARKER", "github-actions", "failure"),
         ("HUMAN_HOLD_MARKER", None, "failure"),
         ("HUMAN_HOLD_MARKER", "a-human", "success"),
@@ -377,6 +377,19 @@ def test_only_somebody_else_clears_a_needs_a_human_hold(
     body = f"needs a human read\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
     hold = thread(body, resolved=True, resolved_by=resolved_by)
     assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
+
+
+def test_a_bot_author_resolving_its_own_hold_under_the_bare_login_holds(
+    tmp_path: Path,
+) -> None:
+    """REST names a bot author `x[bot]`, and GraphQL names the same account `x`
+    when it resolves a thread. The two spellings are one author."""
+    body = f"too large\n{reviewer_marker('HUMAN_HOLD_MARKER')}\n<!-- severity: blocking -->"
+    hold = thread(body, resolved=True, resolved_by="pr-author")
+    state = run_gate(
+        tmp_path, [review("COMMENTED")], [hold], pr_author="pr-author[bot]"
+    )
+    assert state == "failure"
 
 
 def test_the_author_may_resolve_an_ordinary_finding(tmp_path: Path) -> None:
