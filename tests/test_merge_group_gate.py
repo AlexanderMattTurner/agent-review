@@ -22,8 +22,10 @@ SCRIPT = REPO_ROOT / ".github" / "reviewer" / "merge-group-gate.sh"
 SEVERITIES = REPO_ROOT / "config" / "review-severities.json"
 
 # The batch: the queue ref names #7, and the compare also carries #5's commit.
+# Commit aaa is also on #9, a stacked draft that is NOT in the merge queue.
 REF = "refs/heads/gh-readonly-queue/main/pr-7-abcdef1"
-SHAS = {"aaa": [5], "bbb": [7]}
+SHAS = {"aaa": [5, 9], "bbb": [7]}
+QUEUED = [5, 7, 12]
 
 STUB = r"""#!/usr/bin/env bash
 filter=""; pr=""; path=""
@@ -44,6 +46,7 @@ esac
 if [[ "$path" == graphql ]]; then
   case "$filter" in
     *reviewThreads.nodes*) jq -r "$filter" "$D/threads-$pr.json"; exit ;;
+    *mergeQueue*) jq -r "$filter" "$D/queue.json"; exit ;;
     *reviews.nodes*) jq -r "$filter" "$D/reviews.json"; exit ;;
   esac
 fi
@@ -70,7 +73,13 @@ def _run(tmp_path: Path, red_prs: set[int]) -> subprocess.CompletedProcess:
         "submittedAt": "2026-01-01T00:00:00Z",
     }
     (tmp_path / "reviews.json").write_text(json.dumps(_page("reviews", [review])))
-    for pr in (5, 7):
+    entries = [{"pullRequest": {"number": n}} for n in QUEUED]
+    (tmp_path / "queue.json").write_text(
+        json.dumps(
+            {"data": {"repository": {"mergeQueue": {"entries": {"nodes": entries}}}}}
+        )
+    )
+    for pr in (5, 7, 9):
         threads = []
         if pr in red_prs:
             body = "<!-- severity: blocking -->\nthis breaks"
@@ -111,17 +120,19 @@ def _run(tmp_path: Path, red_prs: set[int]) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.parametrize(
-    ("red_prs", "rc"), [(set(), 0), ({5}, 1), ({7}, 1), ({5, 7}, 1)]
+    ("red_prs", "rc"), [(set(), 0), ({5}, 1), ({7}, 1), ({5, 7}, 1), ({9}, 0)]
 )
 def test_every_pull_request_in_the_batch_is_judged(
     tmp_path: Path, red_prs: set[int], rc: int
 ) -> None:
     """#5 is not the one the ref names, so a leg that read the ref alone would
     merge it past its open finding. Both are judged, and the log names each red
-    one."""
+    one. #9 shares a commit but is not in the queue, so its finding must not
+    eject the batch."""
     proc = _run(tmp_path, red_prs)
     assert proc.returncode == rc, proc.stderr
     assert proc.stderr.count("review-findings gate on o/r#") == 2, proc.stderr
-    if red_prs:
+    assert "o/r#9" not in proc.stderr, proc.stderr
+    if rc:
         named = proc.stderr.split("red for pull request(s): ")[1].split()
         assert sorted(int(n) for n in named) == sorted(red_prs)

@@ -8,8 +8,12 @@
 # every other pull request in the batch reaches the default branch with no
 # verdict of its own.
 #
-# The batch's own commits are the authority. Each commit's associated pull
-# requests come from the API, so nothing here parses a commit message.
+# The batch's own commits name the candidates, and the queue names the members.
+# Each commit's associated pull requests come from the API, so nothing here parses
+# a commit message. A commit can also sit on a pull request that is NOT queued — a
+# stacked draft built on a queued branch — and that pull request's missing review
+# would eject a green batch. So a candidate counts only when the base branch's
+# merge queue lists it as an entry.
 #
 # THE RANGE STARTS AT THE BASE BRANCH, never at merge_group.base_sha. Under
 # batching GitHub sets that payload field to the PREVIOUS QUEUE ENTRY, so a
@@ -17,6 +21,8 @@
 # this script exists to prevent. `.github/scripts/lib-decide-range.sh` documents
 # the same trap for path-gated checks. The REST compare's `...` is merge-base
 # semantics, so `<base branch>...<queue head>` is every commit the batch adds.
+#
+# The ref's own number is kept whatever the queue listing says: the queue named it.
 #
 # Env: GH_TOKEN, GH_REPO, MG_BASE_REF, MG_HEAD_SHA, MG_REF.
 set -euo pipefail
@@ -58,6 +64,26 @@ while IFS= read -r sha; do
   found="$(retry_stdout gh api --paginate "repos/${GH_REPO}/commits/${sha}/pulls" --jq '.[].number')"
   [[ -z "$found" ]] || numbers+=$'\n'"$found"
 done <<<"$shas"
+
+# The queue's own membership, as one number per line. Fails closed: an unread
+# queue ejects the batch rather than gating pull requests it does not hold.
+# shellcheck disable=SC2016 # a GraphQL document, not shell
+queue_query='query($owner: String!, $name: String!, $branch: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) {
+      entries(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { pullRequest { number } }
+      }
+    }
+  }
+}'
+queued="$(retry_stdout gh api graphql --paginate -f query="$queue_query" \
+  -f owner="${GH_REPO%%/*}" -f name="${GH_REPO##*/}" -f branch="$base_branch" \
+  --jq '.data.repository.mergeQueue.entries.nodes[].pullRequest.number')"
+seed="${numbers%%$'\n'*}"
+numbers="$(awk -v seed="$seed" 'NR == FNR { queued[$0] = 1; next }
+  $0 == seed || ($0 in queued)' <(printf '%s\n' "$queued") <(printf '%s\n' "$numbers"))"
 
 # Dedupe while KEEPING insertion order, which the header promises: the ref's own
 # number is seeded first on purpose, and `sort -u` would both reorder that and
