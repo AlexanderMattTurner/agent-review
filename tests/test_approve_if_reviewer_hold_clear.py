@@ -64,11 +64,20 @@ def thread(
     }
 
 
-def review(state: str, author: str = BOT, at: str = CYCLE_1, rid: int = 1) -> dict:
+def review(
+    state: str,
+    author: str = BOT,
+    at: str = CYCLE_1,
+    rid: int = 1,
+    body: str = "Automated review.",
+) -> dict:
+    """One review node. `body=""` is the review GitHub synthesizes around a
+    standalone review-comment POST, which is how a hold thread is opened."""
     return {
         "databaseId": rid,
         "author": {"login": author},
         "state": state,
+        "body": body,
         "submittedAt": at,
     }
 
@@ -513,6 +522,30 @@ def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Pa
     assert res.returncode == 0, res.stderr
     assert not dismissed(calls)
     assert "opened no thread" in res.stderr
+
+
+@pytest.mark.parametrize("earlier", [[], [CYCLE_1]], ids=["first-hold", "second-hold"])
+def test_a_hold_thread_posted_before_its_notice_review_belongs_to_that_hold(
+    tmp_path: Path, earlier: list[str]
+):
+    """The oversized and degraded paths open their hold thread FIRST, as a
+    standalone comment, and post the notice review after it. GitHub wraps that
+    comment in a body-less review that is OLDER than the notice. Timing alone
+    would put the hold thread outside its own hold, and nothing could clear it."""
+    thread_at, notice_at = "2026-03-01T00:00:00Z", "2026-03-01T00:00:05Z"
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=OTHER, opened_by_review_at=thread_at)],
+        reviews=[
+            *[review("COMMENTED", at=at, rid=9) for at in earlier],
+            review("COMMENTED", at=thread_at, rid=10, body=""),
+            review("COMMENTED", at=notice_at, rid=11),
+        ],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "opened no thread" not in res.stderr, res.stderr
+    assert "pr review" in calls, "the cleared hold must reach the approval"
 
 
 def test_the_current_holds_own_thread_still_clears(tmp_path: Path):

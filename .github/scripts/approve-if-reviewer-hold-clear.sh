@@ -71,17 +71,19 @@ fi
 export PR_AUTHOR
 resolver_is_not_author="$(login_bare_jq .resolvedBy.login) != $(login_bare_jq env.PR_AUTHOR)"
 
-# What is the reviewer's latest review, and when did it land? Paginated (a
-# long-lived PR can accrue >100 reviews, and an unpaginated first:100 returns the
-# OLDEST 100 and would pick a stale state): the per-page --jq emits the reviewer's
-# reviews as NDJSON and the slurp picks the globally latest by submittedAt.
+# What is the reviewer's latest review, when did it land, and when did the one
+# before it land? Paginated (a long-lived PR can accrue >100 reviews, and an
+# unpaginated first:100 returns the OLDEST 100 and would pick a stale state): the
+# per-page --jq emits the reviewer's reviews as NDJSON and the slurp sorts them by
+# submittedAt. A body-less review is not one: GitHub synthesizes it around every
+# standalone review-comment POST, which is how a hold thread is opened.
 # shellcheck disable=SC2016 # GraphQL query + jq program are literal, not shell
 reviews_query='query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
       reviews(first: 100, after: $endCursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { databaseId author { login } state submittedAt }
+        nodes { databaseId author { login } state body submittedAt }
       }
     }
   }
@@ -90,9 +92,12 @@ latest_review="$(gh api graphql --paginate \
   -f query="$reviews_query" -f owner="$owner" -f name="$name" -F pr="$PR" \
   --jq ".data.repository.pullRequest.reviews.nodes[]
         | ${REVIEWER_MATCH_AUTHOR}
+        | select((.body // \"\") != \"\")
         | {state, submittedAt}" |
-  jq -cs 'if length == 0 then {state: "", submittedAt: ""}
-          else (sort_by(.submittedAt) | last) end')"
+  jq -cs 'sort_by(.submittedAt) as $r
+          | if ($r | length) == 0 then {state: "", submittedAt: "", cycleStart: ""}
+            else $r[-1] + {cycleStart: (if ($r | length) > 1 then $r[-2].submittedAt else "" end)}
+            end')"
 latest_state="$(jq -r '.state' <<<"$latest_review")"
 
 if [[ "$latest_state" != "CHANGES_REQUESTED" && "$latest_state" != "COMMENTED" ]]; then
@@ -100,10 +105,12 @@ if [[ "$latest_state" != "CHANGES_REQUESTED" && "$latest_state" != "COMMENTED" ]
   exit 0
 fi
 
-# HOLD_SINCE scopes every thread count below to the hold this run may clear. jq
-# reads it from the environment, so it is exported rather than shell-local.
+# HOLD_SINCE names the hold this run may clear. CYCLE_START, the review before it,
+# scopes every thread count below to that hold's cycle. jq reads it from the
+# environment, so it is exported rather than shell-local.
 HOLD_SINCE="$(jq -r '.submittedAt // ""' <<<"$latest_review")"
-export HOLD_SINCE
+CYCLE_START="$(jq -r '.cycleStart // ""' <<<"$latest_review")"
+export CYCLE_START
 if [[ -z "$HOLD_SINCE" || "$HOLD_SINCE" == "null" ]]; then
   echo "the reviewer's ${latest_state} review carries no submittedAt, so no thread can be scoped to it; the hold stays in place." >&2
   exit 1
@@ -113,10 +120,12 @@ fi
 # per-page projection emits one {unresolved, in_hold, cleared_by_other} object; the
 # trailing reduce sums them.
 # A thread belongs to the current hold when the review that opened its root
-# comment is that hold or newer. The root comment's own createdAt cannot answer
-# this: a comment drafted into a pending review is created BEFORE that review is
-# submitted, so it can predate the very hold it belongs to.
-thread_in_hold='((.comments.nodes[0].pullRequestReview.submittedAt // "") >= env.HOLD_SINCE)'
+# comment came AFTER the previous real review. Comparing with the hold itself is
+# wrong: the oversized and degraded paths open their hold thread first and post the
+# review after it, so that thread is older than its own hold. The root comment's
+# createdAt cannot answer either: a comment drafted into a pending review is created
+# BEFORE that review is submitted.
+thread_in_hold='((.comments.nodes[0].pullRequestReview.submittedAt // "") > env.CYCLE_START)'
 
 # `unresolved` spans the whole PR — a thread still holding from any cycle blocks. The
 # other two are scoped to this hold, so an earlier cycle cannot vouch for it.
