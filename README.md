@@ -40,7 +40,6 @@ jobs:
       # EMPTY in the expression context, so it refuses to clone rather than run
       # unpinned code.
       reviewer-ref: main
-      review-prompt: .github/prompts/claude-pr-review.md
     secrets:
       rung_8: ${{ secrets.FAR_ANTHROPIC_API_KEY }}
       # ... the other 7; see `.github/workflows/claude-review.yaml` in this
