@@ -50,7 +50,7 @@ ACTION_LOG = "claude-execution-output.json"
 FILE_TOOLS = ("Read", "Grep", "Glob")
 SCOPED_PATHS = ("./**", "/{d}/**", "/{p}/**")
 AGENT_TOOLS = "Task,Agent,TodoWrite"
-DENIED_TOOLS = "Bash,BashOutput,KillShell,WebFetch,WebSearch,Write,Edit,NotebookEdit"
+DENIED_TOOLS = "Bash,BashOutput,KillShell,WebFetch,WebSearch,Write,Edit,NotebookEdit,Read(//proc/**),Grep(//proc/**),Glob(//proc/**)"
 
 # What a killed attempt reports. `zero_cost` false, because a run the wall clock cut
 # short may already have billed a whole read. `wall_clock_only` stops the ladder: a

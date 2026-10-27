@@ -289,4 +289,6 @@ def test_the_reviewer_grants_no_shell_and_no_network() -> None:
     tools = {rule.split("(", 1)[0] for rule in allowed}
     assert tools <= {"Read", "Grep", "Glob", "Task", "Agent", "TodoWrite"}, allowed
     assert {"Bash", "WebFetch", "WebSearch", "Write", "Edit"} <= denied, denied
+    # Deny outranks allow, so the token stays out of reach if the allow list widens.
+    assert {f"{tool}(//proc/**)" for tool in ("Read", "Grep", "Glob")} <= denied, denied
     assert args[args.index("--setting-sources") + 1] == "user"
