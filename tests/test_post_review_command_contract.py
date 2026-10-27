@@ -35,23 +35,40 @@ def _gate_steps() -> dict[str, dict]:
 
 def test_the_job_that_posts_the_review_re_evaluates_the_gate() -> None:
     """A review posted with the workflow GITHUB_TOKEN fires no workflow, so the
-    job that posts one must run this step, and no other job may post a second
-    verdict for the same head."""
-    assert set(_gate_steps()) == {"post"}
+    job that posts one must run this step. The skip path re-posts from `gate`,
+    and the two never run in one workflow run: post needs a prepared read, gate
+    needs a prepare that skipped, so no head gets a second verdict."""
+    assert set(_gate_steps()) == {"post", "gate"}
+    jobs = workflow_jobs(WORKFLOW)
+    assert "needs.prepare.outputs.prepared == 'true'" in jobs["post"]["if"]
+    assert "needs.prepare.outputs.skip == 'true'" in jobs["gate"]["if"]
 
 
+def test_a_gate_only_run_cannot_cancel_a_findings_post() -> None:
+    """GitHub cancels a PENDING job when another joins its concurrency group,
+    whatever cancel-in-progress says, so a gate-only re-post queued in post's
+    group would discard a completed read's findings."""
+    jobs = workflow_jobs(WORKFLOW)
+    groups = {job: jobs[job]["concurrency"]["group"] for job in ("post", "gate")}
+    assert groups["post"] != groups["gate"], groups
+
+
+@pytest.mark.parametrize("job", ["post", "gate"])
 @pytest.mark.parametrize("name", REQUIRED)
-def test_the_gate_command_is_handed_the_environment_it_reads(name: str) -> None:
-    step = _gate_steps()["post"]
-    assert name in step["env"], f"the post job runs the caller's gate without {name}"
+def test_the_gate_command_is_handed_the_environment_it_reads(
+    job: str, name: str
+) -> None:
+    step = _gate_steps()[job]
+    assert name in step["env"], f"the {job} job runs the caller's gate without {name}"
 
 
-def test_the_gate_post_reads_the_head_live() -> None:
+@pytest.mark.parametrize("job", ["post", "gate"])
+def test_the_gate_post_reads_the_head_live(job: str) -> None:
     """A verdict on the event's sha strands the live head: the push that moved it
     yields to this run, so no later event posts one. RED if REPORT_SHA goes back
     to the event payload here. The fallback is the head `decide` resolved, which
     a dispatch run has although its payload names no pull request."""
-    step = _gate_steps()["post"]
+    step = _gate_steps()[job]
     assert "REPORT_SHA" not in step["env"], "the head is read, not taken"
     assert re.search(r"headRefOid", step["run"]), "no live head read"
     assert "REPORT_SHA=" in step["run"] and "export REPORT_SHA" in step["run"]

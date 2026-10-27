@@ -45,6 +45,13 @@ COVERAGE_FILE="${PR_INPUT_DIR}/coverage.json"
   exit 1
 }
 COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
+# What the summary review carries to record the read. A sharded read that lost a leg
+# (merge-shard-reviews.mjs wrote INCOMPLETE_FILE) carries neither the read marker nor
+# the coverage stamp, so it spends no budget and claims no head; a hold raised below
+# keeps the gate red until a human reads the files no leg read.
+INCOMPLETE_FILE="${PR_INPUT_DIR}/incomplete-read.txt"
+READ_STAMP="${WHOLE_DIFF_READ_MARKER}"$'\n'"${COVERAGE_STAMP}"
+[[ ! -f "$INCOMPLETE_FILE" ]] || READ_STAMP="$INCOMPLETE_READ_MARKER"
 # Which budget paid, for the reader that marks each finding of an accumulated read.
 REVIEW_READ="$(jq -r '.read // "first"' "$COVERAGE_FILE")"
 
@@ -230,7 +237,7 @@ post_review_comment_by_comment() {
   local body
   body="$(mktemp)"
   {
-    printf '%s\n%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$WHOLE_DIFF_READ_MARKER" "$COVERAGE_STAMP"
+    printf '%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$READ_STAMP"
     printf '<sub>GitHub refused this review as one payload, so %d of its %d findings were posted as individual comments.</sub>\n\n' "$((total - failed))" "$total"
     cat "${PR_INPUT_DIR}/review-summary.txt"
   } >"$body"
@@ -253,13 +260,25 @@ if [[ "$status" != "PAYLOAD" ]]; then
   exit 0
 fi
 
-# The read marker and the coverage stamp go on the payload's own summary body, so the
-# ONE post that records this read is the one that carries both. jq rather than a rebuild:
-# every other field, and every comment, rides through untouched with the type the payload
-# gave it.
+# An incomplete read's hold goes up BEFORE its review: the review greens the gate's
+# reviewed-at-all leg, so the files no leg read must already hold the merge.
+if [[ -f "$INCOMPLETE_FILE" ]]; then
+  : "${HEAD_SHA:?HEAD_SHA required to anchor the incomplete-read hold}"
+  incomplete_prose="$(mktemp)"
+  {
+    printf '🔴 The automated read of this PR is INCOMPLETE — it needs a HUMAN review of the files no reader covered.\n\n'
+    cat "$INCOMPLETE_FILE"
+    printf '\nReview those files yourself, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
+  } >"$incomplete_prose"
+  raise_human_review_finding "$INCOMPLETE_READ_MARKER" "$incomplete_prose"
+  rm -f "$incomplete_prose"
+fi
+
+# The read stamp goes on the payload's own summary body, so the ONE post that records
+# this read is the one that carries it. jq rather than a rebuild: every other field,
+# and every comment, rides through untouched with the type the payload gave it.
 stamped_payload="$(mktemp)"
-jq --arg marker "$WHOLE_DIFF_READ_MARKER" --arg coverage "$COVERAGE_STAMP" \
-  '.body = ((.body // "") + "\n\n" + $marker + "\n" + $coverage)' \
+jq --arg stamp "$READ_STAMP" '.body = ((.body // "") + "\n\n" + $stamp)' \
   "${PR_INPUT_DIR}/review-payload.json" >"$stamped_payload"
 
 api_err="$(mktemp)"

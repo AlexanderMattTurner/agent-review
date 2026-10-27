@@ -122,23 +122,26 @@ if [[ "$runs_rc" -ne 0 ]]; then
   exit 0
 fi
 
-# A run is the read in flight only while its read or post job is live.
-# The workflow reports as in flight while ANY of its four jobs runs, and most of
-# them are not a review anybody is waiting on — an older run still in `decide`,
-# or one whose read job already failed. Counting one would emit skip=true and
-# leave this head with no whole-diff read at all, the permanently-unreviewed
-# latch this script exists to prevent.
+# A run is the read in flight while any of its read legs is live, or while its
+# post job is live AFTER a leg delivered. Most of what keeps a run in flight is
+# not a review anybody waits on — an older run still in `decide`, or a post whose
+# read failed — and counting one would emit skip=true and leave this head with no
+# whole-diff read at all, the permanently-unreviewed latch this script exists to
+# prevent.
 # INVARIANT: matched with contains/endswith, never a prefix. A reusable workflow's
-# jobs are named "<caller job> / <job name>" in the runs API, so an anchored match
-# finds no live read, this run reviews anyway, and the PR buys a second paid read.
+# jobs are named "<caller job> / <job name>" in the runs API, and each read leg
+# adds its matrix value after the name, so an anchored match finds no live read,
+# this run reviews anyway, and the PR buys a second paid read.
 _review_live() {
   local jobs_rc=0 live
   live="$(
     retry_stdout gh api "repos/$REPO/actions/runs/$1/jobs?per_page=100" 2>/dev/null |
-      jq '[.jobs[]
-            | select(.status != "completed")
-            | select(.name | contains("Claude PR review (read)") or endswith("Post the PR review"))]
-          | length'
+      jq '[.jobs[]] as $jobs
+          | ($jobs | map(select(.name | contains("Claude PR review (read)")))) as $read
+          | if ($read | any(.status != "completed"))
+              or (($read | any(.conclusion == "success"))
+                  and ($jobs | any((.name | endswith("Post the PR review")) and .status != "completed")))
+            then 1 else 0 end'
   )" || jobs_rc=$?
   # A jobs list we could not read is not evidence of a review in flight, so it
   # falls through to reviewing — the direction every other failure here takes.

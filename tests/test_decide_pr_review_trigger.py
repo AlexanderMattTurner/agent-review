@@ -1300,7 +1300,7 @@ def test_the_read_jobs_take_the_pr_and_head_from_the_decision() -> None:
     `github.event.pull_request` directly would post a verdict on an empty sha and
     review a PR it cannot name. `decide` resolves both once, for every trigger."""
     jobs = _workflow()["jobs"]
-    for name in ("prepare", "read", "post"):
+    for name in ("prepare", "read", "post", "gate"):
         assert "decide" in jobs[name]["needs"], name
         payload = [
             f"{step.get('name', step.get('uses', '?'))}: {key}"

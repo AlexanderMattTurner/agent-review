@@ -1,5 +1,7 @@
 # Read ONE pull request with Anthropic's `code-review` plugin, run through
-# `anthropics/claude-code-action`, and post the findings as one GitHub review.
+# `anthropics/claude-code-action`, and post the findings as one GitHub review. A
+# diff too large for one context is split per file, each slice is read by its own
+# leg of the `read` matrix, and `post` folds the legs into that one review.
 # Called by a consumer repository's own workflow; every script it runs comes from
 # THIS repository at the commit the caller pinned on its `uses:` line, never from
 # the repository under review.
@@ -19,8 +21,8 @@
 #      has no shell and no network tool, so it cannot fetch them past the
 #      sanitizer.
 #   3. Least privilege per job. `read`, the only job that runs a model, holds
-#      `contents: read` alone and posts nothing. `post` holds the write scopes
-#      and runs no model.
+#      `contents: read` alone and posts nothing, in every matrix leg. `post` and
+#      `gate` hold the write scopes and run no model.
 # A successful prompt injection can shape the findings `post` turns into a
 # review; it cannot push code, merge, or reach any other scope.
 name: Claude PR review (reusable)
@@ -118,9 +120,19 @@ on:
         default: "python3"
         type: string
       max-diff-lines:
-        description: "The largest diff the reviewer reads. A diff line costs about 13.6 tokens, so 12000 lines is roughly 163k tokens against a 200k window. Above it the PR gets a human-review notice and no automated read."
+        description: "The single-context cap. A diff line costs about 13.6 tokens, so 12000 lines is roughly 163k tokens against a 200k window. Above it the read shards."
         required: false
         default: 12000
+        type: number
+      shard-max-lines:
+        description: "Lines per shard. The legs run in parallel, so the review's wall clock is one leg's read; a smaller shard trades that for a finding likelier to fall across a boundary. A shard never splits a file."
+        required: false
+        default: 4000
+        type: number
+      max-shardable-lines:
+        description: "The largest diff that is sharded at all. Above it, or when the diff needs more than max-shardable-lines / shard-max-lines shards, the PR gets a human-review notice and no automated read."
+        required: false
+        default: 192000
         type: number
       review-timeout-seconds:
         description: "Wall clock ONE credential attempt may spend on the read, rounded up to whole minutes."
@@ -267,6 +279,9 @@ jobs:
       # The sanitized input exists, for a head that is still the live one.
       prepared: ${{ steps.prepare.conclusion == 'success' && steps.prepare.outputs.stale != 'true' }}
       unreviewable: ${{ steps.prepare.outputs.unreviewable }}
+      # The read matrix: the sharder's list, or the one `whole` leg for a diff
+      # that fits one context.
+      shards: ${{ steps.prepare.outputs.sharded == 'true' && steps.prepare.outputs.shards || '["whole"]' }}
     steps:
       - &checkout-default
         name: Check out the calling repository's default (trusted) branch
@@ -307,23 +322,20 @@ jobs:
         if: steps.recheck.outputs.skip != 'true'
         run: bash "${REVIEWER_DIR}/install-input-sanitizer.sh"
 
-      - &restore-setup-cache
-        name: Restore the caller's setup cache
+      - name: Restore the caller's setup cache
         # A setup command that fetches a pinned toolchain pays that download once
         # per job. The caller names what to keep and the key that expires it;
-        # naming neither keeps the download.
-        if: inputs.setup-command != '' && inputs.setup-cache-key-files != ''
+        # naming neither keeps the download. A prepare that skips needs no setup.
+        if: steps.recheck.outputs.skip != 'true' && inputs.setup-command != '' && inputs.setup-cache-key-files != ''
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.setup-cache-path }}
           key: ${{ runner.os }}-setup-${{ hashFiles(inputs.setup-cache-key-files) }}
 
-      - &run-setup
-        name: Run the caller's setup command
+      - name: Run the caller's setup command
         # The caller's own dependency sync, in its trusted base checkout — what
-        # puts the elide command's, the log redactor's or the gate command's
-        # tools in place.
-        if: inputs.setup-command != ''
+        # puts the elide command's tools in place.
+        if: steps.recheck.outputs.skip != 'true' && inputs.setup-command != ''
         env:
           SETUP_COMMAND: ${{ inputs.setup-command }}
         run: bash -c "$SETUP_COMMAND"
@@ -346,9 +358,10 @@ jobs:
         run: bash "${REVIEWER_DIR}/recheck-pr-head-current.sh"
 
       - name: Fetch and sanitize the untrusted PR input
-        # Writes the sanitized files the agent reads, and ROUTES the review by
-        # size: a diff over max-diff-lines sets unreviewable=true and gets the
-        # human-review notice instead of a read.
+        # Writes the sanitized files the agent reads, and ROUTES the review: a
+        # diff over max-diff-lines is split per file for the read matrix, and
+        # only a diff too large to shard, or a PR aimed at a branch other than
+        # the default, sets unreviewable=true and gets the human-review notice.
         id: prepare
         if: steps.recheck.outputs.skip != 'true' && steps.fresh.outputs.stale != 'true'
         env:
@@ -358,6 +371,11 @@ jobs:
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           ELIDE_COMMAND: ${{ inputs.elide-command }}
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
+          SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
+          MAX_SHARDABLE_LINES: ${{ inputs.max-shardable-lines }}
+          # claude-code-action restores CLAUDE.md and .claude/ from the PR's base
+          # branch, so only a PR aimed at this branch gets a read.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # What the coverage stamp will claim, and where an accumulated read
           # starts. HEAD_SHA is the head decide resolved: prepare refuses to read a
           # pull request whose head moved since, rather than stamping a head that
@@ -382,12 +400,23 @@ jobs:
   # and a token it never hands the agent a tool to use. Each attempt is one
   # claude-code-action step running the vendored code-review prompt; the steps
   # below repeat one attempt and one judge through YAML aliases, and
-  # review-ladder.py carries the ladder state between them.
+  # review-ladder.py carries the ladder state between them. One leg per shard,
+  # or the one `whole` leg; every leg runs the same prompt and ladder.
   read:
     name: Claude PR review (read)
     needs: [decide, prepare]
     if: needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs.unreviewable == 'false'
     runs-on: ubuntu-latest
+    strategy:
+      # No fail-fast: one leg's credential exhaustion must not cancel the others.
+      # post folds what the legs delivered and says so when one is missing.
+      fail-fast: false
+      # Every leg draws on the SAME credential pool at the same moment, so one
+      # rate-limited leg costs the PR a complete read, and an unbounded matrix
+      # makes that likelier the larger the PR.
+      max-parallel: 6
+      matrix:
+        leg: ${{ fromJSON(needs.prepare.outputs.shards) }}
     # Clears one whole read's measured tail plus the action's own install, the
     # redacting log upload, and a retry on a fresh credential.
     timeout-minutes: 40
@@ -413,9 +442,25 @@ jobs:
         with:
           node-version: "22"
 
-      - *restore-setup-cache
+      - &restore-setup-cache
+        name: Restore the caller's setup cache
+        # A setup command that fetches a pinned toolchain pays that download once
+        # per job. The caller names what to keep and the key that expires it;
+        # naming neither keeps the download.
+        if: inputs.setup-command != '' && inputs.setup-cache-key-files != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.setup-cache-path }}
+          key: ${{ runner.os }}-setup-${{ hashFiles(inputs.setup-cache-key-files) }}
 
-      - *run-setup
+      - &run-setup
+        name: Run the caller's setup command
+        # The caller's own dependency sync, in its trusted base checkout — what
+        # puts the log redactor's or the gate command's tools in place.
+        if: inputs.setup-command != ''
+        env:
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -c "$SETUP_COMMAND"
 
       - name: Fetch the sanitized input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -423,9 +468,19 @@ jobs:
           name: pr-review-input
           path: ${{ runner.temp }}/pr-input
 
+      - name: Narrow this leg's diff.txt to its shard
+        # The prompt reads diff.txt by that name, so a shard leg gets its slice
+        # under that name rather than teaching the prompt about sharding.
+        if: matrix.leg != 'whole'
+        env:
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          LEG: ${{ matrix.leg }}
+        run: cp "${PR_INPUT_DIR}/shards/${LEG}" "${PR_INPUT_DIR}/diff.txt"
+
       - name: Plan the credential ladder and the read
         id: plan
         env:
+          READ_LEG: ${{ matrix.leg }}
           MODEL: ${{ inputs.model }}
           MODEL_LOW: ${{ inputs.model-low }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
@@ -525,10 +580,11 @@ jobs:
 
       - name: Hand the review to the post job
         # review.json and the cost number only. The execution log stays on this
-        # runner and leaves it solely through the redacting upload below.
+        # runner and leaves it solely through the redacting upload below. Keyed
+        # by the leg: post maps each artifact back to the shard it read.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pr-review-findings
+          name: pr-review-findings-${{ matrix.leg }}
           path: |
             ${{ runner.temp }}/pr-input/review.json
             ${{ runner.temp }}/pr-input/cost.json
@@ -557,22 +613,25 @@ jobs:
         if: always() && steps.stage_logs.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: claude-logs-pr-review
+          # Keyed by the leg, or the legs collide and only one log survives.
+          name: claude-logs-pr-review-${{ matrix.leg }}
           path: ${{ runner.temp }}/agent-logs-upload/pr-review
           if-no-files-found: ignore
           retention-days: 14
 
-  # Turns the read's review.json into ONE PR review, or posts the oversized
-  # notice, and re-evaluates the caller's merge gate. It runs no model.
+  # Folds every read leg's review.json into ONE PR review, or posts the
+  # oversized notice, and re-evaluates the caller's merge gate. It runs no model.
   post:
     name: Post the PR review
     needs: [decide, prepare, read]
     # always(): a failed or skipped read still owes the gate a verdict on this
     # head. A failed prepare, or a head that moved before prepare read it, owes
-    # nothing — that verdict would name a head the PR no longer has.
+    # nothing — that verdict would name a head the PR no longer has. A prepare
+    # that skipped re-posts the gate from `gate` instead, outside this job's
+    # concurrency group, so it can never cancel a pending post that carries a read.
     if: >-
       always() && needs.prepare.result == 'success' &&
-      (needs.prepare.outputs.prepared == 'true' || needs.prepare.outputs.skip == 'true')
+      needs.prepare.outputs.prepared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # A started post runs to completion, so the review it writes is never thrown
@@ -608,18 +667,32 @@ jobs:
         run: bash "${REVIEWER_DIR}/install-input-sanitizer.sh"
 
       - name: Fetch the sanitized input (the diff the findings anchor to)
+        id: input
         if: needs.prepare.outputs.prepared == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: pr-review-input
           path: ${{ runner.temp }}/pr-input
 
-      - name: Fetch the read's review
-        if: needs.read.result == 'success'
+      - name: Fetch every read leg's review
+        # Not gated on the read job's result: a matrix reports failure when ANY
+        # leg failed, and the legs that delivered still owe the PR their findings.
+        if: needs.prepare.outputs.unreviewable == 'false'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: pr-review-findings
-          path: ${{ runner.temp }}/pr-input
+          pattern: pr-review-findings-*
+          path: ${{ runner.temp }}/read-legs
+
+      - name: Fold the legs into one review
+        # Refuses when no leg delivered. A missing leg makes the review say the
+        # read is incomplete, and leaves the marker that keeps it from counting
+        # as a read; merge-shard-reviews.mjs owns that rule.
+        id: fold
+        if: always() && steps.input.outcome == 'success' && needs.prepare.outputs.unreviewable == 'false'
+        env:
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          SHARD_REVIEW_DIR: ${{ runner.temp }}/read-legs
+        run: node "${REVIEWER_DIR}/merge-shard-reviews.mjs"
 
       - name: Post the oversized notice as a review plus a human-review thread
         # A diff too large to read gets no automated read, so the notice posts as
@@ -639,18 +712,27 @@ jobs:
       - name: Post the structured review
         # Turns review.json into ONE PR review with inline comments and suggested
         # edits, validating every anchor against the diff first.
-        if: needs.read.result == 'success'
+        if: always() && steps.fold.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ needs.decide.outputs.pr }}
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
-          # The cost record the read job distilled from its log, for the footer.
+          # The whole read's price the fold summed, for the footer.
           EXECUTION_FILE: ${{ runner.temp }}/pr-input/cost.json
         run: bash "${REVIEWER_DIR}/post-pr-review.sh"
 
-      - name: Re-evaluate the caller's merge gate on the LIVE head
+      - name: Fail loud if a read leg delivered no review
+        # The review already says so and carries no read marker; this reds the
+        # run, so the lost leg is visible beside the review that names it.
+        if: always() && steps.fold.outputs.complete == 'false'
+        run: |
+          echo "::error::a read leg delivered no review, so the posted review is incomplete and does not count as a read"
+          exit 1
+
+      - &gate-repost
+        name: Re-evaluate the caller's merge gate on the LIVE head
         # The review posted with the workflow GITHUB_TOKEN, whose events fire no
         # workflows, so a gate that reads the review never hears about it. This
         # is the only step that posts a verdict, and always() keeps it running
@@ -675,3 +757,33 @@ jobs:
           export REPORT_SHA
           echo "posting the gate verdict on ${REPORT_SHA}"
           bash -c "$POST_REVIEW_COMMAND"
+
+  # The skip path's gate re-post: prepare found the PR owes no read, so no review
+  # posts, but the caller's gate still owes this head a verdict. Its own
+  # concurrency group, never post's: a pending job in a group is cancelled by
+  # the next one queued, and a gate-only run must not cancel a post that carries
+  # a paid read's findings.
+  gate:
+    name: Re-evaluate the merge gate
+    needs: [decide, prepare]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.skip == 'true' && inputs.post-review-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: claude-pr-review-gate-${{ needs.decide.outputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write # the caller's gate command may write to the PR
+      statuses: write # post-review-command re-posts a merge gate's verdict
+      checks: read # a caller's gate may read another reviewer's check run
+    steps:
+      - *checkout-default
+
+      - *clone-reviewer
+
+      - *restore-setup-cache
+
+      - *run-setup
+
+      - *gate-repost

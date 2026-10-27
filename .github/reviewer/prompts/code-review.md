@@ -1,11 +1,12 @@
 # Code review
 
-This file is the `code-review` plugin's command, vendored from `anthropics/claude-code` at commit `08c6a4f5121ae140d3c1b5c96e3e5ae53587b54b` (`plugins/code-review/commands/code-review.md`). It keeps that command's agents, its high-signal bar and its list of false positives. Four changes adapt it to this reviewer:
+This file is the `code-review` plugin's command, vendored from `anthropics/claude-code` at commit `08c6a4f5121ae140d3c1b5c96e3e5ae53587b54b` (`plugins/code-review/commands/code-review.md`). It keeps that command's agents, its high-signal bar and its list of false positives. Five changes adapt it to this reviewer:
 
 1. The workflow fetched the pull request and ran it through an input sanitizer before you started. You read files. You have no shell and no network tool, so do not try `gh` or a web fetch.
 2. The command's first step, which stops on a draft, a closed or trivial pull request or one Claude already commented on, is removed. The workflow already decided that this pull request gets this read, and it owns that budget.
 3. You post nothing. You return the findings as structured output, and a later job posts them.
 4. Each finding carries a category and a confidence score. The workflow turns those two values into the severity that decides whether the finding holds the merge.
+5. The convention files include `.claude/rules/*.md` as well as CLAUDE.md. A rules file's `paths:` front matter names the files it governs.
 
 **Agent assumptions (applies to all agents and subagents):**
 
@@ -20,12 +21,13 @@ To do this, follow these steps precisely:
 1. Launch a helper-model agent to return a list of file paths (not their contents) for all relevant CLAUDE.md files including:
    - The root CLAUDE.md file, if it exists
    - Any CLAUDE.md files in directories containing files modified by the pull request (the metadata file lists every modified path)
+   - Any `.claude/rules/*.md` file whose `paths:` front matter matches a modified path, or that has no `paths:` front matter
 
 2. Launch a helper-model agent to read the metadata file and the diff file and return a summary of the changes.
 
 3. Launch 4 agents in parallel to independently review the changes. Each agent should return the list of issues, where each issue includes a description, the file and line, and the reason it was flagged (e.g. "CLAUDE.md adherence", "bug", "security"). The agents should do the following:
 
-   Agents 1 + 2: CLAUDE.md compliance helper-model agents. Audit changes for CLAUDE.md compliance in parallel. Note: When evaluating CLAUDE.md compliance for a file, you should only consider CLAUDE.md files that share a file path with the file or parents.
+   Agents 1 + 2: CLAUDE.md compliance helper-model agents. Audit changes for CLAUDE.md compliance in parallel. Note: When evaluating CLAUDE.md compliance for a file, you should only consider CLAUDE.md files that share a file path with the file or parents. A `.claude/rules/*.md` file governs exactly the files its `paths:` globs match, or every file when it has no `paths:` front matter; treat its rules as CLAUDE.md rules for those files.
 
    Agent 3: top-model bug agent (parallel subagent with agent 4). Scan for obvious bugs. Focus only on the diff itself without reading extra context. Flag only significant bugs; ignore nitpicks and likely false positives. Do not flag issues that you cannot validate without looking at context outside of the git diff.
 

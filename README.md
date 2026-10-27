@@ -2,12 +2,13 @@
 
 **A reusable GitHub Actions workflow that reviews a pull request with Claude and gates the merge on the findings.** The read itself is Anthropic's `code-review` plugin, run through [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action). This repository is the layer around that read: it decides when a pull request gets a read, feeds the plugin a sanitized diff, posts the findings as inline review threads, and holds the merge while a serious finding is unresolved.
 
-The read runs in one of two shapes, and the size of the diff picks the shape:
+The read runs in one of three shapes, and the size of the diff picks the shape:
 
-1. **A diff of at most `max-diff-lines` lines gets a read.** The plugin's agents review it, and the workflow posts their findings as one review. Each finding is anchored to a line of the diff, so you read it beside the code that caused it.
-2. **A larger diff gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
+1. **A diff of at most `max-diff-lines` lines gets one read.** The plugin's agents review it, and the workflow posts their findings as one review. Each finding is anchored to a line of the diff, so you read it beside the code that caused it.
+2. **A larger diff is split per file, and each part gets its own read.** The parts run at the same time with the same prompt and the same models. The workflow folds their findings into one review. If a part delivers no review, the review says that the read is incomplete, and a thread asks a human to read the files that part held.
+3. **A diff too large even to split gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
 
-Diff size is the usual reason for the second shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one.
+Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff that needs more parts than the limit allows, because a part never splits a file. So does a pull request that targets a branch other than your default branch: `claude-code-action` loads `CLAUDE.md` and `.claude/` from the pull request's target branch, so the reviewer reads only pull requests whose target is the default branch.
 
 You call it from your own repository by `uses:`, pinned to a commit with the release version in a trailing comment.
 
@@ -76,7 +77,9 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `max-reviews-per-pr`       | `1`                   | How many whole-diff reads one pull request may spend, from 0 to 999. It bounds the automatic triggers; `[opus-review]` and the review label fire whatever the count says. `0` turns the automatic reviewer off.                     |
 | `max-delta-reviews-per-pr` | `1`                   | How many ACCUMULATED reads one pull request may spend, from 0 to 999. An accumulated read covers the pushes made since the head the last review read, and runs once the pull request is otherwise ready to merge. `0` turns it off. |
 | `pr-number`                | none                  | The pull request an accumulated read runs on. A `workflow_dispatch` run carries no pull request payload, so the caller passes its own `inputs.pr` here. Leave it empty on a `pull_request_target` run.                              |
-| `max-diff-lines`           | `12000`               | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                               |
+| `max-diff-lines`           | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                                |
+| `shard-max-lines`          | `4000`                | The most diff lines one part of a split read holds. A part never splits a file, so one large file gets a part of its own.                                                                                                           |
+| `max-shardable-lines`      | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                               |
 | `review-timeout-seconds`   | `1500`                | The wall clock one credential attempt may spend on the read, rounded up to whole minutes.                                                                                                                                           |
 
 ## The read
@@ -128,9 +131,10 @@ A read is priced by the models that run it. `model` runs the review session, the
 
 ## What the reviewer never does
 
-It posts a review and nothing else. Five things hold that line:
+It posts a review and nothing else. Six things hold that line:
 
-- The only job that runs a model, `read`, holds `contents: read` alone. It can write to no pull-request surface at all. A separate job, `post`, holds the write scopes and runs no model.
+- The only job that runs a model, `read`, holds `contents: read` alone in each of its parts. It can write to no pull-request surface at all. Separate jobs, `post` and `gate`, hold the write scopes and run no model.
+- The agent can read only the checkout, the sanitized input and its own prompt. It cannot read its own credential from the runner.
 - The diff passes an input sanitizer before the agent sees it.
 - The agent has no shell and no network tool, so it cannot fetch the pull request past the sanitizer or run a command.
 - The checkout is your default branch, never the pull request's head.

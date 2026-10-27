@@ -20,6 +20,7 @@ attempt leaves at the action's fixed path.
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -244,3 +245,61 @@ def test_the_prompt_and_flags_scope_the_read(
     assert "--json-schema '" in output
     assert '--disallowedTools "Bash,' in output
     assert "WebFetch" in output.split("--disallowedTools", 1)[1]
+
+
+def _claude_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The `claude_args` output a planned read hands every attempt, as argv."""
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    _, delimited = output.split("claude_args<<", 1)
+    delimiter, rest = delimited.split("\n", 1)
+    return shlex.split(rest.split(f"\n{delimiter}\n", 1)[0])
+
+
+def test_every_file_tool_is_scoped_to_the_checkout_input_and_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `Read` matches /proc/self/environ, where the attempt's credential
+    lives, so every file tool the read may use carries one of three paths."""
+    argv = _claude_args(tmp_path, monkeypatch)
+    granted = argv[argv.index("--allowedTools") + 1].split(",")
+    file_tools = {"Read", "Grep", "Glob"}
+    file_grants = [g for g in granted if g.split("(", 1)[0] in file_tools]
+    prompt_dir = (REVIEWER / "prompts").resolve()
+    scopes = ["./**", f"/{tmp_path / 'pr-input'}/**", f"/{prompt_dir}/**"]
+    assert sorted(file_grants) == sorted(
+        f"{tool}({scope})" for tool in file_tools for scope in scopes
+    )
+    assert [g for g in granted if g not in file_grants] == [
+        "Task",
+        "Agent",
+        "TodoWrite",
+    ]
+
+
+def test_a_shard_leg_is_told_which_files_its_slice_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leg that reads its slice as the whole PR reports every file another leg
+    covers as missing, so its prompt names its own files."""
+    shards = tmp_path / "pr-input" / "shards"
+    shards.mkdir(parents=True)
+    (shards / "manifest.json").write_text(
+        json.dumps(
+            {
+                "shards": [
+                    {"name": "shard-00.diff", "files": ["a.py"]},
+                    {"name": "shard-01.diff", "files": ["b.py", "c.py"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("READ_LEG", "shard-01.diff")
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    assert (
+        "The diff file holds ONLY shard shard-01.diff, which is these whole files: "
+        "b.py, c.py." in output
+    )
+    assert "2 readers each read one slice" in output

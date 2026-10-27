@@ -198,20 +198,31 @@ def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
 
 READ_JOB = {"name": "Claude PR review (read)", "status": "in_progress"}
 POST_JOB = {"name": "Post the PR review", "status": "queued"}
+# A read leg that delivered: only after one did is a live post job a read in flight.
+READ_DONE = {
+    "name": "Claude PR review (read)",
+    "status": "completed",
+    "conclusion": "success",
+}
+READ_FAILED = {
+    "name": "Claude PR review (read)",
+    "status": "completed",
+    "conclusion": "failure",
+}
 # The umbrella's other long leg. A run reduced to this alone has already lost
 # its review job, so it is not a read anybody is waiting on.
 DELTA_JOB = {"name": "Review the PR's merge-resolution deltas", "status": "in_progress"}
 
 
-@pytest.mark.parametrize("job", [READ_JOB, POST_JOB])
+@pytest.mark.parametrize("jobs", [[READ_JOB], [READ_DONE, POST_JOB]])
 def test_an_in_flight_earlier_run_counts_as_the_review(
-    tmp_path: Path, job: dict
+    tmp_path: Path, jobs: list
 ) -> None:
     """The review is read and posted AFTER the earlier run's prepare job
     released the concurrency group, so with no submitted review yet, an earlier
     run whose read or post job is still live IS the read in progress."""
     proc, skip, argv = _run(
-        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=[job]
+        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=jobs
     )
     assert proc.returncode == 0, proc.stderr
     assert skip == "true"
@@ -267,20 +278,39 @@ CALLED_POST_JOB = {
     "name": "review / Post the PR review",
     "status": "queued",
 }
+# A sharded read's leg: GitHub appends the matrix value after the job's name.
+CALLED_SHARD_LEG = {
+    "name": "review / Claude PR review (read) (shard-03.diff)",
+    "status": "queued",
+}
 
 
-@pytest.mark.parametrize("job", [CALLED_READ_JOB, CALLED_POST_JOB])
+@pytest.mark.parametrize(
+    "jobs", [[CALLED_READ_JOB], [READ_DONE, CALLED_POST_JOB], [CALLED_SHARD_LEG]]
+)
 def test_a_called_workflows_prefixed_job_still_counts_as_the_review(
-    tmp_path: Path, job: dict
+    tmp_path: Path, jobs: list
 ) -> None:
     """Every consumer runs this reviewer through `uses:`, so the runs API reports
     each job under the caller's job id. An anchored prefix match finds no live
     read, this run reviews anyway, and the PR pays for a second whole-diff read
     of the head the earlier run is already reading."""
     _, skip, _ = _run(
-        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=[job]
+        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=jobs
     )
     assert skip == "true"
+
+
+def test_a_post_whose_read_failed_is_not_the_read(tmp_path: Path) -> None:
+    """A post runs under always(), so it is live after a failed read too, while
+    its setup command runs. It carries no findings, and yielding to it would
+    leave this head with no whole-diff read."""
+    _, skip, _ = _run(
+        tmp_path,
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[READ_FAILED, POST_JOB],
+    )
+    assert skip == "false"
 
 
 @pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "pending"])

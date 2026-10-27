@@ -25,6 +25,7 @@ _review_marker() {
   WHOLE_DIFF_READ_MARKER="$(_review_marker whole_diff_read)"
   OVERSIZED_REVIEW_MARKER="$(_review_marker oversized_review)"
   DEGRADED_REVIEW_MARKER="$(_review_marker degraded_review)"
+  INCOMPLETE_READ_MARKER="$(_review_marker incomplete_read)"
   AUTO_APPROVAL_MARKER="$(_review_marker automated_approval)"
   COVERAGE_MARKER_PREFIX="$(_review_marker coverage_prefix)"
   DELTA_READ_FINDING_MARKER="$(_review_marker delta_read_finding)"

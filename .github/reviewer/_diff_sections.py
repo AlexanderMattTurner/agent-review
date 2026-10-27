@@ -1,9 +1,10 @@
 """Split a unified diff into per-file sections.
 
-Shared by the PR reviewer's input pipeline: the delta narrowing keeps the sections
-of the files pushed since the last read, and the context builder reads the
-identifiers each section changes. Both must agree on where one file's section
-ends and the next begins, so the parse lives here rather than in either caller.
+Shared by the PR reviewer's input pipeline: the sharder packs these sections into
+shards, the delta narrowing keeps the sections of the files pushed since the last
+read, and the context builder reads the identifiers each section changes. All must
+agree on where one file's section ends and the next begins, so the parse lives
+here rather than in any caller.
 """
 
 # `git diff` starts every file's section with this; it is the only reliable
