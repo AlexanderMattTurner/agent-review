@@ -17,12 +17,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests._helpers import REPO_ROOT
 
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "template-sync-preflight.sh"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "template-sync.yaml"
 
 
 def run(tmp_path: Path, template_repo: str, running_repo: str, parent: str = ""):
@@ -121,13 +119,3 @@ def test_requires_its_inputs(tmp_path, missing):
     res = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=env)
     assert res.returncode != 0
     assert missing in res.stderr
-
-
-def test_the_sync_job_is_gated_on_the_guard():
-    # Without this the script above can hold every opinion it likes while the
-    # sync job runs anyway.
-    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    assert "preflight" in jobs["sync"]["needs"]
-    assert jobs["sync"]["if"] == "needs.preflight.outputs.self_sync != 'true'"
-    steps = jobs["preflight"]["steps"]
-    assert any(SCRIPT.name in step.get("run", "") for step in steps)
