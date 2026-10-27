@@ -431,11 +431,11 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
         if "steps.recheck.outputs.skip != 'true'" in str(s.get("if", ""))
     }
     assert {"prepare", "actions/setup-node"} <= gated, gated
-    # The gate re-post lives in the post job, which a skip still reaches.
+    # A skip reaches the gate job, which re-posts the verdict with no read.
     assert _jobs()["prepare"]["outputs"]["skip"] == "${{ steps.recheck.outputs.skip }}"
-    post = _jobs()["post"]
-    assert "needs.prepare.outputs.skip == 'true'" in post["if"]
-    gate = _post_review_step(post["steps"])
+    gate_job = _jobs()["gate"]
+    assert "needs.prepare.outputs.skip == 'true'" in gate_job["if"]
+    gate = _post_review_step(gate_job["steps"])
     assert gate["env"]["EVENT_HEAD_SHA"] == "${{ needs.decide.outputs.head_sha }}", (
         "the fallback verdict must land on THIS run's head, which nothing else re-posts"
     )

@@ -286,6 +286,7 @@ def test_the_reviewer_grants_no_shell_and_no_network() -> None:
     args = shlex.split(_ladder().claude_args("/tmp/pr-input", "/r/p.md"))
     allowed = set(args[args.index("--allowedTools") + 1].split(","))
     denied = set(args[args.index("--disallowedTools") + 1].split(","))
-    assert allowed <= {"Read", "Grep", "Glob", "Task", "Agent", "TodoWrite"}, allowed
+    tools = {rule.split("(", 1)[0] for rule in allowed}
+    assert tools <= {"Read", "Grep", "Glob", "Task", "Agent", "TodoWrite"}, allowed
     assert {"Bash", "WebFetch", "WebSearch", "Write", "Edit"} <= denied, denied
     assert args[args.index("--setting-sources") + 1] == "user"
