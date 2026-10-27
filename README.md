@@ -1,4 +1,4 @@
-# agent-review
+# agent-review-gate
 
 **A reusable GitHub Actions workflow that reviews a pull request with Claude and gates the merge on the findings.** The read itself is Anthropic's `code-review` plugin, run through [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action). This repository is the layer around that read: it decides when a pull request gets a read, feeds the plugin a sanitized diff, posts the findings as inline review threads, and holds the merge while a serious finding is unresolved.
 
@@ -31,9 +31,9 @@ jobs:
       statuses: write
       actions: read
       checks: read
-    uses: AlexanderMattTurner/agent-review/.github/workflows/review.yaml@main
+    uses: AlexanderMattTurner/agent-review-gate/.github/workflows/review.yaml@main
     with:
-      reviewer-repository: AlexanderMattTurner/agent-review
+      reviewer-repository: AlexanderMattTurner/agent-review-gate
       # Name the SAME ref the `uses:` line above names, and change both
       # together. The workflow falls back to `github.job_workflow_sha`, which is
       # EMPTY in the expression context, so it refuses to clone rather than run

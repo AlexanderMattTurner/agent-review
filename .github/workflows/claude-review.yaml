@@ -117,7 +117,7 @@ jobs:
       checks: read
     uses: ./.github/workflows/review.yaml
     with:
-      reviewer-repository: AlexanderMattTurner/agent-review
+      reviewer-repository: AlexanderMattTurner/agent-review-gate
       # This call is local, so the commit to run is this workflow file's own.
       # `pull_request_target` runs the file from the base branch, and
       # `github.sha` names that commit. Do not drop this: the called workflow's
