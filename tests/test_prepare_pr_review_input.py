@@ -3,20 +3,14 @@ that fetches the untrusted PR diff/metadata, sanitizes them for the Opus
 reviewer, and routes the review by diff size.
 
 Contract:
-  * EVERY diff is sanitized — diff.txt/meta.txt are always written, and the
-    shards must be slices of exactly the bytes a reviewer would otherwise have
-    read.
-  * At or under MAX_DIFF_LINES: sharded=false, unreviewable=false, no shards.
-  * Over MAX_DIFF_LINES: the sanitized diff is split per file into shards/ and
-    sharded=true, so the largest PRs are reviewed in a fan-out instead of being
-    skipped for a human who may never look.
-  * Over MAX_SHARDS shards: unreviewable=true and the human-review notice —
-    the only remaining no-review path.
+  * EVERY diff is sanitized — diff.txt/meta.txt are always written.
+  * At or under MAX_DIFF_LINES: unreviewable=false, and the read gets the diff.
+  * Over MAX_DIFF_LINES: unreviewable=true and the human-review notice, which
+    the post job turns into a thread a human resolves.
 
 The tests drive the REAL script with a fake `gh` (emits an N-file unified diff /
 PR metadata) and a fake `node` (stands in for the sanitizer, passing stdin
 through) on PATH, so the routing itself is exercised, not a re-implementation.
-The sharder runs for real.
 """
 
 import json
@@ -42,7 +36,7 @@ BASE_SHA = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
 
 # An elidable artifact. The elider is the CALLER's, named by ELIDE_COMMAND, and
 # `_ELIDER` below stands in for one: it replaces this file's hunks with a
-# one-line notice before the diff is counted or sharded.
+# one-line notice before the diff is counted.
 BUNDLE_PATH = ".claude/hooks/gate-hooks.bundle.mjs"
 
 # A caller-supplied elider, in the shape ELIDE_COMMAND names: it rewrites the raw
@@ -306,8 +300,6 @@ def _run(
     *,
     files: int,
     max_diff_lines: int | None,
-    shard_max_lines: int | None = 10,
-    max_shards: int | None = 24,
     diff_failure: str = "",
     bundle_lines: int = 0,
     patch_pad_bytes: int = 0,
@@ -367,11 +359,7 @@ def _run(
     out_file = tmp_path / "github_output"
     out_file.write_text("", encoding="utf-8")
     input_dir = tmp_path / "pr-input"
-    bounds = {
-        "MAX_DIFF_LINES": max_diff_lines,
-        "SHARD_MAX_LINES": shard_max_lines,
-        "MAX_SHARDS": max_shards,
-    }
+    bounds = {"MAX_DIFF_LINES": max_diff_lines}
     proc = subprocess.run(
         ["bash", str(SCRIPT)],
         check=False,
@@ -406,15 +394,13 @@ def _run(
     return proc, outputs, input_dir
 
 
-def test_normal_diff_is_sanitized_and_not_sharded(tmp_path: Path) -> None:
+def test_normal_diff_is_sanitized_and_read(tmp_path: Path) -> None:
     proc, outputs, input_dir = _run(tmp_path, files=2, max_diff_lines=100)
     assert proc.returncode == 0, proc.stderr
-    assert outputs["sharded"] == "false"
     assert outputs["unreviewable"] == "false"
     assert outputs["diff_lines"] == str(2 * LINES_PER_FILE)
     assert (input_dir / "diff.txt").is_file(), "the sanitized diff must be written"
     assert (input_dir / "meta.txt").is_file()
-    assert not (input_dir / "shards").exists()
     assert not (input_dir / "oversized-notice.txt").exists()
     assert (tmp_path / "sanitizer_input").exists(), "the sanitizer must run"
 
@@ -429,7 +415,7 @@ def test_a_diff_with_a_raw_escape_byte_still_reaches_the_sanitizer(
     proc, outputs, _ = _run(tmp_path, files=2, max_diff_lines=100, escape_byte=True)
     assert proc.returncode == 0, proc.stderr
     assert ESCAPE_SEQUENCE_STDERR not in proc.stderr
-    assert outputs["sharded"] == "false"
+    assert outputs["unreviewable"] == "false"
     sanitizer_saw = (tmp_path / "sanitizer_input").read_text(encoding="utf-8")
     assert "\x1b[31m" in sanitizer_saw, "the raw byte must reach the sanitizer intact"
 
@@ -504,7 +490,6 @@ def test_a_sanitizer_that_throws_on_the_pr_still_reviews_it(
     )
     assert proc.returncode == 0, proc.stderr
     assert outputs["unreviewable"] == "false"
-    assert outputs["sharded"] == "false"
     tag = where.get("added_line", TEMPLATE_TAG)
     assert tag in (input_dir / f"{out}.txt").read_text(encoding="utf-8")
     assert (input_dir / f"{out}.report.txt").read_text(encoding="utf-8") == report
@@ -542,57 +527,27 @@ def test_meta_survives_a_files_reply_too_large_to_pass_as_an_argument(
     ]
 
 
-def test_oversized_diff_is_sharded_rather_than_skipped(tmp_path: Path) -> None:
-    """The case that used to swallow the largest PRs: over the cap, the diff is
-    split and reviewed, and the full sanitized diff is still written (the shard
-    reviews' findings are anchored against it)."""
-    proc, outputs, input_dir = _run(
-        tmp_path, files=6, max_diff_lines=10, shard_max_lines=10
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert outputs["sharded"] == "true"
-    assert outputs["unreviewable"] == "false"
-    assert (input_dir / "diff.txt").is_file()
-    assert (tmp_path / "sanitizer_input").exists(), "the sanitizer must still run"
-
-    shards = json.loads(outputs["shards"])
-    assert int(outputs["shard_count"]) == len(shards) > 1
-    for name in shards:
-        assert (input_dir / "shards" / name).is_file()
-    # Reunion: the shards are the sanitized diff, nothing dropped.
-    body = "".join(
-        (input_dir / "shards" / name).read_text(encoding="utf-8") for name in shards
-    )
-    assert body == (input_dir / "diff.txt").read_text(encoding="utf-8")
-    assert not (input_dir / "oversized-notice.txt").exists()
-
-
-def test_a_diff_needing_too_many_shards_asks_for_a_human(tmp_path: Path) -> None:
-    """The one remaining no-review path, and it must be reached only by the
-    sharder's own budget refusal — not by any other sharder failure."""
-    proc, outputs, input_dir = _run(
-        tmp_path, files=6, max_diff_lines=10, shard_max_lines=10, max_shards=2
-    )
+def test_an_oversized_diff_asks_for_a_human(tmp_path: Path) -> None:
+    """Over the cap, the PR gets the human-review notice, and the full sanitized
+    diff is still written: the notice's thread anchors against it."""
+    proc, outputs, input_dir = _run(tmp_path, files=6, max_diff_lines=10)
     assert proc.returncode == 0, proc.stderr
     assert outputs["unreviewable"] == "true"
-    assert outputs["sharded"] == "false"
-    assert (input_dir / "oversized-notice.txt").is_file()
-    assert "30" in (input_dir / "oversized-notice.txt").read_text(encoding="utf-8")
-    assert not (input_dir / "shards").exists(), (
-        "no partial shard set on the give-up path"
-    )
+    assert (input_dir / "diff.txt").is_file()
+    assert (tmp_path / "sanitizer_input").exists(), "the sanitizer must still run"
+    notice = (input_dir / "oversized-notice.txt").read_text(encoding="utf-8")
+    assert "30 lines, over the 10-line ceiling" in notice
 
 
 def test_over_300_files_is_rebuilt_from_the_files_api(tmp_path: Path) -> None:
     """A PR wide enough for GitHub to refuse the diff media type (HTTP 406 above
     300 changed files) is still reviewed: the diff is rebuilt from the files API,
     sanitized, and routed by size like any other. Without this the widest PRs get
-    no automated read at all — the sharding path never sees a diff to shard."""
+    no automated read at all — the size routing never sees a diff to route."""
     proc, outputs, input_dir = _run(
         tmp_path, files=3, max_diff_lines=100, diff_failure="too_large"
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["sharded"] == "false"
     assert outputs["unreviewable"] == "false"
     # Two pages of 3 files each, reassembled into one diff.
     assert outputs["diff_lines"] == str(6 * LINES_PER_FILE)
@@ -603,18 +558,13 @@ def test_over_300_files_is_rebuilt_from_the_files_api(tmp_path: Path) -> None:
     assert not (input_dir / "oversized-notice.txt").exists()
 
 
-def test_rebuilt_wide_diff_still_shards_when_it_is_long(tmp_path: Path) -> None:
+def test_a_rebuilt_wide_diff_is_still_routed_by_size(tmp_path: Path) -> None:
     """The fallback feeds the normal size routing rather than bypassing it."""
     _, outputs, input_dir = _run(
-        tmp_path,
-        files=3,
-        max_diff_lines=10,
-        shard_max_lines=10,
-        diff_failure="too_large",
+        tmp_path, files=3, max_diff_lines=10, diff_failure="too_large"
     )
-    assert outputs["sharded"] == "true"
-    assert outputs["unreviewable"] == "false"
-    assert (input_dir / "shards").is_dir()
+    assert outputs["unreviewable"] == "true"
+    assert (input_dir / "oversized-notice.txt").is_file()
 
 
 def test_an_unrelated_gh_failure_stays_red(tmp_path: Path) -> None:
@@ -629,7 +579,7 @@ def test_an_unrelated_gh_failure_stays_red(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert "404" in proc.stderr
     assert not (input_dir / "diff.txt").exists()
-    assert "sharded" not in outputs and "unreviewable" not in outputs
+    assert "unreviewable" not in outputs
 
 
 def test_a_transient_api_fault_is_retried_rather_than_reddening_the_gate(
@@ -643,7 +593,7 @@ def test_a_transient_api_fault_is_retried_rather_than_reddening_the_gate(
         tmp_path, files=3, max_diff_lines=100, flaky_budget=2
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["sharded"] == "false"
+    assert outputs["unreviewable"] == "false"
     assert (input_dir / "diff.txt").read_text(encoding="utf-8").count("diff --git") == 3
     assert json.loads((input_dir / "meta.txt").read_text(encoding="utf-8"))["title"]
     assert "504" in proc.stderr, "the retried fault stays visible in the job log"
@@ -659,7 +609,7 @@ def test_a_persistent_api_fault_still_reds_the_job(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert "still failing after 2 attempts" in proc.stderr
     assert not (input_dir / "diff.txt").exists()
-    assert "sharded" not in outputs
+    assert "unreviewable" not in outputs
 
 
 def test_the_300_file_refusal_is_not_re_run_before_the_rebuild(
@@ -672,56 +622,22 @@ def test_the_300_file_refusal_is_not_re_run_before_the_rebuild(
         tmp_path, files=3, max_diff_lines=100, diff_failure="too_large"
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["sharded"] == "false"
+    assert outputs["unreviewable"] == "false"
     assert "ci-retry" not in proc.stderr
 
 
 def test_diff_exactly_at_limit_is_reviewed_whole(tmp_path: Path) -> None:
-    """The limit is inclusive — a diff AT MAX_DIFF_LINES is read in one context,
-    only a strictly larger one fans out."""
+    """The limit is inclusive — a diff AT MAX_DIFF_LINES is read, only a
+    strictly larger one gets the human-review notice."""
     _, outputs, input_dir = _run(tmp_path, files=2, max_diff_lines=2 * LINES_PER_FILE)
-    assert outputs["sharded"] == "false"
-    assert (input_dir / "diff.txt").is_file()
-    assert not (input_dir / "shards").exists()
-
-
-def test_one_over_the_limit_is_sharded(tmp_path: Path) -> None:
-    _, outputs, _ = _run(tmp_path, files=3, max_diff_lines=3 * LINES_PER_FILE - 1)
-    assert outputs["sharded"] == "true"
-    assert outputs["diff_lines"] == str(3 * LINES_PER_FILE)
-
-
-# The largest pull request the reviewer's source repository ever saw, in
-# sanitized diff lines. The shipped defaults must still SHARD a diff this size;
-# falling to the human-review notice is the no-review path this fan-out closes.
-LARGEST_PR_DIFF_LINES = 81_731
-
-
-def test_the_shipped_bounds_still_shard_a_very_large_pr(
-    tmp_path: Path,
-) -> None:
-    """Drive the real script with NO size bounds in the environment, so its own
-    defaults route the diff.
-
-    SHARD_MAX_LINES and MAX_SHARDS multiply: their product is the largest diff
-    that can be sharded at all, and everything above it gets the "please review
-    it manually" notice and no read. Cutting the shard size to shorten the
-    slowest leg therefore spends that ceiling, and spending all of it makes the
-    widest pull requests lose their review — the failure the fan-out closes.
-    """
-    files = -(-LARGEST_PR_DIFF_LINES // LINES_PER_FILE)  # ceil
-    _, outputs, input_dir = _run(
-        tmp_path,
-        files=files,
-        max_diff_lines=None,
-        shard_max_lines=None,
-        max_shards=None,
-    )
-    assert int(outputs["diff_lines"]) >= LARGEST_PR_DIFF_LINES
     assert outputs["unreviewable"] == "false"
-    assert outputs["sharded"] == "true"
-    assert (input_dir / "shards" / "manifest.json").is_file()
-    assert not (input_dir / "oversized-notice.txt").exists()
+    assert (input_dir / "diff.txt").is_file()
+
+
+def test_one_over_the_limit_asks_for_a_human(tmp_path: Path) -> None:
+    _, outputs, _ = _run(tmp_path, files=3, max_diff_lines=3 * LINES_PER_FILE - 1)
+    assert outputs["unreviewable"] == "true"
+    assert outputs["diff_lines"] == str(3 * LINES_PER_FILE)
 
 
 def test_a_reproducible_artifact_is_elided_before_the_diff_is_counted(
@@ -729,9 +645,8 @@ def test_a_reproducible_artifact_is_elided_before_the_diff_is_counted(
 ) -> None:
     """The caller's elider must be WIRED IN, and run before the count.
 
-    Every downstream budget — the single-context cap, the shard packing, the
-    fan-out ceiling — is spent in diff lines, so eliding after the count would
-    buy nothing. One esbuild bundle was 34.7% of all changed lines across the
+    The single-context cap is spent in diff lines, so eliding after the count
+    would buy nothing. One esbuild bundle was 34.7% of all changed lines across the
     last 55 merged PRs, which is why this runs before `wc -l`.
     """
     _, outputs, input_dir = _run(
@@ -743,7 +658,7 @@ def test_a_reproducible_artifact_is_elided_before_the_diff_is_counted(
     assert "lines of generated output elided" in diff
     # Counted AFTER the elision: 2 ordinary files plus the bundle's header + notice.
     assert outputs["diff_lines"] == str(2 * LINES_PER_FILE + 2)
-    assert outputs["sharded"] == "false"
+    assert outputs["unreviewable"] == "false"
 
 
 def test_the_sanitizer_never_reads_an_elided_artifact_body(tmp_path: Path) -> None:

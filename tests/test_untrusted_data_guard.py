@@ -10,7 +10,7 @@ Each path now phrases it exactly once:
     files.
   * the reusable PR reviewer (.github/workflows/review.yaml) is self-contained —
     it is cloned into a consumer repository that has neither that action nor that
-    file — so its guard lives in run-review-ladder.py's own prompt, which every
+    file — so its guard lives in review-ladder.py's own prompt, which every
     rung of the credential ladder sends.
 
 Centralizing traded one failure mode for another. On the claude-run path a prompt
@@ -20,7 +20,9 @@ real reviewer prompt builder, and pin that coupling, so dropping either can't
 silently disarm the guard.
 """
 
+import shlex
 import subprocess
+import sys
 
 import yaml
 
@@ -32,7 +34,7 @@ PREAMBLE = ACTION_DIR / "untrusted-data-preamble.md"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 PROMPTS = REPO_ROOT / ".github" / "prompts"
 REVIEWER = REPO_ROOT / ".github" / "reviewer"
-LADDER = REVIEWER / "run-review-ladder.py"
+LADDER = REVIEWER / "review-ladder.py"
 # The files prepare-pr-review-input.sh writes for the agent. Every one is
 # repository content the pull request author chose, so every one must sit under
 # the guard.
@@ -164,7 +166,7 @@ def test_known_untrusted_ingesting_call_sites_declare_their_files() -> None:
     their own, so dropping `untrusted_files` here would leave the run genuinely
     unguarded. A new untrusted-ingesting automation belongs in this list."""
     # The first-pass PR reviewer is NOT here: it moved to review.yaml, which
-    # calls the model through run-review-ladder.py and carries its own guard.
+    # builds its prompt in review-ladder.py and carries its own guard.
     # The reviewer-path tests below assert the same property at that shape.
     required = {
         "Review the merge deltas with Claude (Sonnet)",
@@ -223,14 +225,24 @@ def test_the_guard_is_not_re_worded_anywhere_else() -> None:
 
 # ── The reusable reviewer's own path ─────────────────────────────────────────
 #
-# review.yaml calls the model through run-review-ladder.py, which builds the
-# whole prompt itself. These drive that real builder rather than reading the
+# review.yaml hands claude-code-action the prompt review-ladder.py builds. These drive that real builder rather than reading the
 # workflow, so a guard that is present but assembled in the wrong order reds.
 
 
 def _reviewer_prompt(pr_input_dir="/tmp/pr-input"):
-    ladder = load_script(".github/reviewer/run-review-ladder.py")
-    return ladder.prompt_for(pr_input_dir, "/checkout/review.md", "7", "owner/repo")
+    return _ladder().prompt_for(
+        pr_input_dir, "/checkout/review.md", "7", "owner/repo", "", "opus", ""
+    )
+
+
+def _ladder():
+    """The ladder module; `sys.path` is restored, because the module puts the
+    reviewer directory on it at import."""
+    saved = list(sys.path)
+    try:
+        return load_script(".github/reviewer/review-ladder.py")
+    finally:
+        sys.path[:] = saved
 
 
 def test_the_reviewer_guard_precedes_the_files_it_covers() -> None:
@@ -267,24 +279,13 @@ def test_the_reviewer_forbids_the_write_side_in_its_own_prompt() -> None:
         assert forbidden in prompt, f"the prompt never forbids {forbidden!r}"
 
 
-def test_the_reviewer_grants_no_shell() -> None:
-    """The tool grant is the hard half of the guard: with no Bash, a prompt
-    injection that the wording fails to stop still reaches no shell."""
-    ladder = load_script(".github/reviewer/run-review-ladder.py")
-    # Both directories the grant names: the sanitized PR input, and the reviewer's
-    # own checkout, which is where the default prompt lives.
-    grant = ladder.TOOL_GRANT.format(d="/tmp/pr-input", r="/tmp/reviewer")
-    tools = {entry.split("(", 1)[0] for entry in grant.split(",")}
-    assert tools <= {"Read", "Write", "Edit"}, f"the reviewer is granted {tools}"
-    assert "Bash" not in grant, "the reviewer must reach no shell"
-    # The grant's own `/` before an already-absolute directory doubles the slash,
-    # which is what the production reviewer this one was extracted from also emits.
-    writes = {
-        entry.replace("//", "/")
-        for entry in grant.split(",")
-        if not entry.startswith("Read(")
-    }
-    assert writes == {
-        "Write(/tmp/pr-input/review.json)",
-        "Edit(/tmp/pr-input/review.json)",
-    }, f"the reviewer may write outside its verdict file: {writes}"
+def test_the_reviewer_grants_no_shell_and_no_network() -> None:
+    """The tool flags are the hard half of the guard: with no shell and no web
+    tool, an injection the wording fails to stop reaches no command, and cannot
+    fetch the raw pull request past the sanitizer."""
+    args = shlex.split(_ladder().claude_args("/tmp/pr-input", "/r/p.md"))
+    allowed = set(args[args.index("--allowedTools") + 1].split(","))
+    denied = set(args[args.index("--disallowedTools") + 1].split(","))
+    assert allowed <= {"Read", "Grep", "Glob", "Task", "Agent", "TodoWrite"}, allowed
+    assert {"Bash", "WebFetch", "WebSearch", "Write", "Edit"} <= denied, denied
+    assert args[args.index("--setting-sources") + 1] == "user"

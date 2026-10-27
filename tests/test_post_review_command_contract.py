@@ -7,10 +7,9 @@ does not fail — it returns without posting, and the required check keeps whate
 verdict it had before the review. That is a silently stale gate, so the contract
 is asserted here, in the repository that owns it.
 
-The head sha is `REPORT_SHA` in both jobs. In the synthesis job it is read LIVE
-rather than taken from the event: a sharded review runs long enough for a push to
-land inside it, and a verdict posted on the event's sha leaves the live head with
-no event able to clear it.
+The head sha is `REPORT_SHA`, read LIVE rather than taken from the event: a read
+runs long enough for a push to land inside it, and a verdict posted on the
+event's sha leaves the live head with no event able to clear it.
 """
 
 import re
@@ -34,37 +33,26 @@ def _gate_steps() -> dict[str, dict]:
     return steps
 
 
-def test_both_jobs_that_post_a_review_re_evaluate_the_gate() -> None:
-    """A review posted with the workflow GITHUB_TOKEN fires no workflow, so a
-    job that posts one and skips this step leaves the gate unaware of it."""
-    assert set(_gate_steps()) == {"review", "review_synthesis"}
+def test_the_job_that_posts_the_review_re_evaluates_the_gate() -> None:
+    """A review posted with the workflow GITHUB_TOKEN fires no workflow, so the
+    job that posts one must run this step, and no other job may post a second
+    verdict for the same head."""
+    assert set(_gate_steps()) == {"post"}
 
 
-@pytest.mark.parametrize("job", ["review", "review_synthesis"])
 @pytest.mark.parametrize("name", REQUIRED)
-def test_the_gate_command_is_handed_the_environment_it_reads(
-    job: str, name: str
-) -> None:
-    step = _gate_steps()[job]
-    assert name in step["env"], f"{job} runs the caller's gate without {name}"
+def test_the_gate_command_is_handed_the_environment_it_reads(name: str) -> None:
+    step = _gate_steps()["post"]
+    assert name in step["env"], f"the post job runs the caller's gate without {name}"
 
 
-def test_the_first_pass_gate_post_names_the_reviewed_head() -> None:
-    """The whole-diff read posts about the head IT read — the one `decide`
-    resolved, which is the event's sha on a push and the live head on a
-    dispatch. Reading the payload directly would name no head at all on a
-    dispatch, and the verdict would post on an empty sha."""
-    env = _gate_steps()["review"]["env"]
-    assert "REPORT_SHA" in env
-    assert env["REPORT_SHA"] == "${{ needs.decide.outputs.head_sha }}"
-
-
-def test_the_sharded_gate_post_reads_the_head_live() -> None:
+def test_the_gate_post_reads_the_head_live() -> None:
     """A verdict on the event's sha strands the live head: the push that moved it
     yields to this run, so no later event posts one. RED if REPORT_SHA goes back
-    to the event payload here."""
-    step = _gate_steps()["review_synthesis"]
-    assert "REPORT_SHA" not in step["env"], "the synthesis head is read, not taken"
+    to the event payload here. The fallback is the head `decide` resolved, which
+    a dispatch run has although its payload names no pull request."""
+    step = _gate_steps()["post"]
+    assert "REPORT_SHA" not in step["env"], "the head is read, not taken"
     assert re.search(r"headRefOid", step["run"]), "no live head read"
     assert "REPORT_SHA=" in step["run"] and "export REPORT_SHA" in step["run"]
-    assert "EVENT_HEAD_SHA" in step["env"], "the fallback for an unreadable head"
+    assert step["env"]["EVENT_HEAD_SHA"] == "${{ needs.decide.outputs.head_sha }}"

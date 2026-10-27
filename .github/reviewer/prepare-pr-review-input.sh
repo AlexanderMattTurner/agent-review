@@ -7,11 +7,10 @@
 # The agent reads only the sanitized files this writes, never the raw
 # `gh pr diff`, so an injection payload hidden in the diff cannot reach it intact.
 #
-# Above MAX_DIFF_LINES the diff no longer fits one model context, so this
-# SHARDS it per-file and emits the shard list for parallel reads. Only a diff
-# too large even to shard falls back to the human-review notice. The >300-file
-# case (GitHub refuses the diff media type outright) is rebuilt from the files
-# API first, then routed by size like any other.
+# Above MAX_DIFF_LINES the diff no longer fits one model context, so the PR gets
+# the human-review notice instead of a read. The >300-file case (GitHub refuses
+# the diff media type outright) is rebuilt from the files API first, then routed
+# by size like any other.
 #
 # A READ=delta run covers the pushes after SINCE, which an earlier review already
 # read: the compare API names those files and the diff is narrowed to them. A
@@ -22,11 +21,10 @@
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
 # Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
 # covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
-# size bounds below are optional.
-# Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
-# shard_count (the last two written by shard-pr-diff.py). Writes into
+# size bound below are optional.
+# Emits to GITHUB_OUTPUT: diff_lines, unreviewable, stale. Writes into
 # $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
-# sanitizer-report.txt, shards/, oversized-notice.txt.
+# sanitizer-report.txt, oversized-notice.txt.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,17 +49,6 @@ REVIEWER_SHA="${REVIEWER_SHA:-}"
 # is the sole source of the PR's changes — a reviewer that overruns cannot reconstruct
 # them from the trusted tree.
 MAX_DIFF_LINES="${MAX_DIFF_LINES:-12000}"
-# The legs run in parallel, so the review's wall-clock is one leg's read; a
-# smaller shard trades that for a finding likelier to fall across a boundary.
-SHARD_MAX_LINES="${SHARD_MAX_LINES:-4000}"
-# The largest diff that can be sharded AT ALL; above it a PR gets the human-review notice
-# and no read. 192k keeps a wide margin over the largest PR in this repo's history (81,731
-# lines). INVARIANT — DERIVED, never a second constant: the ceiling is stated once here, so
-# changing SHARD_MAX_LINES cannot lower it by omission, and an operator overriding
-# SHARD_MAX_LINES still gets a consistent fan-out.
-MAX_SHARDABLE_LINES="${MAX_SHARDABLE_LINES:-192000}"
-# The fan-out bound proper: a pathological diff must not spawn unbounded runners.
-MAX_SHARDS="${MAX_SHARDS:-$((MAX_SHARDABLE_LINES / SHARD_MAX_LINES))}"
 
 mkdir -p "$PR_INPUT_DIR" # bare-mkdir-ok: Linux CI runner (no BSD mkdir -p symlink semantics)
 
@@ -112,9 +99,9 @@ fetch_whole_pr_diff() {
   files="$(retry_stdout gh api --paginate "repos/{owner}/{repo}/pulls/${PR}/files")"
   # INVARIANT: the rebuilt diff is the WHOLE diff or no diff. The files endpoint
   # stops at 3000 entries with no cursor past it, so a wider PR arrives silently
-  # short — and a partial diff sanitized and sharded reads as a complete review of
+  # short — and a partial diff sanitized and read passes as a complete review of
   # a PR whose later files nobody looked at. Refusing routes it to the
-  # human-review notice instead, through the sharder's own over-budget code.
+  # human-review notice instead.
   local fetched changed
   # `--paginate` concatenates one ARRAY PER PAGE, so the count flattens them.
   fetched="$(jq -s 'flatten | length' <<<"$files")"
@@ -128,11 +115,10 @@ fetch_whole_pr_diff() {
 
 # 3 is the rebuild's refusal to serve a partial diff. It is a verdict about this
 # PR's width, not a fault: the read is skipped and a human is asked, the same
-# ending an unshardable diff takes.
+# ending an over-cap diff takes.
 fetch_rc=0
 fetch_whole_pr_diff "$raw_diff" || fetch_rc=$?
 if ((fetch_rc == 3)); then
-  emit_output "sharded=false"
   emit_output "unreviewable=true"
   printf '%s\n' \
     "Automated review skipped: this PR changes more files than GitHub's own files API will serve, so no complete diff can be built for a review. A change this large should get a human review — please review it manually." \
@@ -155,7 +141,6 @@ if [[ -z "$live_head" ]]; then
 fi
 if [[ "$live_head" != "$HEAD_SHA" ]]; then
   emit_output "stale=true"
-  emit_output "sharded=false"
   emit_output "unreviewable=false"
   echo "the head moved ($HEAD_SHA -> $live_head) during the fetch; this run reads nothing" >&2
   exit 0
@@ -205,7 +190,7 @@ sanitize_into diff "${PR_INPUT_DIR}/diff.txt" "${PR_INPUT_DIR}/diff.report.txt" 
 
 # A delta read covers the pushes after SINCE. GitHub's compare API is the
 # authority on which files those pushes touched, and the narrowing runs on the
-# SANITIZED diff, so a shard of it is still a slice of the bytes a whole read
+# SANITIZED diff, so the narrowed diff is still a slice of the bytes a whole read
 # would have shown the model.
 #
 # `ahead` is the only status that licenses a narrowed read: it says SINCE is on
@@ -301,52 +286,15 @@ else
   echo "(sanitizer found no injection-shaped content in the diff or metadata)" >"$report"
 fi
 
-# Size routing happens AFTER sanitization, so the shards are slices of exactly
-# what the reviewer would otherwise have read.
-
+# Size routing happens AFTER sanitization and elision, so the cap counts the
+# lines the reviewer would otherwise have read.
 if ((diff_lines <= MAX_DIFF_LINES)); then
-  emit_output "sharded=false"
   emit_output "unreviewable=false"
   exit 0
 fi
 
-# Over the single-context cap. The ceiling is checked HERE, on the line count: a
-# diff dominated by one file splits into one shard however large it is, so the
-# shard cap below would admit a million-line file as a single reviewable slice.
-if ((diff_lines > MAX_SHARDABLE_LINES)); then
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: this PR's diff is ${diff_lines} lines, over the ${MAX_SHARDABLE_LINES}-line ceiling for an automated read. A change this large should get a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  echo "diff ${diff_lines} lines exceeds MAX_SHARDABLE_LINES=${MAX_SHARDABLE_LINES}; asking for a human review" >&2
-  exit 0
-fi
-
-# Shard, and give up when even the sharded fan-out would be unbounded.
-shard_rc=0
-python3 "$here/shard-pr-diff.py" \
-  --diff "${PR_INPUT_DIR}/diff.txt" \
-  --out-dir "${PR_INPUT_DIR}/shards" \
-  --max-lines "$SHARD_MAX_LINES" \
-  --max-shards "$MAX_SHARDS" \
-  --model "${MODEL:-}" \
-  --model-low "${MODEL_LOW:-}" \
-  --low-tier-paths "${LOW_TIER_PATHS:-}" \
-  --bulk-lines "${BULK_DIFF_LINES:-0}" || shard_rc=$?
-
-# 3 is the sharder's over-budget refusal; any other non-zero stays a red job.
-if ((shard_rc == 3)); then
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: this PR's diff is ${diff_lines} lines, which needs more than the ${MAX_SHARDS}-shard fan-out limit even after splitting it per file. A change this large should get a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  echo "diff ${diff_lines} lines needs more than MAX_SHARDS=${MAX_SHARDS} shards; asking for a human review" >&2
-  exit 0
-fi
-((shard_rc == 0)) || exit "$shard_rc"
-
-emit_output "sharded=true"
-emit_output "unreviewable=false"
-echo "diff ${diff_lines} lines exceeds MAX_DIFF_LINES=${MAX_DIFF_LINES}; sharded for a fan-out review" >&2
+emit_output "unreviewable=true"
+printf '%s\n' \
+  "Automated review skipped: this PR's diff is ${diff_lines} lines, over the ${MAX_DIFF_LINES}-line ceiling for an automated read. A change this large should get a human review — please review it manually." \
+  >"${PR_INPUT_DIR}/oversized-notice.txt"
+echo "diff ${diff_lines} lines exceeds MAX_DIFF_LINES=${MAX_DIFF_LINES}; asking for a human review" >&2

@@ -7,15 +7,13 @@ Two paths run a model in this repository, and each has ONE gate:
   * `.github/actions/claude-run` — the composite action. The gate lives inside
     it rather than being re-typed at each call site, where it was previously
     missed by 5 of 7 callers.
-  * `.github/workflows/review.yaml` — the reusable PR reviewer. It calls the
-    model through `run-review-ladder.py` in a `run:` step, so it cannot inherit
-    the composite's gate; it runs `checks/claude-execution.py` instead.
+  * `.github/workflows/review.yaml` — the reusable PR reviewer. It calls
+    claude-code-action directly, once per credential attempt, so it cannot
+    inherit the composite's gate; it runs `checks/claude-execution.py` instead.
 
 These tests enumerate every call site on both paths, so a future one that opts
 out (or a refactor that drops the gate step) reds without being named here.
 """
-
-import re
 
 import yaml
 
@@ -29,10 +27,10 @@ GATE_SCRIPT_REL = "check-claude-execution.sh"
 # every mention of the script contains it, so no step could ever be flagged.
 GATE_RUN_REF = "${GITHUB_ACTION_PATH}/" + GATE_SCRIPT_REL
 
-# The reusable reviewer's own model path: the script that calls the model, and
+# The reusable reviewer's own model path: the action that calls the model, and
 # the gate that reads the log it leaves behind.
 REVIEW_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review.yaml"
-LADDER = "run-review-ladder.py"
+CLAUDE_CODE_ACTION = "anthropics/claude-code-action@"
 REVIEWER_GATE = "checks/claude-execution.py"
 REVIEWER_GATE_SCRIPT = (
     REPO_ROOT / ".github" / "reviewer" / "checks" / "claude-execution.py"
@@ -101,8 +99,8 @@ def test_every_claude_run_call_site_inherits_the_gate() -> None:
     gate_execution: false must justify itself here."""
     call_sites = _claude_run_call_sites()
     # A floor, not a count: a parser that reads no call site would run the
-    # opt-out check below over nothing and pass. The first-pass PR reviewer left
-    # this path for review.yaml's ladder, which the tests below gate instead.
+    # opt-out check below over nothing and pass. The first-pass PR reviewer runs
+    # its own attempts in review.yaml, which the tests below gate instead.
     assert len(call_sites) >= 4, f"expected the known callers, found {len(call_sites)}"
     opted_out = [
         label
@@ -164,44 +162,27 @@ def test_execution_log_path_has_a_single_source() -> None:
 
 # ── The reusable reviewer's model path ───────────────────────────────────────
 #
-# review.yaml calls the model from a `run:` step, so the claude-run composite's
-# gate cannot reach it. The same obligation is asserted here at that shape.
+# review.yaml runs claude-code-action directly, once per credential attempt, so
+# the claude-run composite's gate cannot reach it. The same obligation is
+# asserted here at that shape: the attempts are continue-on-error, and ONE gate
+# after the last of them reads the newest attempt's log.
 
 
 def _review_jobs():
     return _load(REVIEW_WORKFLOW)["jobs"]
 
 
-def _steps_running(job, needle):
-    return [s for s in job.get("steps") or [] if needle in str(s.get("run", ""))]
-
-
-# A step may reach the model through one of the reviewer's own scripts rather than
-# naming the ladder itself. Reading that script is what keeps every check below
-# honest: matched on the `run:` text alone, a one-line wrapper would take a step
-# out of the model-caller set while it still spends a credential and still calls
-# the model — the gate, the `if:` and the credential checks would all pass over it.
-_WRAPPER = re.compile(r"\$\{REVIEWER_DIR\}/(?P<script>[A-Za-z0-9_.-]+\.(?:sh|py))")
-
-
-def _runs_the_ladder(step) -> bool:
-    body = str(step.get("run", ""))
-    if LADDER in body:
-        return True
-    return any(
-        (script := REPO_ROOT / ".github" / "reviewer" / name).is_file()
-        and LADDER in script.read_text(encoding="utf-8")
-        for name in _WRAPPER.findall(body)
-    )
-
-
-def _model_steps(job):
-    return [s for s in job.get("steps") or [] if _runs_the_ladder(s)]
+def _is_model_step(step) -> bool:
+    return str(step.get("uses", "")).startswith(CLAUDE_CODE_ACTION)
 
 
 def _model_jobs():
     """Every job in review.yaml that calls the model, as (name, job)."""
-    return [(name, job) for name, job in _review_jobs().items() if _model_steps(job)]
+    return [
+        (name, job)
+        for name, job in _review_jobs().items()
+        if any(_is_model_step(s) for s in job.get("steps") or [])
+    ]
 
 
 def test_the_reviewer_gate_script_exists() -> None:
@@ -211,96 +192,73 @@ def test_the_reviewer_gate_script_exists() -> None:
     assert REVIEWER_GATE_SCRIPT.is_file()
 
 
-def test_the_reviewer_calls_the_model_from_more_than_one_job() -> None:
-    """A floor, not a count: the whole-diff read and the shard leg both call the
-    model, so a parser that found neither would run every check below over
-    nothing and pass."""
-    assert len(_model_jobs()) >= 2, f"found model jobs: {[n for n, _ in _model_jobs()]}"
+def test_one_job_calls_the_model_and_it_holds_no_write_scope() -> None:
+    """The trust model's third rule: the job that reads the untrusted diff with a
+    model posts nothing. A write scope here is what a prompt injection would
+    need to act on the repository directly."""
+    jobs = _model_jobs()
+    assert [name for name, _ in jobs] == ["read"]
+    assert jobs[0][1]["permissions"] == {"contents": "read"}
 
 
-def _gated_pairs(job) -> list[tuple[dict, dict | None]]:
-    """Every ladder step in `job`, each with the gate that reads ITS OWN log.
-
-    Paired by the step id the gate names, never by position: a shard leg runs the
-    ladder twice — the cheap read and the escalated one — and pairing by order
-    would call a gate on the first log a gate on the second.
-    """
-    gates = _steps_running(job, REVIEWER_GATE)
-    by_log = {str((g.get("env") or {}).get("EXECUTION_FILE")): g for g in gates}
-    return [
-        (m, by_log.get("${{ steps.%s.outputs.execution_file }}" % m["id"]))
-        for m in _model_steps(job)
-    ]
-
-
-def test_every_reviewer_model_call_is_gated() -> None:
-    """The choke-point property at the reviewer's call shape: EVERY ladder step
-    runs the execution-log gate, and each gate reads the log of the step it
-    belongs to. Counting the steps instead would admit a second model call whose
-    own failure nothing reads — a paid read that errored on every rung, and a
-    green job over it."""
-    for name, job in _model_jobs():
-        pairs = _gated_pairs(job)
-        assert pairs, f"{name} runs the ladder in no step this can pair"
-        for model, gate in pairs:
-            assert gate is not None, (
-                f"{name}'s `{model.get('name')}` calls the model with no gate "
-                "reading its own execution log"
-            )
+def test_every_attempt_is_judged_and_the_last_one_is_gated() -> None:
+    """Each attempt is followed by the judge that moves its log aside and arms
+    the next rung, on the same condition, so no attempt's log is overwritten
+    unread. After the last attempt, ONE unconditional gate reads the newest log:
+    an attempt that errored on every rung must red the job, never leave a green
+    one with no findings."""
+    steps = _review_jobs()["read"]["steps"]
+    attempts = [i for i, s in enumerate(steps) if _is_model_step(s)]
+    assert len(attempts) == len(
+        _load(REVIEW_WORKFLOW)[True]["workflow_call"]["secrets"]
+    )
+    for i in attempts:
+        judge = steps[i + 1]
+        assert 'review-ladder.py" next' in judge["run"]
+        assert judge["if"] == steps[i]["if"]
+        assert steps[i]["continue-on-error"] is True
+    gates = [i for i, s in enumerate(steps) if REVIEWER_GATE in str(s.get("run", ""))]
+    assert len(gates) == 1 and gates[0] > attempts[-1] + 1
+    gate = steps[gates[0]]
+    assert "if" not in gate
+    assert gate["env"]["EXECUTION_FILE"] == "${{ env.REVIEW_EXECUTION_FILE }}"
 
 
-def test_no_reviewer_gate_is_narrowed_past_its_model_step() -> None:
-    """A gate whose `if:` is stricter than the step it gates is a gate that can
-    be skipped while the model still ran — the silent green this exists to
-    prevent."""
-    for name, job in _model_jobs():
-        for model, gate in _gated_pairs(job):
-            assert gate is not None, f"{name}: `{model.get('name')}` has no gate"
-            assert gate.get("if") == model.get("if"), (
-                f"{name}: gate `if:` {gate.get('if')!r} does not match the model "
-                f"step's {model.get('if')!r}"
-            )
-
-
-def test_the_review_credentials_reach_only_the_steps_that_run_the_model() -> None:
-    """The property the old claude-run call-site count was really about: the
-    model credentials are handed to the steps that call the model and to no
-    other step. A rung leaking into a step that runs repository-supplied code
-    would hand that code a paid token."""
-    holders, callers = [], []
-    for name, job in _review_jobs().items():
-        for step in job.get("steps") or []:
-            label = f"{name}:{step.get('name')}"
-            if "secrets.rung_" in yaml.safe_dump(step.get("env") or {}):
-                holders.append(label)
-            if _runs_the_ladder(step):
-                callers.append(label)
-    assert sorted(holders) == sorted(callers), (
-        f"credential holders {sorted(holders)} != model callers {sorted(callers)}"
+def _kind_expression(rung: str) -> str:
+    return (
+        f"${{{{ startsWith(secrets.{rung}, 'sk-ant-oat') && 'oauth' || "
+        f"secrets.{rung} != '' && 'metered' || '' }}}}"
     )
 
 
-def test_every_rung_reaches_the_model_step() -> None:
-    """Each declared secret must actually be handed to the ladder. A rung
-    declared but never forwarded is a fallback that silently never fires, and
-    the review dies on the rung before it."""
+def test_the_review_credentials_reach_only_the_steps_that_run_the_model() -> None:
+    """A rung leaking into a step that runs repository-supplied code would hand
+    that code a paid token. The model steps hold the values; the read job's env
+    holds only each rung's KIND, the one expression that names a secret without
+    exposing it."""
+    holders = []
+    for name, job in _review_jobs().items():
+        for step in job.get("steps") or []:
+            exposed = yaml.safe_dump({"env": step.get("env"), "with": step.get("with")})
+            if "secrets.rung_" in exposed and not _is_model_step(step):
+                holders.append(f"{name}:{step.get('name')}")
+        job_env = job.get("env") or {}
+        for key, value in job_env.items():
+            if "secrets.rung_" in str(value):
+                rung = f"rung_{key.removeprefix('RUNG_').removesuffix('_KIND')}"
+                assert value == _kind_expression(rung), f"{name} env {key}"
+    assert holders == [], f"credential holders outside the model steps: {holders}"
+
+
+def test_every_rung_reaches_each_attempt() -> None:
+    """Each declared secret must be selectable by every attempt, as an OAuth
+    token and as a metered key. A rung an attempt cannot select is a fallback
+    that silently never fires, and the review dies on the rung before it."""
     doc = _load(REVIEW_WORKFLOW)
-    # YAML 1.1 reads a bare `on:` key as the boolean True, so the trigger
-    # block is under `True` and not under the string.
     declared = set(doc[True]["workflow_call"]["secrets"])
-    for name, job in _model_jobs():
-        # EVERY model step, not the first: a second read that forwards fewer rungs
-        # dies on a dead credential the first read would have walked past.
-        for step in _model_steps(job):
-            env = step["env"]
-            forwarded = {
-                rung
-                for rung in declared
-                if any(
-                    f"secrets.{rung} " in f"{value} "
-                    for value in map(str, env.values())
-                )
-            }
-            assert forwarded == declared, (
-                f"{name}'s `{step.get('name')}` drops rung(s): {declared - forwarded}"
-            )
+    for _, job in _model_jobs():
+        for step in filter(_is_model_step, job["steps"]):
+            for key in ("claude_code_oauth_token", "anthropic_api_key"):
+                value = str(step["with"][key])
+                forwarded = {r for r in declared if f"secrets.{r} " in f"{value} "}
+                assert forwarded == declared, f"{key} drops {declared - forwarded}"

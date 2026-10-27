@@ -2,16 +2,16 @@
 # kcov-exclude: a GitHub Actions step body with a behavioral suite: the suite runs the real
 #   script as `bash <script>` against stubbed CLIs on PATH, so the branches are asserted but
 #   no run is ever traced.
-# Re-ask, from inside the review job's per-PR concurrency group, whether this PR
+# Re-ask, from inside the prepare job's per-PR concurrency group, whether this PR
 # still owes the read decide asked for; emits skip=true/false to GITHUB_OUTPUT.
 # READ_KIND picks which budget answers: `first` counts whole-diff reads against
 # `max-reviews-per-pr`, `delta` counts accumulated reads against
 # `max-delta-reviews-per-pr`. The two never share a budget, so a delta read that
 # lost this race cannot cancel the first read a PR is still owed.
-# The group serializes review JOBS only, and a sharded review is posted later by
-# review_synthesis (its own group) — so a submitted-reviews read alone still
-# races the sharded path, and an earlier run of this workflow with a live
-# shard/synthesis job on this PR also counts as a read being spent — that job, not
+# The group serializes prepare JOBS only, and the read and post jobs run after
+# prepare releases it — so a submitted-reviews read alone still races them, and
+# an earlier run of this workflow with a live read or post job on this PR also
+# counts as a read being spent — that job, not
 # the umbrella run around it. Fails toward REVIEWING: an exhausted query emits
 # skip=false — losing a read the PR still owes is worse than one duplicate.
 #
@@ -84,14 +84,14 @@ if [[ "$count" -ge "$BUDGET" ]]; then
   exit 0
 fi
 
-# The sharded path: the earlier run's review job released the group while its
-# shard/synthesis jobs are still generating the review, so no submitted review
+# The earlier run's prepare job released the group while its read and post
+# jobs are still generating the review, so no submitted review
 # exists yet. Those jobs are what this run must yield to. A run whose
 # pull_requests list is empty (a fork PR, or a PR that has since closed) never
 # matches, which fails toward reviewing.
 #
 # Candidates are filtered client-side on "not completed" rather than with the
-# API's status=in_progress: a run whose shard legs still wait for runners reports
+# API's status=in_progress: a run whose read job still waits for a runner reports
 # `queued`. Only runs OLDER than this one count — a newer run is waiting on us.
 #
 # A dispatched accumulated read carries no `pull_requests` entry at all — the run
@@ -122,22 +122,22 @@ if [[ "$runs_rc" -ne 0 ]]; then
   exit 0
 fi
 
-# A run is the read in flight only while a SHARDED-review job of it is live.
+# A run is the read in flight only while its read or post job is live.
 # The workflow reports as in flight while ANY of its four jobs runs, and most of
 # them are not a review anybody is waiting on — an older run still in `decide`,
-# or one whose review job already failed. Counting one would emit skip=true and
+# or one whose read job already failed. Counting one would emit skip=true and
 # leave this head with no whole-diff read at all, the permanently-unreviewed
 # latch this script exists to prevent.
 # INVARIANT: matched with contains/endswith, never a prefix. A reusable workflow's
 # jobs are named "<caller job> / <job name>" in the runs API, so an anchored match
-# finds no live shard, this run reviews anyway, and the PR buys a second paid read.
-_sharded_review_live() {
+# finds no live read, this run reviews anyway, and the PR buys a second paid read.
+_review_live() {
   local jobs_rc=0 live
   live="$(
     retry_stdout gh api "repos/$REPO/actions/runs/$1/jobs?per_page=100" 2>/dev/null |
       jq '[.jobs[]
             | select(.status != "completed")
-            | select(.name | contains("Claude PR review (shard ") or endswith("Post the sharded PR review"))]
+            | select(.name | contains("Claude PR review (read)") or endswith("Post the PR review"))]
           | length'
   )" || jobs_rc=$?
   # A jobs list we could not read is not evidence of a review in flight, so it
@@ -148,14 +148,14 @@ _sharded_review_live() {
 inflight=0
 while IFS= read -r run; do
   [[ -n "$run" ]] || continue # the herestring feeds one empty line when there are no candidates
-  if _sharded_review_live "$run"; then inflight=$((inflight + 1)); fi
+  if _review_live "$run"; then inflight=$((inflight + 1)); fi
 done <<<"$candidates"
 
 # A read in flight only cancels this one once it fills the budget. Counting it as
 # a stop whatever the budget says would drop this event at a budget of 3 with one
 # read spent and one generating, leaving the third owed and no event to buy it.
 if [[ $((count + inflight)) -ge "$BUDGET" ]]; then
-  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live sharded-review job) — those fill the $BUDGET $KIND read(s) this PR may spend"
+  emit true "an earlier run of this workflow is still reviewing $REPO#$PR ($inflight with a live read or post job) — those fill the $BUDGET $KIND read(s) this PR may spend"
 else
   emit false "$REPO#$PR has spent $count of $BUDGET $KIND read(s), with $inflight in flight — running this one"
 fi
