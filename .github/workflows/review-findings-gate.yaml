@@ -45,7 +45,7 @@
 #       permissions: { contents: read, pull-requests: read }
 #       steps:
 #         - run: |
-#             git clone --no-tags https://github.com/<owner>/agent-review-gate.git "$RUNNER_TEMP/r"
+#             git clone --no-tags https://github.com/<owner>/agent-review.git "$RUNNER_TEMP/r"
 #             git -C "$RUNNER_TEMP/r" checkout --detach <the sha your uses: pins>
 #         - env:
 #             MG_REF: ${{ github.event.merge_group.head_ref }}

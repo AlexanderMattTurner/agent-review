@@ -32,9 +32,9 @@ jobs:
       statuses: write
       actions: read
       checks: read
-    uses: AlexanderMattTurner/agent-review-gate/.github/workflows/review.yaml@main
+    uses: AlexanderMattTurner/agent-review/.github/workflows/review.yaml@main
     with:
-      reviewer-repository: AlexanderMattTurner/agent-review-gate
+      reviewer-repository: AlexanderMattTurner/agent-review
       # Name the SAME ref the `uses:` line above names, and change both
       # together. The workflow falls back to `github.job_workflow_sha`, which is
       # EMPTY in the expression context, so it refuses to clone rather than run
