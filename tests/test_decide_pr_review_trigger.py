@@ -944,7 +944,7 @@ def test_the_workflow_owns_the_read_budget() -> None:
     assert budget["type"] == "number"
     steps = [
         *_workflow()["jobs"]["decide"]["steps"],
-        *_workflow()["jobs"]["review"]["steps"],
+        *_workflow()["jobs"]["prepare"]["steps"],
     ]
     readers = [
         s["env"]["MAX_REVIEWS_PER_PR"]
@@ -974,40 +974,22 @@ def test_decide_step_passes_the_pr_number() -> None:
     ), "a dispatch names its PR in the input; every other trigger in the payload"
 
 
-def test_a_cancelled_shard_leg_cannot_discard_a_complete_sharded_review() -> None:
-    """review_synthesis must run even when a shard leg did not succeed.
-
-    A shard leg uploads its findings and THEN publishes its log, so an expiry or
-    cancellation in that tail leaves a complete set of shard reviews on disk under
-    a non-success job conclusion. Gating the synthesis on the legs' conclusion
-    throws that complete read away, and nothing re-arms it: decide's
-    never-reviewed trigger fires only on a later push, and a newer run's recheck
-    has already yielded to this run. The coverage invariant the conclusion gate
-    stood in for lives in merge-shard-reviews.mjs, which reds this job when a
-    shard review is genuinely missing.
-    """
-    condition = _workflow()["jobs"]["review_synthesis"]["if"]
-    assert "!cancelled()" in condition
-    # Still gated on the read itself having happened and having been sharded —
-    # !cancelled() alone would run the synthesis on every unsharded PR.
-    assert "needs.review.result == 'success'" in condition
-    assert "needs.review.outputs.sharded == 'true'" in condition
-    # The regression stated as the absence it is: ANY gate on the shard LEGS'
-    # conclusion discards a complete read when a leg dies after its upload.
-    assert "needs.review_shard" not in condition
+def test_a_failed_read_still_reaches_the_gate_re_post() -> None:
+    """The post job owes the caller's gate a verdict on this head whatever the
+    read did. Gating it on the read's conclusion would leave a head whose read
+    failed with the pre-review red and no event able to clear it."""
+    condition = " ".join(_workflow()["jobs"]["post"]["if"].split())
+    assert condition.startswith("always() && needs.prepare.result == 'success'")
+    assert "needs.read" not in condition
 
 
-def test_a_shard_leg_gets_the_whole_diff_read_s_time_budget() -> None:
-    """Each shard leg's timeout must be at least the whole-diff review job's.
-
-    A shard slices the DIFF, not the model's thinking, so a leg runs to the same
-    measured tail as an unsharded read — and then spends about two more minutes
-    on the redacting log upload. A shorter budget expires in that tail and
-    CANCELS the leg after its findings are uploaded, which is how PR #3280 lost
-    all three of its shard reviews.
-    """
-    jobs = _workflow()["jobs"]
-    assert jobs["review_shard"]["timeout-minutes"] >= jobs["review"]["timeout-minutes"]
+def test_the_read_job_outlasts_one_credential_attempt() -> None:
+    """An attempt that runs to its own timeout must still leave the judge, the
+    findings upload and the redacting log upload time to run, or the job is
+    cancelled after the read and the review it paid for is lost."""
+    doc = _workflow()
+    attempt = doc[True]["workflow_call"]["inputs"]["review-timeout-seconds"]["default"]
+    assert doc["jobs"]["read"]["timeout-minutes"] * 60 > attempt + 5 * 60
 
 
 @pytest.mark.parametrize("action", ["opened", "ready_for_review", "synchronize"])
@@ -1303,7 +1285,7 @@ def test_the_workflow_owns_the_accumulated_read_budget() -> None:
     assert budget["type"] == "number"
     steps = [
         *_workflow()["jobs"]["decide"]["steps"],
-        *_workflow()["jobs"]["review"]["steps"],
+        *_workflow()["jobs"]["prepare"]["steps"],
     ]
     readers = [
         s["env"]["MAX_DELTA_REVIEWS_PER_PR"]
@@ -1318,7 +1300,7 @@ def test_the_read_jobs_take_the_pr_and_head_from_the_decision() -> None:
     `github.event.pull_request` directly would post a verdict on an empty sha and
     review a PR it cannot name. `decide` resolves both once, for every trigger."""
     jobs = _workflow()["jobs"]
-    for name in ("review", "review_shard", "review_synthesis"):
+    for name in ("prepare", "read", "post", "gate"):
         assert "decide" in jobs[name]["needs"], name
         payload = [
             f"{step.get('name', step.get('uses', '?'))}: {key}"

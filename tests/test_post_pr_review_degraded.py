@@ -465,3 +465,31 @@ def test_a_read_that_cannot_say_what_it_covered_posts_nothing(tmp_path):
         assert proc.returncode != 0
         assert "coverage.json" in proc.stderr
         assert github.posted == []
+
+
+INCOMPLETE_MARKER = reviewer_marker("INCOMPLETE_READ_MARKER")
+
+
+def test_an_incomplete_read_claims_no_read_and_holds_first(tmp_path):
+    """A sharded read that lost a leg must not spend the budget or claim the head,
+    on either posting path, and its hold lands before the review greens the gate."""
+    for refuse in (False, True):
+        server_dir = tmp_path / f"refuse-{refuse}"
+        input_dir = tmp_path / f"in-{refuse}"
+        server_dir.mkdir()
+        input_dir.mkdir()
+        pr_dir = _pr_input(input_dir)
+        (pr_dir / "incomplete-read.txt").write_text("- src/c.py\n", encoding="utf-8")
+        with FakeReviewPoster(server_dir) as github:
+            github.refuse_structured = refuse
+            proc = _run(github, pr_dir)
+            assert proc.returncode == 0, proc.stderr
+            [review] = github.of_kind("review")
+            assert INCOMPLETE_MARKER in review["body"]
+            assert READ_MARKER not in review["body"]
+            assert "<!-- review-coverage " not in review["body"]
+            holds = [h for h in _holds(github) if "src/c.py" in h["body"]]
+            assert len(holds) == 1, _holds(github)
+            assert "INCOMPLETE" in holds[0]["body"]
+            kinds = [k for k, _ in github.posted]
+            assert kinds[-1] == "review", kinds

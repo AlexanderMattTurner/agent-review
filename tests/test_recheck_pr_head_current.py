@@ -113,14 +113,16 @@ def test_the_head_read_runs_over_graphql(tmp_path: Path) -> None:
 
 
 def test_the_stale_bail_gates_the_read_but_not_the_gate_re_post() -> None:
-    """Wiring: stale=true must turn off the paid read (prepare — every model-path
-    step below keys off its outputs or conclusion) and the log staging, while the
-    merge-gate re-post deliberately carries NO stale clause: it skips with
-    prepare, because the verdict it would post is for a head the PR no longer
-    has, and the queued run for the live head posts its own. The step ids are
-    load-bearing strings — a rename or dropped clause makes every gate read an
-    empty output and fail silently open, so this is what pins them."""
-    steps = workflow_jobs(WORKFLOW)["review"]["steps"]
+    """Wiring: stale=true must turn off the paid read (prepare's step, whose
+    `prepared` output every read leg keys off) and so the log staging inside
+    those legs, while the merge-gate re-post deliberately carries NO stale
+    clause: it skips with prepare, because the verdict it would post is for a
+    head the PR no longer has, and the queued run for the live head posts its
+    own. The step ids are load-bearing strings — a rename or dropped clause
+    makes every gate read an empty output and fail silently open, so this is
+    what pins them."""
+    jobs = workflow_jobs(WORKFLOW)
+    steps = jobs["prepare"]["steps"]
     fresh = next(s for s in steps if s.get("id") == "fresh")
     cond = str(fresh["if"])
     assert "steps.recheck.outputs.skip != 'true'" in cond
@@ -137,11 +139,26 @@ def test_the_stale_bail_gates_the_read_but_not_the_gate_re_post() -> None:
         for s in steps
         if "steps.fresh.outputs.stale != 'true'" in str(s.get("if", ""))
     }
-    assert {"prepare", "stage_logs"} <= gated, gated
+    assert "prepare" in gated, gated
+    # The read legs, and the log staging inside them, run only on a head prepare
+    # read fresh: `prepared` is false whenever the bail fired.
+    assert (
+        "steps.prepare.outputs.stale != 'true'"
+        in jobs["prepare"]["outputs"]["prepared"]
+    )
+    assert "needs.prepare.outputs.prepared == 'true'" in jobs["read"]["if"]
+    assert any(s.get("id") == "stage_logs" for s in jobs["read"]["steps"])
     # The caller's merge-gate re-post, which runs the caller's own
     # `post-review-command` — what a consumer points at its findings gate.
-    gate = next(s for s in steps if "POST_REVIEW_COMMAND" in (s.get("env") or {}))
-    assert "steps.fresh" not in str(gate.get("if", "")), (
-        "the gate re-post skips via prepare on the stale path — an explicit "
-        "stale clause here would be a second copy of that decision"
-    )
+    gates = [
+        s
+        for job in ("post", "gate")
+        for s in jobs[job]["steps"]
+        if "POST_REVIEW_COMMAND" in (s.get("env") or {})
+    ]
+    assert len(gates) == 2, gates
+    for gate in gates:
+        assert "steps.fresh" not in str(gate.get("if", "")), (
+            "the gate re-post skips via prepare on the stale path — an explicit "
+            "stale clause here would be a second copy of that decision"
+        )

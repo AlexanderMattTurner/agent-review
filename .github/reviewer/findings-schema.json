@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "diagram": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "line",
+          "side",
+          "category",
+          "confidence",
+          "title",
+          "body"
+        ],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "side": { "enum": ["RIGHT", "LEFT"] },
+          "category": { "enum": ["bug", "security", "claude-md"] },
+          "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "suggestion": { "type": "string" }
+        }
+      }
+    }
+  }
+}

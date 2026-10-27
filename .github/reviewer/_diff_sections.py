@@ -1,9 +1,10 @@
 """Split a unified diff into per-file sections.
 
 Shared by the PR reviewer's input pipeline: the sharder packs these sections into
-shards, and the artifact elider replaces the body of some of them. Both must
+shards, the delta narrowing keeps the sections of the files pushed since the last
+read, and the context builder reads the identifiers each section changes. All must
 agree on where one file's section ends and the next begins, so the parse lives
-here rather than in either caller.
+here rather than in any caller.
 """
 
 # `git diff` starts every file's section with this; it is the only reliable
@@ -45,7 +46,7 @@ def unquote_path(quoted: str) -> str:
 
 
 def file_path_of(section: list[str]) -> str:
-    """The b-side path from a `diff --git a/x b/y` header, for the manifest.
+    """The b-side path from a `diff --git a/x b/y` header.
 
     Split from the right: a path containing a space makes a left-anchored parse
     ambiguous, but the b-side is always the final token. Git QUOTES a path

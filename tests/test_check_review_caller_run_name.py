@@ -32,7 +32,7 @@ CALLER = textwrap.dedent(
 
     jobs:
       review:
-        uses: owner/agent-review/.github/workflows/review.yaml@abc123
+        uses: owner/agent-review-gate/.github/workflows/review.yaml@abc123
         with:
           reviewer-ref: abc123
     {extra}"""
@@ -133,7 +133,7 @@ def test_a_workflow_that_calls_no_reviewer_is_left_alone(tmp_path):
 
 def test_a_local_call_of_the_reviewer_counts_too(tmp_path):
     body = caller().replace(
-        "owner/agent-review/.github/workflows/review.yaml@abc123",
+        "owner/agent-review-gate/.github/workflows/review.yaml@abc123",
         "./.github/workflows/review.yaml",
     )
     result = run(tmp_path, body)

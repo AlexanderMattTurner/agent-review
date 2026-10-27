@@ -6,7 +6,7 @@
 COUNT, so a wide-but-shallow change (a directory rename) is refused while its
 diff would have been small. The files endpoint has no such cap and returns each
 file's `patch` hunks, so this reassembles them into the same unified-diff shape
-the sanitizer, the reviewer, and the sharder already consume. Without it the
+the sanitizer, the delta narrowing and the reviewer already consume. Without it the
 widest PRs — the ones a review is worth most on — get no automated read at all.
 
 Reads the API JSON on stdin: one or more concatenated JSON arrays, which is what
@@ -56,7 +56,7 @@ def file_section(entry: JsonObject) -> str:
     status = entry.get("status", "modified")
     # git writes `a/<path> b/<path>` on the header even for an add or a delete;
     # only the ---/+++ lines carry /dev/null. Preserving that keeps the header
-    # parseable by shard-pr-diff.py's `rsplit(" b/")` path extraction.
+    # parseable by _diff_sections.file_path_of's right-anchored path extraction.
     lines = [f"diff --git a/{old_path} b/{new_path}"]
     if status == "renamed":
         lines.append(f"rename from {old_path}")

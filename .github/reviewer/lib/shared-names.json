@@ -14,6 +14,7 @@
     "whole_diff_read": "<!-- whole-diff-read -->",
     "oversized_review": "<!-- oversized-review -->",
     "degraded_review": "<!-- degraded-review -->",
+    "incomplete_read": "<!-- incomplete-read -->",
     "automated_approval": "<!-- automated-approval-no-read -->",
     "coverage_prefix": "<!-- review-coverage ",
     "delta_read_finding": "<!-- read: delta -->",

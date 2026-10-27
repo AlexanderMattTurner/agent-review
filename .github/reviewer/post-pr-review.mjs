@@ -8,12 +8,7 @@
 // Contract with the caller: prints `PAYLOAD` on stdout when it wrote a payload to post, or `SKIP` (exit 0) when the reviewer ran but produced nothing. A MISSING or unparsable review.json means the reviewer crashed before writing its output, so this exits NON-ZERO instead of masquerading as a clean pass. Diagnostics go to stderr.
 import { readFileSync, writeFileSync } from "node:fs";
 import { modelText } from "./lib-model-text.mjs";
-import {
-  readRunCost,
-  readShardedRunCost,
-  formatDollars,
-  plansLine,
-} from "./lib-review-cost.mjs";
+import { readRunCost, formatDollars, plansLine } from "./lib-review-cost.mjs";
 
 // INVARIANT — every model-authored string passes through modelText exactly once, before any
 // trusted marker joins it; lib-model-text.mjs says why the order of its two steps matters.
@@ -45,15 +40,10 @@ function fail(msg) {
 }
 
 // A compact cost footnote carrying a hidden `review-cost` marker, plus how many PRs per week this
-// rate sustains on a Max 20x plan — the budget-relative form a reader reasons about. A SHARDED
-// review has no single execution log, one per shard, so with SHARD_COST_DIR set the cost is the
-// sum the shards recorded there; that reader fails closed to no cost, and hence no footer, rather
-// than pricing the review from the shards that happened to report.
+// rate sustains on a Max 20x plan — the budget-relative form a reader reasons about. EXECUTION_FILE
+// is the cost.json the read job distilled from its log, which carries the log's own fields.
 function costFooter() {
-  const shardCostDir = process.env.SHARD_COST_DIR;
-  const { cost, model } = shardCostDir
-    ? readShardedRunCost(shardCostDir)
-    : readRunCost();
+  const { cost, model } = readRunCost();
   if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return "";
   const modelLabel = model ? ` (${model})` : "";
   const marker = `<!-- review-cost usd=${cost} -->`;

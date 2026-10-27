@@ -8,10 +8,11 @@ Spends real model cost. NEVER invoked by CI or by any test — run it by hand:
 For each selected case this builds the same PR_INPUT_DIR layout the production
 reviewer builds (diff.txt, meta.txt, sanitizer-report.txt, context.txt via the
 real build-review-context.py, coverage.json), runs the `claude` CLI ONCE per
-case with the production prompt and tool grant (imported from
-run-review-ladder.py, never re-derived), and prints one JSON report: per case,
-the model's turn count and cost off its own execution log, and which
-must_flag/must_not_flag predictions it got right.
+case with the production prompt and flags (imported from review-ladder.py, never
+re-derived), maps the structured findings to severities through the real
+record-review.mjs, and prints one JSON report: per case, the model's turn count
+and cost off its own execution log, and which must_flag/must_not_flag
+predictions it got right.
 
 `--max-cases` (default 3) is a hard cap: cases beyond it are never selected,
 never mind how many tests/eval/cases/ holds. The case list and the exact call
@@ -20,6 +21,7 @@ count this run will spend are printed before the first `claude` invocation.
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -55,14 +57,11 @@ GATING_SEVERITIES = set(
     )["gating"]
 )
 BUILD_CONTEXT = REPO_ROOT / ".github" / "reviewer" / "build-review-context.py"
-PROMPT_FILE = REPO_ROOT / ".github" / "reviewer" / "prompts" / "claude-pr-review.md"
-REVIEWER_DIR = REPO_ROOT / ".github" / "reviewer"
+PROMPT_FILE = REPO_ROOT / ".github" / "reviewer" / "prompts" / "code-review.md"
+RECORD_REVIEW = REPO_ROOT / ".github" / "reviewer" / "record-review.mjs"
 
-_ladder = load_script(".github/reviewer/run-review-ladder.py")
+_ladder = load_script(".github/reviewer/review-ladder.py")
 _diff_sections = load_script(".github/reviewer/_diff_sections.py")
-
-prompt_for = _ladder.prompt_for
-TOOL_GRANT = _ladder.TOOL_GRANT
 
 
 def _case_dirs(cases_dir: Path) -> list[Path]:
@@ -145,25 +144,23 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
     pr_input_dir = workdir / "pr-input"
     _build_pr_input(case_dir, case, repo, pr_input_dir)
 
-    prompt = prompt_for(
-        str(pr_input_dir), str(PROMPT_FILE), case_dir.name, case["source"]
+    prompt = _ladder.prompt_for(
+        str(pr_input_dir),
+        str(PROMPT_FILE),
+        case_dir.name,
+        case["source"],
+        "",
+        model,
+        "",
     )
+    flags = shlex.split(_ladder.claude_args(str(pr_input_dir), str(PROMPT_FILE)))
     command = [
         "claude",
         "-p",
         prompt,
         "--model",
         model,
-        "--effort",
-        "medium",
-        "--setting-sources",
-        "user",
-        "--allowedTools",
-        TOOL_GRANT.format(d=str(pr_input_dir), r=str(REVIEWER_DIR)),
-        "--add-dir",
-        str(pr_input_dir),
-        "--add-dir",
-        str(REVIEWER_DIR),
+        *flags,
         "--output-format",
         "json",
     ]
@@ -175,7 +172,7 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
             sys.exit("::error:: no `claude` on PATH")
 
     calls, cost_usd, is_error = _read_log(log_path)
-    findings = _read_findings(pr_input_dir / "review.json")
+    findings = _read_findings(pr_input_dir, log_path)
     traps = set(case["must_not_flag"])
 
     return {
@@ -225,7 +222,7 @@ def _quote(finding: dict) -> dict:
 
 def _read_log(log_path: Path) -> tuple[int, float, bool]:
     """(num_turns, total_cost_usd, is_error) off the execution log's result event,
-    the same statement run-review-ladder.py's outcome_of trusts — a log missing,
+    the same statement review-ladder.py's result_of reads — a log missing,
     empty or result-less counts as an errored, zero-cost, zero-turn run."""
     try:
         events = json.loads(log_path.read_text(encoding="utf-8"))
@@ -247,13 +244,22 @@ def _read_log(log_path: Path) -> tuple[int, float, bool]:
     )
 
 
-def _read_findings(review_json: Path) -> list[dict]:
-    if not review_json.is_file():
+def _read_findings(pr_input_dir: Path, log_path: Path) -> list[dict]:
+    """The findings the post job would post: the run's structured output, mapped
+    to severities by the real record-review.mjs. A run with no structured output
+    posted nothing, so it scores as no findings."""
+    result = _ladder.result_of(log_path)
+    output = (result or {}).get("structured_output")
+    if not isinstance(output, dict):
         return []
-    try:
-        return json.loads(review_json.read_text(encoding="utf-8")).get("findings", [])
-    except json.JSONDecodeError:
-        return []
+    (pr_input_dir / "findings.json").write_text(json.dumps(output), encoding="utf-8")
+    subprocess.run(
+        ["node", str(RECORD_REVIEW)],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "PR_INPUT_DIR": str(pr_input_dir)},
+        check=True,
+    )
+    review = json.loads((pr_input_dir / "review.json").read_text(encoding="utf-8"))
+    return review["findings"]
 
 
 def main() -> None:

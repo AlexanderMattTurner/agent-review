@@ -1,14 +1,14 @@
-# agent-review
+# agent-review-gate
 
-**A reusable GitHub Actions workflow that reviews a pull request with Claude.** It reads the whole diff once, then posts a review. The comments are inline: each one is anchored to a line of the diff, so you read the finding beside the code that caused it.
+**A reusable GitHub Actions workflow that reviews a pull request with Claude and gates the merge on the findings.** The read itself is Anthropic's `code-review` plugin, run through [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action). This repository is the layer around that read: it decides when a pull request gets a read, feeds the plugin a sanitized diff, posts the findings as inline review threads, and holds the merge while a serious finding is unresolved.
 
-The read runs in three shapes, and the size of the diff picks the shape:
+The read runs in one of three shapes, and the size of the diff picks the shape:
 
-1. **A diff small enough for the model to read in one go is read whole**, by one agent, and posted as one review.
-2. **A larger diff is sharded per file.** Parallel agents read the files at the same time. The workflow folds their findings into one review before it posts.
+1. **A diff of at most `max-diff-lines` lines gets one read.** The plugin's agents review it, and the workflow posts their findings as one review. Each finding is anchored to a line of the diff, so you read it beside the code that caused it.
+2. **A larger diff is split per file, and each part gets its own read.** The parts run at the same time with the same prompt and the same models. The workflow folds their findings into one review. If a part delivers no review, the review says that the read is incomplete, and a thread asks a human to read the files that part held.
 3. **A diff too large even to split gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
 
-Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff under both line limits that still needs more shards than the limit allows, because a shard never splits a file.
+Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff that needs more parts than the limit allows, because a part never splits a file. So does a pull request that targets a branch other than your default branch: `claude-code-action` loads `CLAUDE.md` and `.claude/` from the pull request's target branch, so the reviewer reads only pull requests whose target is the default branch.
 
 You call it from your own repository by `uses:`, pinned to a commit with the release version in a trailing comment.
 
@@ -53,7 +53,7 @@ Three parts of that block need a word of explanation before you copy it.
 
 **The `permissions:` block, which is a ceiling.** A called workflow may request only what the calling job already holds. The block above is therefore the maximum, and the jobs inside narrow themselves from it. Granting less than this list does not merely limit the run. It ends the run with the status `startup_failure` before any job starts, and you get no red check to read.
 
-**The `rung_` secrets, which are a fallback chain.** Each rung holds one Claude Code OAuth token, and the workflow tries them in order. An empty rung is skipped rather than fatal, so you can pass as few as one. A metered Anthropic API key is optional and bills real credits. Whatever rung holds one, the review tries it only after every subscription token has failed.
+**The `rung_` secrets, which are a fallback chain.** Each rung holds one Claude Code OAuth token, and the workflow tries them in order. An empty rung is skipped rather than fatal, so you can pass as few as one. A metered Anthropic API key is optional and bills real credits. Whatever rung holds one, the review tries it only after every subscription token has failed. The workflow tells the two apart by the token's prefix: a subscription token starts `sk-ant-oat`.
 
 Both `uses:` and `reviewer-ref:` end in a ref, which is the branch name, tag or commit sha the reviewer runs at. Pin a commit sha rather than `main` once this repository cuts its first release: a branch ref runs whatever landed on it since you last read it. Two lines carry that ref, `uses:` and `reviewer-ref:`, and they must name the same one.
 
@@ -63,31 +63,59 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | -------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reviewer-repository`      | required              | The repository the reviewer's own code is cloned from, so the reviewed repository cannot rewrite what reviews it.                                                                                                                   |
 | `reviewer-ref`             | required in practice  | The commit of `reviewer-repository` to run. Pass the sha your `uses:` line pins. An empty value stops the run at the clone step.                                                                                                    |
-| `model`                    | `opus`                | The model behind every verdict.                                                                                                                                                                                                     |
-| `review-prompt`            | the reviewer's own    | A path in YOUR repository to review instructions that REPLACE the reviewer's own. Prefer `extra-instructions`: a replaced prompt misses every later change to the reviewer's.                                                       |
+| `model`                    | `opus`                | The top model. It runs the review session, the two bug reviewers and the agents that confirm their findings.                                                                                                                        |
+| `model-low`                | none, so `sonnet`     | The helper model. It runs the plugin's lighter agents: the CLAUDE.md search, the change summary, the two CLAUDE.md reviewers and the agents that confirm their findings.                                                            |
+| `review-prompt`            | the reviewer's own    | A path in YOUR repository to review instructions that REPLACE the reviewer's own. Prefer `extra-instructions`: a replaced prompt misses every later change to the reviewer's. The findings schema still binds it.                   |
 | `extra-instructions`       | none                  | A path in YOUR repository to instructions the reviewer follows after its prompt, winning where they conflict. Put your tree's conventions here. A path that names no file stops the read.                                           |
-| `setup-command`            | none                  | A dependency sync run in your base checkout before the model call.                                                                                                                                                                  |
+| `setup-command`            | none                  | A dependency sync run in your base checkout before the elide command, the log redactor and the post-review command.                                                                                                                 |
 | `setup-cache-path`         | none                  | Paths `actions/cache` restores before the setup command runs — the directory a pinned toolchain installs into.                                                                                                                      |
 | `setup-cache-key-files`    | none                  | A `hashFiles` pattern naming the file that holds the pin. This workflow hashes it into the cache key, so a bump refreshes the entry.                                                                                                |
 | `elide-command`            | none                  | A command that drops generated files from the raw diff before the reviewer reads it. The reviewer's budget is diff lines, so a generated file spends budget on code nobody wrote. Name one if your diffs are mostly build files.    |
 | `post-review-command`      | none                  | Run after the review step, with `GH_TOKEN`/`GH_REPO`/`PR`/`REPORT_SHA` set. It asks a required check to re-evaluate its gate. It runs after a failed review too, so the check reports the missing review.                           |
 | `log-redactor`             | none, publishing none | A path in YOUR repository to a redactor for the agent's log. Empty publishes no logs rather than publishing raw ones.                                                                                                               |
 | `reads-marked-from`        | none                  | An RFC3339 timestamp: when YOU started running a reviewer that stamps a review as a read. An older review counts as a read with no stamp. Set it when you bump your pin.                                                            |
-| `model-low`                | none                  | A cheaper model for the shards of a sharded read. Empty reads every shard with `model`.                                                                                                                                             |
-| `low-tier-paths`           | none                  | Regex a path must match for its shard to take `model-low`. Every file in the shard must match.                                                                                                                                      |
-| `bulk-diff-lines`          | `0`                   | Diff lines past which every shard takes `model-low`. `0` never does.                                                                                                                                                                |
-| `escalate-blocking`        | `false`               | Re-read a shard with `model` when the cheap read's own verdict or a finding is `blocking`.                                                                                                                                          |
 | `max-reviews-per-pr`       | `1`                   | How many whole-diff reads one pull request may spend, from 0 to 999. It bounds the automatic triggers; `[opus-review]` and the review label fire whatever the count says. `0` turns the automatic reviewer off.                     |
 | `max-delta-reviews-per-pr` | `1`                   | How many ACCUMULATED reads one pull request may spend, from 0 to 999. An accumulated read covers the pushes made since the head the last review read, and runs once the pull request is otherwise ready to merge. `0` turns it off. |
 | `pr-number`                | none                  | The pull request an accumulated read runs on. A `workflow_dispatch` run carries no pull request payload, so the caller passes its own `inputs.pr` here. Leave it empty on a `pull_request_target` run.                              |
 | `max-diff-lines`           | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                                |
+| `shard-max-lines`          | `4000`                | The most diff lines one part of a split read holds. A part never splits a file, so one large file gets a part of its own.                                                                                                           |
 | `max-shardable-lines`      | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                               |
+| `review-timeout-seconds`   | `1500`                | The wall clock one credential attempt may spend on the read, rounded up to whole minutes.                                                                                                                                           |
+
+## The read
+
+The read is the `code-review` plugin's own command, vendored at a pinned commit into `.github/reviewer/prompts/code-review.md`. The file names its source commit at the top. It keeps the plugin's agents and its bar for what counts as a finding:
+
+1. A helper agent lists the CLAUDE.md files that apply to the changed paths, and another summarizes the change.
+2. Four agents review the change in parallel. Two check it against those CLAUDE.md files, and two look for bugs and security problems in the changed code.
+3. A separate agent confirms each issue and gives it a confidence score from 0 to 100. An issue that fails confirmation, or scores under 80, is dropped.
+
+The vendored copy differs from the plugin in four ways, and each one keeps a property this repository already had:
+
+- The plugin fetches the pull request with `gh`. Here the agent has no shell and no network tool, and reads only the diff and metadata the sanitizer already cleaned.
+- The plugin stops on a draft, a trivial pull request, or one Claude already commented on. Here that step is removed, because the budget below decides when a pull request gets a read.
+- The plugin posts its own comments. Here it returns its findings as structured output, and a separate job posts them.
+- Each finding carries a category and a confidence score, so the workflow can set its severity.
+
+### How a finding gets its severity
+
+The plugin gives each finding a category and a confidence score. The workflow, not the model, turns that pair into a severity, in `.github/reviewer/record-review.mjs`:
+
+| Category            | Confidence | Severity    | Holds the merge                      |
+| ------------------- | ---------- | ----------- | ------------------------------------ |
+| `bug` or `security` | 90 to 100  | 🔴 blocking | yes, on a first read and a delta one |
+| `bug` or `security` | 80 to 89   | 🟡 warning  | yes, on a first read                 |
+| `claude-md`         | 90 to 100  | 🟡 warning  | yes, on a first read                 |
+| `claude-md`         | 80 to 89   | 🔵 nit      | no                                   |
+| any                 | under 80   | dropped     | no                                   |
+
+Which severities hold the merge is set by `gating` and `delta_gating` in `config/review-severities.json`. The table shows the values this repository ships. Each posted finding ends with its category and score, so a reader can see why it got its severity.
 
 ## Budget
 
 Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. Two things start a read whatever the count says: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Each is somebody asking for this pull request to be read, so both still work at `max-reviews-per-pr: 0` while no push starts a review on its own. A read either one posts still counts, because the number bounds what one pull request costs. A run that finds the diff too large to read spends one as well: it paid for the job, and counting it is what stops an oversized pull request re-running on every push. Reviews this bot posts without reading a diff — the stand-in approval on a skipped pull request, an approval once a hold clears — spend nothing. Do not pair `0` with the review-findings gate: that gate holds the merge until a review exists, and it takes only `pending` or `failure` for a pull request with none, so every pull request would stay blocked until somebody added the label.
 
-A push after that read is not read again on its own. Reading every push is what the budget exists to prevent, so the later pushes are BATCHED into one accumulated read: `max-delta-reviews-per-pr` of them, and one by default. That read covers everything since the head the last review read, and it is charged to its own budget, so an accumulated read never spends a whole-diff read.
+A push after that read is not read again on its own. Reading every push is what the budget exists to prevent, so the later pushes are BATCHED into one accumulated read: `max-delta-reviews-per-pr` of them, and one by default. That read covers only the files pushed since the head the last review read, and it is charged to its own budget, so an accumulated read never spends a whole-diff read.
 
 An accumulated read is asked for only when the pull request has stopped moving. `dispatch-delta-review.sh` decides that, and two callers offer it a pull request. `claude-delta-review-dispatch.yaml` runs it the moment one of the pull request's check workflows finishes, which is what keeps the wait down to the review's own runtime. The twice-hourly sweep in `claude-reviewer-hold-clear.yaml` runs it per open pull request as well, because a reviewer thread resolved with no push fires no event at all. It starts a read when all of these hold: the pull request is open and not a draft; a review already covers an older head; the accumulated budget has room; no unresolved reviewer finding still holds the merge; and every check and status on the live head has concluded successfully. The review gate itself is excluded from that last test, because the gate is red exactly while this read is owed, and waiting for it would deadlock. A burst of pushes therefore coalesces with no timer: each push reds the checks again, and only the head that survives long enough to go green is read.
 
@@ -99,23 +127,17 @@ Only reviews the reviewer posted itself carry a stamp. A pull request reviewed B
 
 ## Cost
 
-A read is priced by the model that runs it, so the reviewer lets one pull request use two. `model` reads everything by default. `model-low`, once you name one, reads the shards you declare low-risk by path and every shard of a diff past `bulk-diff-lines` — the mechanical sweep, where the read is still worth having and the top model's price is not. Both are off until you set them, and a shard takes the cheaper model only when EVERY file in it qualifies, so a source file bundled with a doc change keeps the full-price read.
-
-Sizing it: one 136,480-line sweep read with Claude Opus 5 cost $103.84. Claude Sonnet 5 is priced 2.5x under Opus 5 on both input and output, so the same read on the low model costs about $42.
-
-`escalate-blocking` sends one claim back up. A shard the cheap model read, whose own output holds the merge — verdict `blocking`, or a finding of severity `blocking` — is read again by `model`, and that second read is the one that posts. Warnings, nits and a `needs_changes` verdict stay as the cheap model wrote them: they are the bulk of what a review says, and escalating them buys the diff at full price twice.
-
-It confirms a claim; it cannot find one nobody made. What the cheap read never noticed, the full-price read never sees, so a path whose misses are expensive belongs on `model` from the start rather than in the cheap tier with escalation behind it.
-
-The arithmetic: a shard that escalates pays both reads. With the low model at 40% of the high one, a review escalating a fraction k of its shards costs `0.4 + k` of the untiered price — cheaper while under 60% of shards escalate, and 1.4x in the worst case, where every shard is blocking.
+A read is priced by the models that run it. `model` runs the review session, the two bug reviewers and the agents that confirm bug findings, so it carries most of the cost. `model-low` runs the lighter agents. Each posted review ends with a footer that names what the read cost.
 
 ## What the reviewer never does
 
-It posts a review and nothing else. Four things hold that line:
+It posts a review and nothing else. Six things hold that line:
 
-- The job that reads the untrusted diff holds `contents: read` alone. It can write to no pull-request surface at all.
+- The only job that runs a model, `read`, holds `contents: read` alone in each of its parts. It can write to no pull-request surface at all. Separate jobs, `post` and `gate`, hold the write scopes and run no model.
+- The agent can read only the checkout, the sanitized input and its own prompt. It cannot read its own credential from the runner.
 - The diff passes an input sanitizer before the agent sees it.
+- The agent has no shell and no network tool, so it cannot fetch the pull request past the sanitizer or run a command.
 - The checkout is your default branch, never the pull request's head.
 - The agent's log is published only through a redactor you name. No `log-redactor` means no published log.
 
-A successful prompt injection can post a comment. It cannot push code, merge, or reach any other scope.
+A successful prompt injection can change what the findings say. It cannot push code, merge, or reach any other scope.

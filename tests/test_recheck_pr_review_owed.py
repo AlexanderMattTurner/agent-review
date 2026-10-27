@@ -196,33 +196,43 @@ def test_a_leading_zero_budget_is_refused_rather_than_read_as_octal(
     assert "no leading zero" in proc.stderr, proc.stderr
 
 
-SHARD_JOB = {"name": "Claude PR review (shard 2)", "status": "in_progress"}
-SYNTHESIS_JOB = {"name": "Post the sharded PR review", "status": "queued"}
+READ_JOB = {"name": "Claude PR review (read)", "status": "in_progress"}
+POST_JOB = {"name": "Post the PR review", "status": "queued"}
+# A read leg that delivered: only after one did is a live post job a read in flight.
+READ_DONE = {
+    "name": "Claude PR review (read)",
+    "status": "completed",
+    "conclusion": "success",
+}
+READ_FAILED = {
+    "name": "Claude PR review (read)",
+    "status": "completed",
+    "conclusion": "failure",
+}
 # The umbrella's other long leg. A run reduced to this alone has already lost
 # its review job, so it is not a read anybody is waiting on.
 DELTA_JOB = {"name": "Review the PR's merge-resolution deltas", "status": "in_progress"}
 
 
-@pytest.mark.parametrize("job", [SHARD_JOB, SYNTHESIS_JOB])
+@pytest.mark.parametrize("jobs", [[READ_JOB], [READ_DONE, POST_JOB]])
 def test_an_in_flight_earlier_run_counts_as_the_review(
-    tmp_path: Path, job: dict
+    tmp_path: Path, jobs: list
 ) -> None:
-    """A sharded review is posted by review_synthesis AFTER the earlier run's
-    review job released the concurrency group, so with no submitted review yet,
-    an earlier run whose shard or synthesis job is still live IS the read in
-    progress."""
+    """The review is read and posted AFTER the earlier run's prepare job
+    released the concurrency group, so with no submitted review yet, an earlier
+    run whose read or post job is still live IS the read in progress."""
     proc, skip, argv = _run(
-        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=[job]
+        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=jobs
     )
     assert proc.returncode == 0, proc.stderr
     assert skip == "true"
     assert "actions/workflows/review.yaml/runs" in argv
     assert "status=in_progress" not in argv, (
-        "a run whose shard legs are merely queued reports `queued`, so the "
+        "a run whose read job is merely queued reports `queued`, so the "
         "server-side filter would hide the window this check covers"
     )
     assert "actions/runs/99/jobs" in argv, (
-        "run granularity is not enough — only a live sharded-review JOB is the read"
+        "run granularity is not enough — only a live read or post JOB is the read"
     )
 
 
@@ -236,7 +246,7 @@ def test_a_read_in_flight_stops_this_one_only_when_it_fills_the_budget(
         tmp_path,
         review_states=("COMMENTED",),
         runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
-        jobs=[SHARD_JOB],
+        jobs=[READ_JOB],
         max_reviews="3",
     )
     assert proc.returncode == 0, proc.stderr
@@ -252,7 +262,7 @@ def test_a_read_in_flight_plus_a_spent_one_fills_a_budget_of_two(
         tmp_path,
         review_states=("COMMENTED",),
         runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
-        jobs=[SHARD_JOB],
+        jobs=[READ_JOB],
         max_reviews="2",
     )
     assert skip == "true"
@@ -260,28 +270,47 @@ def test_a_read_in_flight_plus_a_spent_one_fills_a_budget_of_two(
 
 # What GitHub actually names these jobs once a consumer calls the reviewer as a
 # reusable workflow: the calling job's id, then the job's own name.
-CALLED_SHARD_JOB = {
-    "name": "review / Claude PR review (shard 2)",
+CALLED_READ_JOB = {
+    "name": "review / Claude PR review (read)",
     "status": "in_progress",
 }
-CALLED_SYNTHESIS_JOB = {
-    "name": "review / Post the sharded PR review",
+CALLED_POST_JOB = {
+    "name": "review / Post the PR review",
+    "status": "queued",
+}
+# A sharded read's leg: GitHub appends the matrix value after the job's name.
+CALLED_SHARD_LEG = {
+    "name": "review / Claude PR review (read) (shard-03.diff)",
     "status": "queued",
 }
 
 
-@pytest.mark.parametrize("job", [CALLED_SHARD_JOB, CALLED_SYNTHESIS_JOB])
+@pytest.mark.parametrize(
+    "jobs", [[CALLED_READ_JOB], [READ_DONE, CALLED_POST_JOB], [CALLED_SHARD_LEG]]
+)
 def test_a_called_workflows_prefixed_job_still_counts_as_the_review(
-    tmp_path: Path, job: dict
+    tmp_path: Path, jobs: list
 ) -> None:
     """Every consumer runs this reviewer through `uses:`, so the runs API reports
     each job under the caller's job id. An anchored prefix match finds no live
-    shard, this run reviews anyway, and the PR pays for a second whole-diff read
+    read, this run reviews anyway, and the PR pays for a second whole-diff read
     of the head the earlier run is already reading."""
     _, skip, _ = _run(
-        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=[job]
+        tmp_path, runs=[{"id": 99, "pull_requests": [{"number": 42}]}], jobs=jobs
     )
     assert skip == "true"
+
+
+def test_a_post_whose_read_failed_is_not_the_read(tmp_path: Path) -> None:
+    """A post runs under always(), so it is live after a failed read too, while
+    its setup command runs. It carries no findings, and yielding to it would
+    leave this head with no whole-diff read."""
+    _, skip, _ = _run(
+        tmp_path,
+        runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
+        jobs=[READ_FAILED, POST_JOB],
+    )
+    assert skip == "false"
 
 
 @pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "pending"])
@@ -293,32 +322,32 @@ def test_every_pre_completion_run_status_is_a_candidate(
     _, skip, _ = _run(
         tmp_path,
         runs=[{"id": 99, "status": status, "pull_requests": [{"number": 42}]}],
-        jobs=[SHARD_JOB],
+        jobs=[READ_JOB],
     )
     assert skip == "true"
 
 
-def test_a_run_with_no_live_sharded_job_is_not_the_read(tmp_path: Path) -> None:
-    """The permanently-unreviewed latch: run 99's review job failed and posted
+def test_a_run_with_no_live_read_job_is_not_the_read(tmp_path: Path) -> None:
+    """The permanently-unreviewed latch: run 99's read job failed and posted
     nothing, but its merge_delta_review is still going, so the run reports as in
     flight. Yielding to it would leave this head with no whole-diff read."""
     proc, skip, _ = _run(
         tmp_path,
         runs=[{"id": 99, "pull_requests": [{"number": 42}]}],
-        jobs=[DELTA_JOB, {"name": "Claude PR review", "status": "completed"}],
+        jobs=[DELTA_JOB, {"name": "Claude PR review (read)", "status": "completed"}],
     )
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
 
 
 def test_a_newer_run_is_waiting_on_us_and_does_not_count(tmp_path: Path) -> None:
-    """A later push's run is also in flight, with its review job queued BEHIND
+    """A later push's run is also in flight, with its prepare job queued BEHIND
     ours in the concurrency group. Skipping in its favour deadlocks the read:
     if its own decide resolves to run=false, nobody reviews this head."""
     proc, skip, _ = _run(
         tmp_path,
         runs=[{"id": OWN_RUN_ID + 1, "pull_requests": [{"number": 42}]}],
-        jobs=[SHARD_JOB],
+        jobs=[READ_JOB],
     )
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
@@ -347,7 +376,7 @@ def test_our_own_run_and_other_prs_runs_do_not_count(tmp_path: Path) -> None:
             {"id": 88, "pull_requests": [{"number": 99}]},
             {"id": 89, "pull_requests": []},
         ],
-        jobs=[SHARD_JOB],
+        jobs=[READ_JOB],
     )
     assert proc.returncode == 0, proc.stderr
     assert skip == "false"
@@ -370,8 +399,8 @@ def _jobs() -> dict:
     return workflow_jobs(WORKFLOW)
 
 
-def _review_job() -> dict:
-    return _jobs()["review"]
+def _prepare_job() -> dict:
+    return _jobs()["prepare"]
 
 
 def _post_review_step(steps: list[dict]) -> dict:
@@ -388,7 +417,7 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
     assert (
         _jobs()["decide"]["outputs"]["recheck"] == "${{ steps.decide.outputs.recheck }}"
     )
-    steps = _review_job()["steps"]
+    steps = _prepare_job()["steps"]
     recheck = next(s for s in steps if s.get("id") == "recheck")
     assert recheck["if"] == "needs.decide.outputs.recheck == 'true'", (
         "only decide's budget arm may reach the re-check: that script judges the "
@@ -402,20 +431,22 @@ def test_the_recheck_gates_the_read_but_not_the_gate_re_post() -> None:
         if "steps.recheck.outputs.skip != 'true'" in str(s.get("if", ""))
     }
     assert {"prepare", "actions/setup-node"} <= gated, gated
-    gate = _post_review_step(steps)
-    assert "steps.recheck.outputs.skip != 'true'" not in gate["if"]
-    assert "steps.recheck.outputs.skip == 'true'" in gate["if"]
-    assert gate["env"]["REPORT_SHA"] == "${{ needs.decide.outputs.head_sha }}", (
-        "the verdict must land on THIS run's head — the one nothing else re-posts"
+    # A skip reaches the gate job, which re-posts the verdict with no read.
+    assert _jobs()["prepare"]["outputs"]["skip"] == "${{ steps.recheck.outputs.skip }}"
+    gate_job = _jobs()["gate"]
+    assert "needs.prepare.outputs.skip == 'true'" in gate_job["if"]
+    gate = _post_review_step(gate_job["steps"])
+    assert gate["env"]["EVENT_HEAD_SHA"] == "${{ needs.decide.outputs.head_sha }}", (
+        "the fallback verdict must land on THIS run's head, which nothing else re-posts"
     )
 
 
 def test_the_concurrency_barrier_the_recheck_depends_on_is_intact() -> None:
-    """The re-check's submitted-review read is decisive for the unsharded path
-    only because review jobs are serialized per PR and never cancelled mid-run;
-    the sharded path (posted by review_synthesis, outside this group) is instead
-    covered by the script's in-flight-run detection, which needs actions:read."""
-    job = _review_job()
+    """The re-check's submitted-review read is decisive only because prepare
+    jobs are serialized per PR and never cancelled mid-run; a read still in the
+    earlier run's read or post job, outside this group, is covered by the
+    script's in-flight-run detection, which needs actions:read."""
+    job = _prepare_job()
     assert (
         job["concurrency"]["group"] == "claude-pr-review-${{ needs.decide.outputs.pr }}"
     )

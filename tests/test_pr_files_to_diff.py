@@ -4,8 +4,9 @@ refused (HTTP 406 above 300 changed files).
 
 Contract: the output is a real unified diff — one `diff --git` section per file,
 `/dev/null` on the right side for an add or a delete, and a visible marker rather
-than silence when GitHub omits a file's patch. It must be parseable by
-shard-pr-diff.py, which is the consumer that decides the review fan-out.
+than silence when GitHub omits a file's patch. It must split into one section
+per file through _diff_sections.py, which the delta narrowing and the context
+builder both read it with.
 """
 
 import io
@@ -105,32 +106,14 @@ def test_an_empty_payload_fails_loud() -> None:
     assert "no entries" in excinfo.value.stderr
 
 
-def test_output_is_shardable(tmp_path) -> None:
-    """The real consumer: the sharder must find each file section."""
+def test_output_splits_into_one_section_per_file() -> None:
+    """The real consumer: the shared splitter must find each file section, in
+    order, under the path the files API named."""
+    sections = load_script(".github/reviewer/_diff_sections.py")
     payload = json.dumps([_entry(filename=f"f{i}.py") for i in range(4)])
-    diff = tmp_path / "d.diff"
-    diff.write_text(_run(payload), encoding="utf-8")
-    subprocess.run(
-        [
-            "python3",
-            str(REPO_ROOT / ".github" / "reviewer" / "shard-pr-diff.py"),
-            "--diff",
-            str(diff),
-            "--out-dir",
-            str(tmp_path / "shards"),
-            "--max-lines",
-            "6",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    manifest = json.loads(
-        (tmp_path / "shards" / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert manifest["total_files"] == 4
-    assert [f for s in manifest["shards"] for f in s["files"]] == [
-        f"f{i}.py" for i in range(4)
-    ]
+    preamble, files = sections.split_into_files(_run(payload))
+    assert preamble == []
+    assert [sections.file_path_of(f) for f in files] == [f"f{i}.py" for i in range(4)]
 
 
 def _run_main(payload: str, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -219,7 +202,7 @@ def test_file_section_falls_back_to_the_new_path_when_previous_filename_is_empty
 
 def test_file_section_normalizes_a_patch_that_arrives_with_trailing_newlines() -> None:
     """Sections are concatenated directly, so a patch carrying its own trailing
-    blank lines would inject them between file sections and confuse the sharder."""
+    blank lines would inject them between file sections and confuse the splitter."""
     assert MOD.file_section(_entry(patch=f"{PATCH}\n\n\n")) == (
         f"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n{PATCH}\n"
     )

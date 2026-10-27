@@ -1,20 +1,14 @@
 // Behavior tests for lib-review-cost.mjs: the cost accounting behind the PR
 // review footnote. Every case drives the real functions over real files on
-// disk — a Claude execution log, a downloaded shard-artifact tree — and asserts
-// the value a caller renders from, never an internal call count.
-//
-// The load-bearing property across the sharded reader: it fails closed to {} the
-// moment the sum would be partial, because a partial price posted as the
-// review's price is indistinguishable from a complete one.
+// disk — a Claude execution log or the cost record distilled from it — and
+// asserts the value a caller renders from, never an internal call count.
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   readRunCost,
-  readShardedRunCost,
-  SHARD_COST_FILE,
   formatDollars,
   weeklyBudget,
   plansLine,
@@ -32,24 +26,6 @@ function execLog(content) {
     typeof content === "string" ? content : JSON.stringify(content),
   );
   return path;
-}
-
-// The directory shape download-artifact produces for a sharded review: one
-// subdirectory per shard holding that shard's review.json, plus its cost file
-// unless the shard entry is `undefined`.
-function shardTree(shards) {
-  const dir = scratchDir("lrc-shards-");
-  shards.forEach((shard, i) => {
-    const leg = join(dir, `pr-review-shard-shard-0${i}.diff`);
-    mkdirSync(leg);
-    writeFileSync(join(leg, "review.json"), JSON.stringify({ findings: [] }));
-    if (shard !== undefined)
-      writeFileSync(
-        join(leg, SHARD_COST_FILE),
-        typeof shard === "string" ? shard : JSON.stringify(shard),
-      );
-  });
-  return dir;
 }
 
 // Run `fn` with `vars` applied to process.env, restoring the previous values
@@ -143,66 +119,6 @@ describe("readRunCost", () => {
     withEnv({ EXECUTION_FILE: "", RUNNER_TEMP: undefined }, () => {
       assert.deepEqual(readRunCost(), {});
     });
-  });
-});
-
-describe("readShardedRunCost", () => {
-  it("prices the whole review as the sum of every shard, without a float tail", () => {
-    const dir = shardTree([
-      { cost: 0.1, model: "claude-opus-4-8" },
-      { cost: 0.2, model: "claude-opus-4-8" },
-      { cost: 0.3, model: "claude-opus-4-8" },
-    ]);
-    // 0.1 + 0.2 + 0.3 === 0.6000000000000001 in binary floating point.
-    assert.deepEqual(readShardedRunCost(dir), {
-      cost: 0.6,
-      model: "claude-opus-4-8",
-    });
-  });
-
-  it("names no model when the shards disagree about which one ran", () => {
-    const dir = shardTree([
-      { cost: 1, model: "claude-opus-4-8" },
-      { cost: 1, model: "claude-sonnet-5" },
-    ]);
-    assert.deepEqual(readShardedRunCost(dir), { cost: 2, model: undefined });
-  });
-
-  it("names no model when a shard recorded none", () => {
-    const dir = shardTree([{ cost: 1 }, { cost: 1 }]);
-    assert.deepEqual(readShardedRunCost(dir), { cost: 2, model: undefined });
-  });
-
-  it("fails closed when a shard left no cost file", () => {
-    assert.deepEqual(
-      readShardedRunCost(shardTree([{ cost: 1, model: "m" }, undefined])),
-      {},
-    );
-  });
-
-  it("fails closed when a shard's cost file is unparsable", () => {
-    assert.deepEqual(
-      readShardedRunCost(shardTree([{ cost: 1, model: "m" }, "{ not json"])),
-      {},
-    );
-  });
-
-  it("fails closed on a non-finite shard cost", () => {
-    // The recorder writes {cost: null} when it could not read its execution log.
-    for (const cost of [null, "1.00", undefined])
-      assert.deepEqual(
-        readShardedRunCost(shardTree([{ cost: 1, model: "m" }, { cost }])),
-        {},
-        `cost ${JSON.stringify(cost)} must fail closed`,
-      );
-  });
-
-  it("fails closed when the directory does not exist", () => {
-    assert.deepEqual(readShardedRunCost("/nonexistent/shard-reviews"), {});
-  });
-
-  it("fails closed when no shard reported at all", () => {
-    assert.deepEqual(readShardedRunCost(shardTree([undefined, undefined])), {});
   });
 });
 

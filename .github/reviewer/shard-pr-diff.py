@@ -10,17 +10,12 @@ change from a truncation, so a file bigger than the shard budget gets its own
 oversize shard instead: still a complete file, just a larger read. The caller
 sees `oversize` in the manifest and can decide.
 
-Each shard also carries the MODEL that reads it. A caller that names no
---model-low leaves every shard on --model, which is the default and the whole
-behaviour until it opts in. A caller that names one buys the cheaper read for
-the shards it declares low-risk by path, and for every shard of a diff past
---bulk-lines, where the read is worth having but not at the top model's price.
-A shard is low only when EVERY file in it qualifies, so a doc change bundled
-with source stays on --model.
+Every shard is read the same way: the same prompt, the same models and the
+same credential ladder as a whole-diff read. Only the slice of diff differs.
 
 Emits into --out-dir: `shard-NN.diff` per shard plus `manifest.json` carrying the
-per-shard line counts, file lists and model, and the totals a review's coverage
-line is built from. With GITHUB_OUTPUT set, also emits `shard_count` and `shards` (a JSON
+per-shard line counts and file lists, and the totals a review's coverage line is
+built from. With GITHUB_OUTPUT set, also emits `shard_count` and `shards` (a JSON
 array of shard basenames, for a workflow matrix).
 
 Exit codes: 0 on success, OVER_BUDGET_EXIT when the diff needs more than
@@ -31,7 +26,6 @@ input that is not a diff at all.
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -67,29 +61,6 @@ def pack(files: list[list[str]], max_lines: int) -> list[list[list[str]]]:
     return shards
 
 
-def model_for(
-    paths: list[str], models: tuple[str, str], low_paths: str, bulk: bool
-) -> str:
-    """The model that reads a shard holding `paths`.
-
-    INVARIANT — the low model is reachable only when the caller named one, so a
-    caller that opts out of tiering reads every shard at the price it pays today.
-    A path the pattern does not match keeps the high model; a pattern that does
-    not compile raises here, which reds the job rather than downgrading a read.
-    """
-    high, low = models
-    if not low:
-        return high
-    if bulk:
-        return low
-    # A shard is low only when every file in it qualifies: a shard packs whole
-    # files, so one source file beside a doc change would otherwise take the
-    # cheaper read with it.
-    if low_paths and paths and all(re.search(low_paths, p) for p in paths):
-        return low
-    return high
-
-
 def main() -> None:
     """Split the diff at --diff into shards under --out-dir, with a manifest."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -104,27 +75,6 @@ def main() -> None:
         type=int,
         default=8000,
         help="shard budget in lines (default 8000, ~109k tokens)",
-    )
-    parser.add_argument(
-        "--model",
-        default="",
-        help="the model each shard is read with unless it qualifies for --model-low",
-    )
-    parser.add_argument(
-        "--model-low",
-        default="",
-        help="the cheaper model for a low-risk shard; empty (default) keeps every shard on --model",
-    )
-    parser.add_argument(
-        "--low-tier-paths",
-        default="",
-        help="regex a file path must match to qualify for --model-low; a shard qualifies only when every file in it does",
-    )
-    parser.add_argument(
-        "--bulk-lines",
-        type=int,
-        default=0,
-        help="whole-diff line count past which every shard takes --model-low; 0 (default) never does",
     )
     parser.add_argument(
         "--max-shards",
@@ -153,8 +103,6 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read once, so a diff whose size decides the tier decides it for every shard.
-    bulk = bool(args.bulk_lines) and diff_text.count("\n") > args.bulk_lines
     manifest = []
     for index, shard in enumerate(shards):
         name = f"shard-{index:02d}.diff"
@@ -171,12 +119,6 @@ def main() -> None:
                 "name": name,
                 "lines": line_count,
                 "files": paths,
-                "model": model_for(
-                    paths,
-                    (args.model, args.model_low),
-                    args.low_tier_paths,
-                    bulk,
-                ),
                 # One file that alone exceeds the budget: kept whole on purpose.
                 "oversize": line_count > args.max_lines,
             }

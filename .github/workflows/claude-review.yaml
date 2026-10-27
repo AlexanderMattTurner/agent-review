@@ -78,7 +78,7 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # Claude PR review (first pass) — `max-reviews-per-pr` whole-diff reads per PR,
-  # one by default, each sharded across parallel passes and posted as one review.
+  # one by default, each read by the code-review plugin and posted as one review.
   #
   # The reviewer itself lives in `review.yaml` in this repository, as a reusable
   # workflow other repositories call by `uses:`. This job is the caller, and it is

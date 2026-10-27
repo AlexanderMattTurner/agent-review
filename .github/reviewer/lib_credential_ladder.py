@@ -2,8 +2,8 @@
 
 PROBLEM CLASS — an ordered SET that GitHub Actions cannot express. A workflow
 cannot loop `uses:` steps and cannot index `secrets.*` by a computed name, so the
-reusable workflow hands every rung's secret to ONE step and `run-review-ladder.py`
-walks this table at run time.
+reusable workflow repeats one attempt step per slot, and `review-ladder.py`
+orders the slots from this table at run time.
 
 Standard library only, and the data file is resolved from `__file__`: the review
 jobs run this out of the vendored `.github/reviewer` tree on the system python3,
@@ -37,9 +37,8 @@ FREE_RETRY_BACKOFF_SECONDS = 10
 class RungSpec:
     """One credential slot: its 1-based number and the secret it reads.
 
-    Distinct from `_ladder.Rung`, which is one rung's RUNTIME state;
-    `run-review-ladder.py` holds both. Which credential is paid is not a property
-    of the slot: the runner reads it off the credential's own shape.
+    Which credential is paid is not a property of the slot: the workflow reads
+    it off the credential's own shape.
     """
 
     index: int

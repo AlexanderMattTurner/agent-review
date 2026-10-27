@@ -20,7 +20,7 @@
 # claim coverage it does not have.
 #
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
-# Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
+# Env: PR, PR_INPUT_DIR, HEAD_SHA, DEFAULT_BRANCH; READ (first|delta, default first), SINCE (the
 # covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
 # size bounds below are optional.
 # Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
@@ -41,6 +41,7 @@ source "$here/lib-ci-retry.sh"
 : "${PR_INPUT_DIR:?PR_INPUT_DIR required}"
 # The head this run was dispatched for. Every coverage claim below names it, so a
 # run that cannot say which commit it read must not run at all.
+: "${DEFAULT_BRANCH:?DEFAULT_BRANCH required — the only base branch a read may target}"
 : "${HEAD_SHA:?HEAD_SHA required — the head this read covers}"
 READ="${READ:-first}"
 SINCE="${SINCE:-}"
@@ -114,7 +115,7 @@ fetch_whole_pr_diff() {
   # stops at 3000 entries with no cursor past it, so a wider PR arrives silently
   # short — and a partial diff sanitized and sharded reads as a complete review of
   # a PR whose later files nobody looked at. Refusing routes it to the
-  # human-review notice instead, through the sharder's own over-budget code.
+  # human-review notice instead.
   local fetched changed
   # `--paginate` concatenates one ARRAY PER PAGE, so the count flattens them.
   fetched="$(jq -s 'flatten | length' <<<"$files")"
@@ -146,9 +147,10 @@ fi
 # error this whole record exists to prevent — every later reader trusts the stamp.
 # The base comes from the same call, so the record names what the diff was taken
 # against.
-pr_state="$(retry_stdout gh pr view "$PR" --json headRefOid,baseRefOid)"
+pr_state="$(retry_stdout gh pr view "$PR" --json headRefOid,baseRefOid,baseRefName)"
 live_head="$(jq -r '.headRefOid // ""' <<<"$pr_state")"
 base_sha="$(jq -r '.baseRefOid // ""' <<<"$pr_state")"
+base_ref="$(jq -r '.baseRefName // ""' <<<"$pr_state")"
 if [[ -z "$live_head" ]]; then
   echo "the live-head read returned nothing; refusing to claim coverage of a commit it cannot name" >&2
   exit 1
@@ -161,6 +163,21 @@ if [[ "$live_head" != "$HEAD_SHA" ]]; then
   exit 0
 fi
 emit_output "stale=false"
+
+# INVARIANT — only a PR aimed at the default branch gets a read. claude-code-action
+# restores CLAUDE.md and .claude/ from the PR's BASE branch over the trusted
+# default-branch checkout, inside the same step that runs the model, and offers no
+# input to skip it. A PR aimed at any other branch would hand the reviewer that
+# branch's instructions, so it gets the human-review notice instead.
+if [[ "$base_ref" != "$DEFAULT_BRANCH" ]]; then
+  emit_output "sharded=false"
+  emit_output "unreviewable=true"
+  printf '%s\n' \
+    "Automated review skipped: this PR targets \`${base_ref}\`, not the default branch \`${DEFAULT_BRANCH}\`. The reviewer reads its instructions from the PR's target branch, so it reads only PRs aimed at the default branch. Please review it manually, or retarget it at \`${DEFAULT_BRANCH}\`." \
+    >"${PR_INPUT_DIR}/oversized-notice.txt"
+  echo "PR targets ${base_ref}, not ${DEFAULT_BRANCH}; asking for a human review" >&2
+  exit 0
+fi
 
 # Printed with workflow commands off: the sanitizer's error can quote the PR's own
 # text, and a `::add-mask::` line in that text must not act on this log.
@@ -301,9 +318,8 @@ else
   echo "(sanitizer found no injection-shaped content in the diff or metadata)" >"$report"
 fi
 
-# Size routing happens AFTER sanitization, so the shards are slices of exactly
-# what the reviewer would otherwise have read.
-
+# Size routing happens AFTER sanitization and elision, so the shards are slices
+# of exactly what the reviewer would otherwise have read.
 if ((diff_lines <= MAX_DIFF_LINES)); then
   emit_output "sharded=false"
   emit_output "unreviewable=false"
@@ -329,11 +345,7 @@ python3 "$here/shard-pr-diff.py" \
   --diff "${PR_INPUT_DIR}/diff.txt" \
   --out-dir "${PR_INPUT_DIR}/shards" \
   --max-lines "$SHARD_MAX_LINES" \
-  --max-shards "$MAX_SHARDS" \
-  --model "${MODEL:-}" \
-  --model-low "${MODEL_LOW:-}" \
-  --low-tier-paths "${LOW_TIER_PATHS:-}" \
-  --bulk-lines "${BULK_DIFF_LINES:-0}" || shard_rc=$?
+  --max-shards "$MAX_SHARDS" || shard_rc=$?
 
 # 3 is the sharder's over-budget refusal; any other non-zero stays a red job.
 if ((shard_rc == 3)); then

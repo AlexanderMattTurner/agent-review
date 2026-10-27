@@ -1,14 +1,12 @@
 // Behavior tests for merge-shard-reviews.mjs: build a real PR_INPUT_DIR plus one
-// artifact-shaped subdirectory per shard review, run the merge in-process, and
-// assert the single review.json it leaves for post-pr-review.mjs.
+// artifact-shaped `pr-review-findings-<leg>` directory per delivered leg, run the fold
+// in-process, and assert the review.json, cost.json and incomplete marker it leaves for
+// post-pr-review.sh.
 //
-// The load-bearing case is the missing shard review. The posted body carries a
-// coverage line naming how many lines were read; if a crashed shard could be
-// silently dropped, that line would assert a complete read of a diff nobody
-// finished reading.
-import { describe, it, afterEach } from "node:test";
+// The load-bearing case is the missing leg: the posted review must say the read is
+// incomplete, and must leave the marker that keeps it from counting as a read.
+import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -18,254 +16,163 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-import { main } from "./merge-shard-reviews.mjs";
-
-const SCRIPT = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "merge-shard-reviews.mjs",
-);
+import { INCOMPLETE_FILE, main } from "./merge-shard-reviews.mjs";
 
 const dirs = [];
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop(), { recursive: true, force: true });
 });
 
+const SHARDS = [
+  { name: "shard-00.diff", lines: 3000, files: ["a.py", "b.py"] },
+  { name: "shard-01.diff", lines: 1200, files: ["c.py"] },
+];
+
 /**
- * Write a manifest for `shards` shards (default: one per review) plus one
- * artifact-shaped subdirectory per review.
- * @param {Record<string, unknown>[]} reviews
- * @param {{shards?: number}} [options]
- * @returns {{prInput: string, shardReviewDir: string, env: Record<string, string>}}
+ * A PR_INPUT_DIR (with a manifest when `shards` is given) and one artifact
+ * directory per entry of `legs`, each holding that leg's review.json and cost.json.
+ * @param {Record<string, {review: object, cost: number|null, model?: string}>} legs
+ * @param {{name: string, lines: number, files: string[]}[] | null} shards
  */
-function setup(reviews, { shards } = {}) {
+function setup(legs, shards) {
   const root = mkdtempSync(join(tmpdir(), "msr-"));
   dirs.push(root);
   const prInput = join(root, "pr-input");
-  mkdirSync(join(prInput, "shards"), { recursive: true });
-  const count = shards ?? reviews.length;
-  writeFileSync(
-    join(prInput, "shards", "manifest.json"),
-    JSON.stringify({
-      shards: Array.from({ length: count }, (_, i) => ({
-        name: `shard-${String(i).padStart(2, "0")}.diff`,
-      })),
-      total_lines: 4200,
-      total_files: 137,
-      max_lines: 8000,
-    }),
-  );
-  const shardReviewDir = join(root, "shard-reviews");
-  reviews.forEach((review, index) => {
-    const leg = join(
-      shardReviewDir,
-      `pr-review-shard-shard-${String(index).padStart(2, "0")}.diff`,
+  mkdirSync(prInput, { recursive: true });
+  if (shards) {
+    mkdirSync(join(prInput, "shards"));
+    writeFileSync(
+      join(prInput, "shards", "manifest.json"),
+      JSON.stringify({ shards, total_lines: 4200, total_files: 3 }),
     );
-    mkdirSync(leg, { recursive: true });
-    writeFileSync(join(leg, "review.json"), JSON.stringify(review));
-  });
+  }
+  const legDir = join(root, "legs");
+  for (const [name, leg] of Object.entries(legs)) {
+    const dir = join(legDir, `pr-review-findings-${name}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "review.json"), JSON.stringify(leg.review));
+    writeFileSync(
+      join(dir, "cost.json"),
+      JSON.stringify({
+        type: "result",
+        total_cost_usd: leg.cost,
+        model: leg.model ?? "opus",
+      }),
+    );
+  }
+  const output = join(root, "github_output");
+  writeFileSync(output, "");
   return {
     prInput,
-    shardReviewDir,
-    env: { PR_INPUT_DIR: prInput, SHARD_REVIEW_DIR: shardReviewDir },
+    output,
+    env: {
+      PR_INPUT_DIR: prInput,
+      SHARD_REVIEW_DIR: legDir,
+      GITHUB_OUTPUT: output,
+    },
   };
 }
 
-/** @param {string} prInput */
-function readMerged(prInput) {
-  return JSON.parse(readFileSync(join(prInput, "review.json"), "utf8"));
-}
+/** @param {string} prInput @param {string} name */
+const readJson = (prInput, name) =>
+  JSON.parse(readFileSync(join(prInput, name), "utf8"));
 
-describe("merge-shard-reviews", () => {
-  it("keeps the findings from every shard, in shard order", () => {
-    const { prInput, env } = setup([
-      { summary: "shard A clean", findings: [{ title: "a" }] },
-      { summary: "shard B clean", findings: [{ title: "b" }] },
-    ]);
-    main({ env });
+const finding = (path) => ({
+  path,
+  line: 1,
+  severity: "blocking",
+  title: path,
+});
 
-    const merged = readMerged(prInput);
-    assert.deepEqual(
-      merged.findings.map((f) => f.title),
-      ["a", "b"],
-    );
-    assert.ok(merged.summary.includes("shard A clean"));
-    assert.ok(merged.summary.includes("shard B clean"));
+test("every shard's findings fold into one review with one summed price", () => {
+  const { prInput, output, env } = setup(
+    {
+      "shard-00.diff": {
+        review: { summary: "first slice", findings: [finding("a.py")] },
+        cost: 1.1,
+      },
+      "shard-01.diff": {
+        review: { summary: "second slice", findings: [finding("c.py")] },
+        cost: 0.1,
+      },
+    },
+    SHARDS,
+  );
+  assert.deepEqual(main({ env }), { complete: true, delivered: 2, planned: 2 });
+  assert.deepEqual(readJson(prInput, "review.json"), {
+    summary:
+      "_Read 4200 of 4200 diff lines across 3 files in 2 shards._\n\nfirst slice\n\nsecond slice",
+    findings: [finding("a.py"), finding("c.py")],
   });
-
-  it("carries the manifest's measured numbers in the coverage line", () => {
-    // Numbers over adjectives: the reader can check these against the PR itself.
-    const { prInput, env } = setup([{ findings: [] }]);
-    main({ env });
-
-    const { summary } = readMerged(prInput);
-    assert.ok(summary.includes("4200 of 4200 diff lines"));
-    assert.ok(summary.includes("137 files"));
-    assert.ok(summary.includes("1 shards"));
+  assert.deepEqual(readJson(prInput, "cost.json"), {
+    type: "result",
+    total_cost_usd: 1.2,
+    model: "opus",
   });
+  assert.equal(existsSync(join(prInput, INCOMPLETE_FILE)), false);
+  assert.equal(readFileSync(output, "utf8"), "complete=true\n");
+});
 
-  it("folds no verdict into the merged review", () => {
-    // The gate reads finding severities off the posted threads; a folded shard
-    // verdict would be a second, unread verdict channel.
-    const { prInput, env } = setup([
-      { verdict: "blocking", findings: [] },
-      { verdict: "looks_good", findings: [] },
-    ]);
-    main({ env });
-    assert.ok(!("verdict" in readMerged(prInput)));
+test("a shard that delivered nothing makes the review say the read is incomplete", () => {
+  const { prInput, output, env } = setup(
+    {
+      "shard-00.diff": {
+        review: { summary: "first slice", findings: [finding("a.py")] },
+        cost: 1.1,
+      },
+    },
+    SHARDS,
+  );
+  assert.deepEqual(main({ env }), {
+    complete: false,
+    delivered: 1,
+    planned: 2,
   });
-
-  it("drops each shard's diagram from the merged review", () => {
-    // A shard reads one slice of the diff, so its diagram cannot show the system.
-    const { prInput, env } = setup([
-      { diagram: 'flowchart LR\n  A["a"] --> B["b"]', findings: [] },
-    ]);
-    main({ env });
-    assert.ok(!("diagram" in readMerged(prInput)));
+  const review = readJson(prInput, "review.json");
+  assert.deepEqual(review.findings, [finding("a.py")]);
+  assert.equal(
+    review.summary,
+    "_This read is INCOMPLETE. 1 of 2 shards delivered no review (shard-01.diff), so it " +
+      "read about 3000 of 4200 diff lines. It does not count as a review of this head._" +
+      "\n\nfirst slice",
+  );
+  // A partial sum would render exactly like a whole price, so none is written.
+  assert.deepEqual(readJson(prInput, "cost.json"), {
+    type: "result",
+    total_cost_usd: null,
+    model: null,
   });
+  assert.equal(
+    readFileSync(join(prInput, INCOMPLETE_FILE), "utf8"),
+    "1 of 2 shards delivered no review: shard-01.diff (c.py).\n",
+  );
+  assert.equal(readFileSync(output, "utf8"), "complete=false\n");
+});
 
-  it("refuses to merge when a shard review is missing", () => {
-    // Two shards, one review: fail loud rather than post a coverage claim for a
-    // shard nothing ever read.
-    const { prInput, env } = setup([{ findings: [] }], { shards: 2 });
-    assert.throws(() => main({ env }), {
-      message: /expected 2 shard reviews, found 1/,
-    });
-    assert.ok(!existsSync(join(prInput, "review.json")));
-  });
+test("an unsharded read's one leg passes through whole, diagram and all", () => {
+  const review = {
+    summary: "whole read",
+    diagram: "graph TD; a-->b",
+    findings: [finding("a.py")],
+  };
+  const { prInput, env } = setup({ whole: { review, cost: 2.5 } }, null);
+  assert.deepEqual(main({ env }), { complete: true, delivered: 1, planned: 1 });
+  assert.deepEqual(readJson(prInput, "review.json"), review);
+  assert.equal(readJson(prInput, "cost.json").total_cost_usd, 2.5);
+});
 
-  it("refuses to merge when a shard uploaded a review nothing asked for", () => {
-    const { prInput, env } = setup([{ findings: [] }, { findings: [] }], {
-      shards: 1,
-    });
-    assert.throws(() => main({ env }), {
-      message: /expected 1 shard reviews, found 2/,
-    });
-    assert.ok(!existsSync(join(prInput, "review.json")));
-  });
+test("a read where no leg delivered refuses to write a review", () => {
+  const { prInput, env } = setup({}, SHARDS);
+  assert.throws(() => main({ env }), /none of the 2 read leg\(s\) delivered/);
+  assert.equal(existsSync(join(prInput, "review.json")), false);
+});
 
-  it("refuses to run without PR_INPUT_DIR", () => {
-    assert.throws(() => main({ env: { SHARD_REVIEW_DIR: "/nowhere" } }), {
-      message: "PR_INPUT_DIR required",
-    });
-  });
-
-  it("refuses to run without SHARD_REVIEW_DIR", () => {
-    assert.throws(() => main({ env: { PR_INPUT_DIR: "/nowhere" } }), {
-      message: "SHARD_REVIEW_DIR required",
-    });
-  });
-
-  it("keeps merging when a shard review has no findings array", () => {
-    const { prInput, env } = setup([
-      { summary: "shard A clean" },
-      { summary: "shard B clean", findings: [{ title: "b" }] },
-    ]);
-    main({ env });
-
-    const merged = readMerged(prInput);
-    assert.deepEqual(
-      merged.findings.map((f) => f.title),
-      ["b"],
-    );
-    assert.ok(merged.summary.includes("shard A clean"));
-  });
-
-  it("drops a summary that is absent, non-string, or only whitespace", () => {
-    const { prInput, env } = setup([
-      { findings: [] },
-      { summary: 987654, findings: [] },
-      { summary: "   \n\t ", findings: [] },
-      { summary: "  shard D clean  ", findings: [] },
-    ]);
-    main({ env });
-
-    const { summary } = readMerged(prInput);
-    // Only the coverage line and the one real summary survive, and the real one
-    // is trimmed.
-    assert.equal(summary.split("\n\n").length, 2);
-    assert.ok(summary.endsWith("\n\nshard D clean"));
-    assert.ok(!summary.includes("987654"));
-  });
-
-  it("finds a review.json at any artifact nesting depth", () => {
-    // download-artifact chooses the layout; the merge must find the review
-    // wherever it lands, not at one fixed depth.
-    const { prInput, shardReviewDir, env } = setup([], { shards: 1 });
-    const deep = join(shardReviewDir, "outer", "inner");
-    mkdirSync(deep, { recursive: true });
-    writeFileSync(
-      join(deep, "review.json"),
-      JSON.stringify({ summary: "deep", findings: [{ title: "b" }] }),
-    );
-
-    main({ env });
-    const merged = readMerged(prInput);
-    assert.deepEqual(
-      merged.findings.map((f) => f.title),
-      ["b"],
-    );
-    assert.ok(merged.summary.includes("deep"));
-  });
-
-  it("orders findings by review path, not by directory traversal order", () => {
-    // readdirSync(recursive) lists a directory's own files before it descends,
-    // so an unsorted merge would put the shallower review first whatever its
-    // name. The posted review reads in shard order only because of the sort.
-    const { prInput, shardReviewDir, env } = setup([], { shards: 2 });
-    mkdirSync(join(shardReviewDir, "a-leg"), { recursive: true });
-    writeFileSync(
-      join(shardReviewDir, "a-leg", "review.json"),
-      JSON.stringify({ findings: [{ title: "a" }] }),
-    );
-    writeFileSync(
-      join(shardReviewDir, "review.json"),
-      JSON.stringify({ findings: [{ title: "z" }] }),
-    );
-    main({ env });
-    assert.deepEqual(
-      readMerged(prInput).findings.map((f) => f.title),
-      ["a", "z"],
-    );
-  });
-
-  it("ignores files in the shard tree that are not review.json", () => {
-    const { prInput, shardReviewDir, env } = setup([
-      { summary: "real", findings: [{ title: "a" }] },
-    ]);
-    writeFileSync(join(shardReviewDir, "shard-cost.json"), '{"cost":0.42}');
-    main({ env });
-    assert.deepEqual(readMerged(prInput).findings, [{ title: "a" }]);
-  });
-
-  it("runs as a CLI, reporting the merge on stderr", () => {
-    // The workflow step invokes `node .github/reviewer/merge-shard-reviews.mjs`
-    // with the two env vars and nothing else.
-    const { prInput, env } = setup([
-      { summary: "shard A clean", findings: [{ title: "a" }, { title: "b" }] },
-    ]);
-    const run = spawnSync("node", [SCRIPT], {
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-    });
-    assert.equal(run.status, 0, run.stderr);
-    assert.equal(run.stderr, "merged 1 shard reviews: 2 findings\n");
-    assert.deepEqual(readMerged(prInput).findings, [
-      { title: "a" },
-      { title: "b" },
-    ]);
-  });
-
-  it("exits non-zero as a CLI when a shard review is missing", () => {
-    const { prInput, env } = setup([{ findings: [] }], { shards: 2 });
-    const run = spawnSync("node", [SCRIPT], {
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-    });
-    assert.notEqual(run.status, 0);
-    assert.match(run.stderr, /expected 2 shard reviews, found 1/);
-    assert.ok(!existsSync(join(prInput, "review.json")));
-  });
+test("an artifact for a leg this run never planned is refused", () => {
+  const { env } = setup(
+    { "shard-07.diff": { review: { findings: [] }, cost: 1 } },
+    SHARDS,
+  );
+  assert.throws(() => main({ env }), /no planned leg is named "shard-07.diff"/);
 });
