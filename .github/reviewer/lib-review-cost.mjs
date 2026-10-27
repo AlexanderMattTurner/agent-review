@@ -1,7 +1,7 @@
 // Shared cost accounting for the PR-review footnote — used by the reviewer
-// (post-pr-review.mjs) and record-shard-cost.mjs for reading a Claude run's
+// (post-pr-review.mjs) and record-review.mjs for reading a Claude run's
 // cost, formatting dollars, and the "PRs per Max 20x weekly allowance" line.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 /**
  * What a caller may learn about one run's price; absent when unavailable.
@@ -11,7 +11,8 @@ import { readFileSync, readdirSync } from "node:fs";
 /**
  * `total_cost_usd` and the model that ran, from the Claude action's execution log,
  * which is either an array of streamed events whose terminal `type: "result"`
- * carries the API-equivalent cost, or an object with the field directly.
+ * carries the API-equivalent cost, or an object with the field directly — the
+ * shape of the cost.json record-review.mjs distils from that log.
  * INVARIANT — a missing or unparsable log yields {}; a missing cost never breaks posting.
  * @param {string} [executionFile] the log path; falls back to the environment.
  * @returns {RunCost}
@@ -40,63 +41,6 @@ export function readRunCost(executionFile) {
     }
   }
   return { cost, model };
-}
-
-// Left next to each shard's review.json.
-export const SHARD_COST_FILE = "shard-cost.json";
-
-/**
- * Every path under `dir` (recursively) whose basename is `name`.
- * @param {import("node:fs").Dirent[]} entries
- * @param {string} name
- * @returns {string[]}
- */
-function filesNamed(entries, name) {
-  return entries
-    .filter((e) => e.isFile() && e.name === name)
-    .map((e) => `${e.parentPath}/${e.name}`);
-}
-
-/**
- * The summed cost of every shard a sharded review left in `dir`, pricing the WHOLE
- * review rather than one leg of it, or {}. Fails closed on any missing, unparsable
- * or non-finite cost file: a partial sum posted as the review's price is worse than
- * no price, because nothing in the rendered line marks it as incomplete.
- * @param {string} dir the directory the shard artifacts were downloaded into.
- * @returns {RunCost}
- */
-export function readShardedRunCost(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { recursive: true, withFileTypes: true });
-  } catch {
-    return {};
-  }
-  const costFiles = filesNamed(entries, SHARD_COST_FILE);
-  const reviewFiles = filesNamed(entries, "review.json");
-  // One shard-cost.json per review.json, or the sum is partial and no footer is
-  // posted. That test works because merge-shard-reviews.mjs has already refused to
-  // proceed unless the review.json count matches the manifest's shard count.
-  if (!costFiles.length || costFiles.length !== reviewFiles.length) return {};
-
-  let total = 0;
-  const models = new Set();
-  for (const file of costFiles) {
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(file, "utf8"));
-    } catch {
-      return {};
-    }
-    if (!parsed || !Number.isFinite(parsed.cost)) return {};
-    total += parsed.cost;
-    models.add(typeof parsed.model === "string" ? parsed.model : "");
-  }
-  // Rounds off the binary-floating-point tail (raw sums render as 1.2000000000000002);
-  // one model name only when every shard agrees.
-  const cost = Math.round(total * 1e6) / 1e6;
-  const [model] = models;
-  return { cost, model: models.size === 1 && model ? model : undefined };
 }
 
 /** Sub-cent costs keep four decimals; everything else two.
