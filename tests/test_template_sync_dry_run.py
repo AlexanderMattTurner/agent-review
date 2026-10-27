@@ -9,10 +9,10 @@ so.
 
 That is invisible from inside the workflow, which is why it survived long enough
 to reach every downstream repo. These tests read the workflow GitHub actually
-executes and pin the type agreement between the declaration and its readers.
+executes and pin the type agreement between the declaration and its reader: the
+caller declares the dispatch input and forwards it to the template's reusable
+sync workflow, which owns the step conditions that read it.
 """
-
-import re
 
 import yaml
 
@@ -31,17 +31,6 @@ def _workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
-def _conditions() -> list[str]:
-    """Every step `if:` in the workflow that reads the dry-run input."""
-    found = []
-    for job in _workflow()["jobs"].values():
-        for step in job.get("steps", []):
-            condition = step.get("if")
-            if isinstance(condition, str) and f"inputs.{INPUT_NAME}" in condition:
-                found.append(condition)
-    return found
-
-
 def test_the_input_is_declared_boolean():
     spec = _workflow()[ON_KEY]["workflow_dispatch"]["inputs"][INPUT_NAME]
     assert spec["type"] == "boolean"
@@ -54,19 +43,8 @@ def test_the_default_is_a_boolean_not_a_string():
     assert spec["default"] is False, f"default is {spec['default']!r}, not a boolean"
 
 
-def test_every_condition_compares_the_input_to_a_boolean():
-    conditions = _conditions()
-    # Non-vacuity: the assertion below is satisfied by an empty list, and this
-    # workflow's whole dry-run behaviour is carried by these conditions.
-    assert len(conditions) >= 5, (
-        f"expected the dry-run conditions to still be here, found {len(conditions)}"
-    )
-    quoted = [
-        c
-        for c in conditions
-        if re.search(rf"inputs\.{re.escape(INPUT_NAME)}\s*[!=]=\s*'", c)
-    ]
-    assert quoted == [], (
-        "these conditions compare a boolean input to a string, which never "
-        f"matches: {quoted}"
-    )
+def test_the_caller_forwards_a_boolean():
+    # A scheduled run carries no inputs, so a bare `inputs.dry-run` forwards
+    # null. The comparison yields a real boolean on both triggers.
+    forwarded = _workflow()["jobs"]["sync"]["with"][INPUT_NAME]
+    assert forwarded == "${{ inputs.dry-run == true }}"
