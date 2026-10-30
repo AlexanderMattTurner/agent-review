@@ -1,5 +1,5 @@
 // Behavior tests for merge-shard-reviews.mjs: build a real PR_INPUT_DIR plus one
-// artifact-shaped `pr-review-findings-<leg>` directory per delivered leg, run the fold
+// `<leg>` directory per delivered leg (the merged-download layout), run the fold
 // in-process, and assert the review.json, cost.json and incomplete marker it leaves for
 // post-pr-review.sh.
 //
@@ -50,7 +50,7 @@ function setup(legs, shards) {
   }
   const legDir = join(root, "legs");
   for (const [name, leg] of Object.entries(legs)) {
-    const dir = join(legDir, `pr-review-findings-${name}`);
+    const dir = join(legDir, name);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "review.json"), JSON.stringify(leg.review));
     writeFileSync(
