@@ -16,3 +16,9 @@ minimumReleaseAgeExclude:
 # Transitive via markdownlint-cli2; override until markdownlint-cli2 bumps it.
 overrides:
   smol-toml: ">=1.7.1"
+
+  # GHSA-r7fv-28h4-cvq7, GHSA-gfr2-rv44-r23c (high), GHSA-vfgh-jcmw-g37q (low):
+  # markdown-it 15.0.x quadratic-time DoS. Transitive via markdownlint-cli2.
+  # GHSA-238p-pmpm-9mq7 (low): katex <0.18.2 prototype pollution, via markdownlint.
+  markdown-it: ">=15.0.3"
+  katex: ">=0.18.2"
