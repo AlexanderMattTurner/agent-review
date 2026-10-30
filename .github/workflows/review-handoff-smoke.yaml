@@ -10,9 +10,10 @@ name: Review hand-off smoke
 # merge-shard-reviews.mjs and checks what it folded. The upload and download
 # `with:` blocks mirror review.yaml's; only the artifact prefix gains the case
 # name, so the three cases can share one run.
+#
+# PR-only, and excluded from template sync: consumers lack the reviewer files
+# it drives, and the PR leg is the one that can stop a bad change.
 on:
-  push:
-    branches: ["main"]
   pull_request:
 
 concurrency:
@@ -31,7 +32,7 @@ jobs:
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       # POSIX ERE, read by `grep -E` — no PCRE escapes (\d, \w, (?:…)).
-      paths-regex: '^\.github/(workflows/(review|review-handoff-smoke)\.yaml$|reviewer/(merge-shard-reviews|lib-review-cost|lib-cli-args)\.mjs$|reviewer/stage-leg-review\.sh$|scripts/review-handoff-smoke\.sh$)'
+      paths-regex: '^\.github/(workflows/(review|review-handoff-smoke)\.yaml$|reviewer/(merge-shard-reviews|lib-review-cost|lib-cli-args)\.mjs$|reviewer/stage-leg-review\.sh$|reviewer/review-handoff-smoke\.sh$)'
       memoize-anchor-jobs: "^(legs|fold)"
 
   legs:
@@ -55,7 +56,7 @@ jobs:
       - name: Stage a stub review
         env:
           LEG: ${{ matrix.leg }}
-        run: bash .github/scripts/review-handoff-smoke.sh leg "${LEG}"
+        run: bash .github/reviewer/review-handoff-smoke.sh leg "${LEG}"
 
       - name: Upload it as review.yaml's read job does
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -93,7 +94,7 @@ jobs:
       - name: Fold them and check the result
         env:
           CASE: ${{ matrix.case }}
-        run: bash .github/scripts/review-handoff-smoke.sh fold "${CASE}"
+        run: bash .github/reviewer/review-handoff-smoke.sh fold "${CASE}"
 
   review-handoff-smoke-passed: # required-check: true
     if: always()
