@@ -578,16 +578,21 @@ jobs:
           EXECUTION_FILE: ${{ env.REVIEW_EXECUTION_FILE }}
         run: node "${REVIEWER_DIR}/record-review.mjs"
 
+      - name: Stage the review under a directory named for the leg
+        # The leg name rides INSIDE the artifact, so post finds it whatever
+        # layout download-artifact extracts to.
+        env:
+          LEG: ${{ matrix.leg }}
+          LEG_OUT: ${{ runner.temp }}/leg-out
+        run: mkdir -p "${LEG_OUT}/${LEG}" && cp "${RUNNER_TEMP}/pr-input/review.json" "${RUNNER_TEMP}/pr-input/cost.json" "${LEG_OUT}/${LEG}/"
+
       - name: Hand the review to the post job
         # review.json and the cost number only. The execution log stays on this
-        # runner and leaves it solely through the redacting upload below. Keyed
-        # by the leg: post maps each artifact back to the shard it read.
+        # runner and leaves it solely through the redacting upload below.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-review-findings-${{ matrix.leg }}
-          path: |
-            ${{ runner.temp }}/pr-input/review.json
-            ${{ runner.temp }}/pr-input/cost.json
+          path: ${{ runner.temp }}/leg-out
           retention-days: 1
           overwrite: true
 
@@ -677,11 +682,14 @@ jobs:
       - name: Fetch every read leg's review
         # Not gated on the read job's result: a matrix reports failure when ANY
         # leg failed, and the legs that delivered still owe the PR their findings.
+        # merge-multiple: v8 extracts a lone pattern match flat into `path` but
+        # several into `path/<artifact>/`; merging always gives `path/<leg>/`.
         if: needs.prepare.outputs.unreviewable == 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pr-review-findings-*
           path: ${{ runner.temp }}/read-legs
+          merge-multiple: true
 
       - name: Fold the legs into one review
         # Refuses when no leg delivered. A missing leg makes the review say the

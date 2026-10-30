@@ -14,8 +14,8 @@
 // leg at all throws: there is nothing to post.
 //
 // Env: PR_INPUT_DIR (holds shards/manifest.json when the diff was sharded; review.json, cost.json
-// and INCOMPLETE_FILE are written here), SHARD_REVIEW_DIR (one `pr-review-findings-<leg>`
-// directory per uploaded leg, the layout download-artifact gives a `pattern` download).
+// and INCOMPLETE_FILE are written here), SHARD_REVIEW_DIR (one `<leg>` directory per uploaded
+// leg: each artifact carries its own `<leg>/` and the download merges them).
 // GITHUB_OUTPUT, when set, gets complete=true|false.
 import {
   appendFileSync,
@@ -28,7 +28,6 @@ import {
 import { isMain } from "./lib-cli-args.mjs";
 import { readRunCost } from "./lib-review-cost.mjs";
 
-export const LEG_ARTIFACT_PREFIX = "pr-review-findings-";
 export const WHOLE_LEG = "whole";
 export const INCOMPLETE_FILE = "incomplete-read.txt";
 
@@ -58,19 +57,17 @@ function deliveredLegs(legDir, planned) {
     : [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const name = entry.name.startsWith(LEG_ARTIFACT_PREFIX)
-      ? entry.name.slice(LEG_ARTIFACT_PREFIX.length)
-      : "";
+    const { name } = entry;
     if (!planned.has(name)) {
       throw new Error(
-        `unexpected leg artifact ${entry.name} — no planned leg is named ${JSON.stringify(name)}`,
+        `unexpected leg directory — no planned leg is named ${JSON.stringify(name)}`,
       );
     }
-    const reviewPath = `${legDir}/${entry.name}/review.json`;
+    const reviewPath = `${legDir}/${name}/review.json`;
     if (!existsSync(reviewPath)) continue;
     delivered.set(name, {
       review: JSON.parse(readFileSync(reviewPath, "utf8")),
-      cost: readRunCost(`${legDir}/${entry.name}/cost.json`),
+      cost: readRunCost(`${legDir}/${name}/cost.json`),
     });
   }
   return delivered;
