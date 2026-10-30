@@ -30,6 +30,7 @@ on: # zizmor: ignore[dangerous-triggers]
       - PR meta (privileged)
       - pre-commit
       - Release canary
+      - Review hand-off smoke
       - Weekly Security & Dependency Remediation
       - Sync required status checks
       - Sync from Template

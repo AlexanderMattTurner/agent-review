@@ -31,9 +31,7 @@ jobs:
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       # POSIX ERE, read by `grep -E` — no PCRE escapes (\d, \w, (?:…)).
-      paths-regex: '^\.github/(workflows/(review|review-handoff-smoke)\.yaml$|reviewer/(merge-shard-reviews|lib-review-cost|lib-cli-args)\.mjs$|reviewer/stage-leg-review\.sh$)'
-      # path-gate-ok: .github/scripts/review-handoff-smoke.sh it is the shell-targets entry point below, so the decide job derives it and everything it reaches
-      shell-targets: .github/scripts/review-handoff-smoke.sh
+      paths-regex: '^\.github/(workflows/(review|review-handoff-smoke)\.yaml$|reviewer/(merge-shard-reviews|lib-review-cost|lib-cli-args)\.mjs$|reviewer/stage-leg-review\.sh$|scripts/review-handoff-smoke\.sh$)'
       memoize-anchor-jobs: "^(legs|fold)"
 
   legs:
