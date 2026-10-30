@@ -579,12 +579,11 @@ jobs:
         run: node "${REVIEWER_DIR}/record-review.mjs"
 
       - name: Stage the review under a directory named for the leg
-        # The leg name rides INSIDE the artifact, so post finds it whatever
-        # layout download-artifact extracts to.
+        # review-handoff-smoke.yaml runs this step, the upload below and post's
+        # download for real on every PR that touches them; keep the three in step.
         env:
           LEG: ${{ matrix.leg }}
-          LEG_OUT: ${{ runner.temp }}/leg-out
-        run: mkdir -p "${LEG_OUT}/${LEG}" && cp "${RUNNER_TEMP}/pr-input/review.json" "${RUNNER_TEMP}/pr-input/cost.json" "${LEG_OUT}/${LEG}/"
+        run: bash "${REVIEWER_DIR}/stage-leg-review.sh" "${LEG}" "${RUNNER_TEMP}/pr-input" "${RUNNER_TEMP}/leg-out"
 
       - name: Hand the review to the post job
         # review.json and the cost number only. The execution log stays on this
