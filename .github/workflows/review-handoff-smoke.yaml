@@ -33,7 +33,6 @@ jobs:
     with:
       # POSIX ERE, read by `grep -E` — no PCRE escapes (\d, \w, (?:…)).
       paths-regex: '^\.github/(workflows/(review|review-handoff-smoke)\.yaml$|reviewer/(merge-shard-reviews|lib-review-cost|lib-cli-args)\.mjs$|reviewer/stage-leg-review\.sh$|reviewer/review-handoff-smoke\.sh$)'
-      memoize-anchor-jobs: "^(legs|fold)"
 
   legs:
     name: Stage and upload a read leg (${{ matrix.case }} / ${{ matrix.leg }})
