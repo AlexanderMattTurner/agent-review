@@ -393,7 +393,6 @@ def _run(
             # it is what the coverage stamp claims, and a read that cannot name
             # the commit it covered must not post one.
             "HEAD_SHA": HEAD_SHA,
-            "DEFAULT_BRANCH": "main",
             "PR_INPUT_DIR": str(input_dir),
             **{k: str(v) for k, v in bounds.items() if v is not None},
             **extra_env,
@@ -578,18 +577,17 @@ def test_a_diff_needing_too_many_shards_asks_for_a_human(tmp_path: Path) -> None
     )
 
 
-def test_a_pr_aimed_at_another_branch_asks_for_a_human(tmp_path: Path) -> None:
-    """claude-code-action restores CLAUDE.md and .claude/ from the PR's base
-    branch, so a PR aimed at any branch but the default gets no read at all."""
+def test_a_pr_aimed_at_another_branch_is_read(tmp_path: Path) -> None:
+    """A stacked PR's base is a feature branch, and it is read like any other.
+    The read job pins the action's config restore to the default branch, so the
+    PR's base never supplies the reviewer's instructions."""
     proc, outputs, input_dir = _run(
-        tmp_path, files=2, max_diff_lines=100, base_ref="release-1"
+        tmp_path, files=2, max_diff_lines=100, base_ref="claude/stacked-parent"
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "true"
-    assert outputs["sharded"] == "false"
-    notice = (input_dir / "oversized-notice.txt").read_text(encoding="utf-8")
-    assert "targets `release-1`, not the default branch `main`" in notice
-    assert not (input_dir / "diff.txt").exists(), "nothing is sanitized for a read"
+    assert outputs["unreviewable"] == "false"
+    assert (input_dir / "diff.txt").exists()
+    assert not (input_dir / "oversized-notice.txt").exists()
 
 
 def test_over_300_files_is_rebuilt_from_the_files_api(tmp_path: Path) -> None:

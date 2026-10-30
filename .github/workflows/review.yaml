@@ -373,9 +373,6 @@ jobs:
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
           SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
           MAX_SHARDABLE_LINES: ${{ inputs.max-shardable-lines }}
-          # claude-code-action restores CLAUDE.md and .claude/ from the PR's base
-          # branch, so only a PR aimed at this branch gets a read.
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # What the coverage stamp will claim, and where an accumulated read
           # starts. HEAD_SHA is the head decide resolved: prepare refuses to read a
           # pull request whose head moved since, rather than stamping a head that
@@ -530,6 +527,11 @@ jobs:
           # minting its GitHub App token, which would carry write scopes.
           github_token: ${{ github.token }}
           prompt: ${{ steps.plan.outputs.prompt }}
+          # INVARIANT — the action restores CLAUDE.md and .claude/ from this branch
+          # over the checkout before the model starts. Under pull_request_target it
+          # reads this input, not the PR's base, so a PR stacked on another branch
+          # still runs on the default branch's instructions.
+          base_branch: ${{ github.event.repository.default_branch }}
           # The model is named here, ahead of the plan's flags, so the step that
           # spends the credential states which model it pays for.
           claude_args: >-
