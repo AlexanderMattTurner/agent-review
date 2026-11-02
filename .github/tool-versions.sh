@@ -29,7 +29,6 @@ PRE_COMMIT_VERSION=4.6.1
 # the release being the one we reviewed.
 MERGIRAF_VERSION=v0.18.0
 MERGIRAF_SHA256_linux_amd64=4de0986ff9155411dd105958b94362056d0055025db75369eddd3ecd25334cd2
-<<<<<<< local
 
 # lychee backs the pre-commit link check. lychee.sh downloads the release tarball
 # for the host from github.com and sha256-verifies it against these digests.
@@ -38,11 +37,8 @@ LYCHEE_SHA256_linux_amd64=1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5
 LYCHEE_SHA256_linux_arm64=91a7bd65685da41b90ccb9bc867a3d649a7818042dae04ff405e55a25bddee4c
 LYCHEE_SHA256_darwin_amd64=887503a9cff667d322b8d0892b40bf49976eb9507af8483220a3706cdad55978
 LYCHEE_SHA256_darwin_arm64=c9d3740ea2d891854d37116c9fba840f37b6e7c89d330e7db84ac333631c4977
-||||||| base
-=======
 
 # PyYAML for the workflow Python that reads YAML (resolver-ref.py, template-sync.sh's SYNC_PATHS
 # reader). run-with-pyyaml.sh installs it through uv at this pin, so no step relies on the runner
 # image shipping it.
 PYYAML_VERSION=6.0.3
->>>>>>> template
