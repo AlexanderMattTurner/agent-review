@@ -488,18 +488,13 @@ jobs:
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/review-ladder.py" plan
 
-      - name: Point the action's config restore at the default branch
-        # On any event whose payload names a PR base, the action ignores
-        # `base_branch` and runs `git fetch origin <pull_request.base.ref>` from
-        # the event file. That ref is author-chosen, and a stacked PR's base can
-        # be deleted while the job waits for a runner, which fails every attempt.
-        # Expressions read a separate copy of the event, so only the action sees this edit.
+      - name: Serve the trusted checkout as the PR's base
+        # The action restores its config from the event's base.ref, which can
+        # be deleted while this job queues, or a stacked PR's own branch.
         if: github.event.pull_request.base.ref != ''
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          jq --arg ref "${DEFAULT_BRANCH}" '.pull_request.base.ref = $ref' "${GITHUB_EVENT_PATH}" >"${RUNNER_TEMP}/pr-review-event.json"
-          mv "${RUNNER_TEMP}/pr-review-event.json" "${GITHUB_EVENT_PATH}"
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash "${REVIEWER_DIR}/serve-checkout-as-pr-base.sh" "${BASE_REF}"
 
       # One credential attempt. Every copy below is this same step: the judge
       # step after it sets LADDER_GO, LADDER_RUNG and LADDER_KIND for the next
@@ -540,10 +535,9 @@ jobs:
           # minting its GitHub App token, which would carry write scopes.
           github_token: ${{ github.token }}
           prompt: ${{ steps.plan.outputs.prompt }}
-          # INVARIANT — on a PR event the action restores CLAUDE.md
-          # and .claude/ over the checkout from the event's base.ref, which the
-          # step above set to this same branch. A dispatch restores nothing, and
-          # its checkout is already this branch.
+          # INVARIANT — the action ignores this input on a PR event and restores
+          # CLAUDE.md and .claude/ from `origin/<base.ref>`, which the step above
+          # serves from this checkout. A dispatch restores nothing.
           base_branch: ${{ github.event.repository.default_branch }}
           # The model is named here, ahead of the plan's flags, so the step that
           # spends the credential states which model it pays for.

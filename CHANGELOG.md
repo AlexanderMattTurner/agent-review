@@ -24,7 +24,7 @@ the prose from the release's commits.
 
 ### Fixed
 
-- A review no longer fails when the pull request's base branch is deleted while the read job waits for a runner. The read now restores `CLAUDE.md` and `.claude/` from the default branch. Before, it fetched the base branch named in the event, which failed every attempt with `couldn't find remote ref`. A stacked pull request also no longer runs on its base branch's `.claude/` config.
+- A review no longer fails when the pull request's base branch is deleted while the read job waits for a runner. The read and the merge-delta review now restore `CLAUDE.md` and `.claude/` from the trusted default-branch checkout. Before, they fetched the base branch named in the event, which failed every attempt with `couldn't find remote ref`. A stacked pull request also no longer runs on its base branch's `.claude/` config.
 
 - A review no longer ends with a sentence about the input sanitizer when the sanitizer found nothing. The summary mentions the sanitizer only when it neutralized something in the diff or the metadata.
 
