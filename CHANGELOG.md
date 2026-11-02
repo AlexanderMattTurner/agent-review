@@ -24,6 +24,8 @@ the prose from the release's commits.
 
 ### Fixed
 
+- A review no longer ends with a sentence about the input sanitizer when the sanitizer found nothing. The summary mentions the sanitizer only when it neutralized something in the diff or the metadata.
+
 - A pull request whose checks are green now gets its accumulated review. When a workflow run cancelled an older run of itself, the cancelled run stayed beside the newer one on the commit, and the dispatcher read it as a failing check. The pull request then waited forever for a read nothing would ask for. The dispatcher now reads only the newest run of each check, as GitHub's merge box does. A same-named job in another workflow still counts as its own check.
 
 - A warning found by the accumulated read no longer holds the merge. That read runs once every other check is green, so each of its warnings held a ready pull request for one more round, and a resolved thread fires no event that clears the gate. Its findings now carry a `<!-- read: delta -->` line, and the gate judges them by the new `delta_gating` severity list (`["blocking"]`), so its blocking findings still hold. Warnings from the first read still hold. A config with no `delta_gating` keeps the gate it had.
