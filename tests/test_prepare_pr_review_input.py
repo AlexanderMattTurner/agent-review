@@ -231,6 +231,11 @@ def _fake_bins(
         # is the authority on which files landed after the covered head.
         'if [[ "$*" == *"/compare/"* ]]; then\n'
         f'  cat "{tmp_path}/compare.json"\n'
+        # The review-thread read: one GraphQL page, put through the caller's own
+        # `--jq` by the real jq, as `gh --jq` does per page.
+        'elif [[ "$2" == "graphql" ]]; then\n'
+        '  while [[ $# -gt 0 && "$1" != "--jq" ]]; do shift; done\n'
+        f'  jq -c "$2" "{tmp_path}/threads.json"\n'
         'elif [[ "$1" == "api" ]]; then\n'
         # `--paginate` alone emits one JSON array per page, concatenated;
         # `--paginate --slurp` emits ONE array holding those pages. The two
@@ -287,6 +292,7 @@ def _fake_bins(
         ),
         encoding="utf-8",
     )
+    (tmp_path / "threads.json").write_text(json.dumps(THREADS_PAGE), encoding="utf-8")
     (tmp_path / "compare.json").write_text(
         json.dumps(compare or {"status": "identical", "files": []}), encoding="utf-8"
     )
@@ -518,6 +524,56 @@ def test_meta_lists_every_file_the_diff_contains(tmp_path: Path) -> None:
     meta = json.loads((input_dir / "meta.txt").read_text(encoding="utf-8"))
     assert [entry["path"] for entry in meta["files"]] == [
         f"p{page}-f{i}.py" for page in range(2) for i in range(3)
+    ]
+
+
+THREADS_PAGE = {
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "reviewThreads": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {
+                            "isResolved": True,
+                            "path": "a.py",
+                            "line": 3,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {"login": "r"},
+                                        "body": "b.py still retries",
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "path": "c.py",
+                            "line": 9,
+                            "comments": {
+                                "nodes": [{"author": {"login": "r"}, "body": "open"}]
+                            },
+                        },
+                    ],
+                }
+            }
+        }
+    }
+}
+
+
+def test_meta_carries_the_resolved_review_threads(tmp_path: Path) -> None:
+    """The reviewer judges a gap a resolved thread named, so meta.txt holds each
+    resolved thread's comments and leaves the open ones out."""
+    _, _, input_dir = _run(tmp_path, files=1, max_diff_lines=100)
+    meta = json.loads((input_dir / "meta.txt").read_text(encoding="utf-8"))
+    assert meta["resolved_threads"] == [
+        {
+            "path": "a.py",
+            "line": 3,
+            "comments": [{"author": "r", "body": "b.py still retries"}],
+        }
     ]
 
 

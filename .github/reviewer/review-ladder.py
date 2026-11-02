@@ -86,12 +86,21 @@ def shard_line(pr_input_dir: str, leg: str) -> str:
     if not manifest_path.is_file():
         return ""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    shard = next(s for s in manifest["shards"] if s["name"] == leg)
+    shards = manifest["shards"]
+    shard = next(s for s in shards if s["name"] == leg)
+    # Agent 5 judges the PR as a whole, so exactly one leg runs it; one per leg
+    # would post the same sibling site once per shard.
+    property_read = (
+        f" Agent 5 runs in this leg for the WHOLE PR: every shard's diff is in "
+        f"{pr_input_dir}/shards/, and it may anchor on any of them."
+        if leg == shards[0]["name"]
+        else f" Do not launch Agent 5: shard {shards[0]['name']} runs it for the whole PR."
+    )
     return (
-        f"\nSHARD: this PR is too large for one read, so {len(manifest['shards'])} "
+        f"\nSHARD: this PR is too large for one read, so {len(shards)} "
         f"readers each read one slice. The diff file holds ONLY shard {leg}, which is "
         f"these whole files: {', '.join(shard['files'])}. Other readers cover the rest "
-        "of the PR, so review only these files."
+        f"of the PR, so review only these files.{property_read}"
     )
 
 

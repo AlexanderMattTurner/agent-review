@@ -42,7 +42,7 @@ To do this, follow these steps precisely:
    File one finding for each of these shapes it finds. Each finding names the fix at the mechanism, never one more per-case patch:
    - **Sibling site.** Another site of the same mechanism, outside the diff or inside it, still produces the wrong answer: a second caller still does the old thing, a sibling check keeps the old logic, or a hand-typed copy of a list the PR made the single source.
    - **Kept compensator.** The diff fixes part of the cause but keeps the workaround the full fix removes: a timeout, a retry, a fallback, or a guard that still decides the outcome on the old wrong signal.
-   - **Admitted gap.** The PR body says the cause it names stays reachable, for example "left undone", "makes it rarer" or "diagnostics only" about that cause. An admission is a finding, never scope. Quote it.
+   - **Admitted gap.** The PR body says the cause it names stays reachable, for example "left undone", "makes it rarer" or "diagnostics only" about that cause, or a thread in the metadata file's `resolved_threads` named a gap the diff still leaves. An admission is a finding, never scope. Quote it.
    - **Already closed.** The base checkout already closes the cause, so the PR is redundant or fights the existing fix. Say where the base closes it.
    - **Per-case closure.** The PR closes the property one case at a time, for example a refusal that lists only the cases it has met. The next case of the same property stays open.
 

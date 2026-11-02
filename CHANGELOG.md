@@ -14,7 +14,7 @@ the prose from the release's commits.
 
 ### Added
 
-- A pull request typed `fix` or `perf` now gets a property read. The reviewer names the mechanism that produced the wrong answer, searches the whole base checkout for every site that mechanism reaches, and files a gating finding when a sibling site still breaks, a workaround the fix should remove stays, the PR body admits a gap, the base already closes the cause, or the fix covers only the cases it has met. Before, the reviewer judged only the diff, so it passed fixes that left the same defect live one file over.
+- A pull request typed `fix` or `perf` now gets a property read. The reviewer names the mechanism that produced the wrong answer, searches the whole base checkout for every site that mechanism reaches, and files a gating finding when a sibling site still breaks, a workaround the fix should remove stays, the PR body admits a gap, the base already closes the cause, or the fix covers only the cases it has met. The reviewer also reads the PR's resolved review threads, so a thread that named a gap and was resolved with no fix becomes a finding. Before, the reviewer judged only the diff, so it passed fixes that left the same defect live one file over.
 
 - A caller can now add its own review instructions without replacing the reviewer's prompt. Pass a file in your repository as `extra-instructions`, and the reviewer follows it after its own prompt, with your file winning where the two conflict. A caller that copied the whole prompt into `review-prompt` to add a few rules kept the copy it made, and missed every later change to the reviewer's prompt. A path that names no file stops the read before it spends a credential.
 
