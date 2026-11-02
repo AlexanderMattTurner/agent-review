@@ -24,6 +24,8 @@ the prose from the release's commits.
 
 ### Fixed
 
+- A review no longer fails when the pull request's base branch is deleted while the read job waits for a runner. The read now restores `CLAUDE.md` and `.claude/` from the default branch. Before, it fetched the base branch named in the event, which failed every attempt with `couldn't find remote ref`. A stacked pull request also no longer runs on its base branch's `.claude/` config.
+
 - A review no longer ends with a sentence about the input sanitizer when the sanitizer found nothing. The summary mentions the sanitizer only when it neutralized something in the diff or the metadata.
 
 - A pull request whose checks are green now gets its accumulated review. When a workflow run cancelled an older run of itself, the cancelled run stayed beside the newer one on the commit, and the dispatcher read it as a failing check. The pull request then waited forever for a read nothing would ask for. The dispatcher now reads only the newest run of each check, as GitHub's merge box does. A same-named job in another workflow still counts as its own check.
