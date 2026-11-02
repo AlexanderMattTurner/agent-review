@@ -34,11 +34,13 @@ trap 'rm -f "$items" "$body"' EXIT
 case "${FOLD_OUTCOME:-}" in
 failure) echo "- No read leg delivered a review (read job: ${READ_RESULT:-unknown}), so no review was posted." >>"$items" ;;
 skipped) echo "- The sanitized input could not be fetched, so nothing was read or posted." >>"$items" ;;
+success | "") ;;
+*) echo "- The step that combines the read legs ended ${FOLD_OUTCOME}, so no review was posted." >>"$items" ;;
 esac
 incomplete="${PR_INPUT_DIR:-}/incomplete-read.txt"
 if [[ -n "${PR_INPUT_DIR:-}" && -s "$incomplete" ]]; then
   # File names come from the PR, so they sit in a fence with no backtick that could close it.
-  printf -- '- Some files went unread:\n\n  ```text\n  %s\n  ```\n' "$(tr -d '`\n' <"$incomplete")" >>"$items"
+  printf -- "- Some files went unread:\n\n  \`\`\`text\n  %s\n  \`\`\`\n" "$(tr -d '`\n' <"$incomplete")" >>"$items"
 fi
 if [[ -n "${REVIEWER_SHORTFALL_FILE:-}" && -s "$REVIEWER_SHORTFALL_FILE" ]]; then
   sed 's/^/- /' "$REVIEWER_SHORTFALL_FILE" >>"$items"
@@ -53,7 +55,7 @@ if [[ ! -s "$items" ]]; then
 fi
 
 {
-  printf 'The automated reviewer fell short on %s#%s at head `%s`:\n\n' "$GH_REPO" "$PR" "$HEAD_SHA"
+  printf "The automated reviewer fell short on %s#%s at head \`%s\`:\n\n" "$GH_REPO" "$PR" "$HEAD_SHA"
   cat "$items"
   printf '\nThe merge gate judged the findings the review has. Run: %s\n' "$RUN_URL"
 } >"$body"
