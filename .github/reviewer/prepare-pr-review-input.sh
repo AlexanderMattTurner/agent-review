@@ -36,9 +36,12 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # api.github.com/graphql on a `gh pr view` is the observed shape.
 # shellcheck source=.github/reviewer/lib-ci-retry.sh disable=SC1091
 source "$here/lib-ci-retry.sh"
+# shellcheck source=.github/reviewer/lib/review-threads.bash disable=SC1091
+source "$here/lib/review-threads.bash"
 
 : "${PR:?PR number required}"
 : "${PR_INPUT_DIR:?PR_INPUT_DIR required}"
+: "${GH_REPO:?GH_REPO required — owner/name for the review-thread read}"
 # The head this run was dispatched for. Every coverage claim below names it, so a
 # run that cannot say which commit it read must not run at all.
 : "${HEAD_SHA:?HEAD_SHA required — the head this read covers}"
@@ -78,8 +81,9 @@ gh_err="$(mktemp)"
 meta_pr="$(mktemp)"
 meta_pages="$(mktemp)"
 meta_raw="$(mktemp)"
+meta_threads="$(mktemp)"
 sanitizer_crash="$(mktemp)"
-trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$sanitizer_crash"' EXIT
+trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$meta_threads" "$sanitizer_crash"' EXIT
 
 # `gh pr diff` asks for the REST diff media type, which GitHub refuses with HTTP
 # 406 above 300 CHANGED FILES — a cap on file count, not diff size, so even a
@@ -273,14 +277,19 @@ emit_output "diff_lines=$diff_lines"
 # separate jq. Both payloads go to FILES, not jq's argv: `--argjson` puts the whole value
 # on the command line, and a wide PR's files payload dies with E2BIG above roughly 2 MB —
 # exactly the PRs the files-API fallback serves. `--slurpfile` wraps each in an array.
-retry_stdout gh pr view "$PR" --json title,body,author >"$meta_pr"
+retry_stdout gh pr view "$PR" --json title,body,author,baseRefName >"$meta_pr"
 retry_stdout gh api --paginate --slurp "repos/{owner}/{repo}/pulls/${PR}/files" >"$meta_pages"
+# The RESOLVED review threads, so the reviewer can judge a gap a thread named and its
+# resolution left in place. They are as untrusted as the body and take the same sanitizer pass.
+fetch_review_threads "${GH_REPO%%/*}" "${GH_REPO#*/}" "$PR" \
+  '[.[] | select(.isResolved) | {path, line, comments: [.comments.nodes[] | {author: .author.login, body}]}]' 20 |
+  jq -s 'add // []' >"$meta_threads"
 # Per-file churn stays in the projection: a reviewer sizes a change by it and uses it to
 # find the hunk that dominates the diff. `status` keeps the REST spelling rather than
 # mapping to the GraphQL `changeType` enum, which would invent values GitHub never emits
 # for the members that do not correspond.
-jq -n --slurpfile pr "$meta_pr" --slurpfile pages "$meta_pages" \
-  '$pr[0] + {files: [$pages[0][][] | {path: .filename, additions, deletions, status}]}' >"$meta_raw"
+jq -n --slurpfile pr "$meta_pr" --slurpfile pages "$meta_pages" --slurpfile threads "$meta_threads" \
+  '$pr[0] + {resolved_threads: $threads[0], files: [$pages[0][][] | {path: .filename, additions, deletions, status}]}' >"$meta_raw"
 sanitize_into metadata "${PR_INPUT_DIR}/meta.txt" "${PR_INPUT_DIR}/meta.report.txt" <"$meta_raw"
 
 report="${PR_INPUT_DIR}/sanitizer-report.txt"

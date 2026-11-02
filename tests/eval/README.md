@@ -25,6 +25,7 @@ with no such dependency ships an empty `tree/`.
 | `kind`           | `"defect"` \| `"non_bug"`     | Whether a correct review must file a blocking/warning finding.                                                             |
 | `source`         | string                        | `<owner>/<repo>@<sha>` the diff came from.                                                                                 |
 | `summary`        | string                        | One sentence describing the change.                                                                                        |
+| `title`          | string, optional              | The real PR title `run-live.py` shows the model. Absent, it shows `summary`. Set it when `summary` states the answer.      |
 | `must_flag`      | array of `{path, why}`        | Paths a correct review must raise a finding on. Non-empty for every `defect` case.                                         |
 | `must_not_flag`  | array of strings              | Paths a correct review must NOT raise a finding on (the false-positive traps).                                             |
 | `context_expect` | array of `{identifier, path}` | Identifier/path pairs that must appear in `build-review-context.py`'s `context.txt`, under that identifier's `##` section. |
@@ -41,7 +42,7 @@ context extraction — no live model calls, safe for CI.
 `tests/eval/run-live.py` runs the real `claude` CLI against a bounded number of
 cases. It costs real money and is never invoked by CI or by any test; run it by
 hand. Its report quotes, per `must_flag` entry, every BLOCKING or WARNING
-finding the model raised on that path, beside the entry's own `why`: a nit on
+finding the model raised on that path or whose body names it (a site outside the diff anchors on a changed line elsewhere), beside the entry's own `why`: a nit on
 the right file is not the defect caught, and only a reader comparing the two
 texts can say whether the model found this defect or another one. A
 `must_not_flag` hit is quoted with its severity for the same reason.

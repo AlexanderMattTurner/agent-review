@@ -485,6 +485,7 @@ jobs:
           EXTRA_INSTRUCTIONS_FILE: ${{ inputs.extra-instructions }}
           PR_NUMBER: ${{ needs.decide.outputs.pr }}
           REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/review-ladder.py" plan
 

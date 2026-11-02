@@ -303,3 +303,37 @@ def test_a_shard_leg_is_told_which_files_its_slice_holds(
         "b.py, c.py." in output
     )
     assert "2 readers each read one slice" in output
+    assert (
+        "Do not launch Agent 5: shard shard-00.diff runs it for the whole PR." in output
+    )
+
+
+def test_only_the_first_shard_leg_runs_the_property_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One leg per shard running Agent 5 posts one sibling site once per shard, so
+    the first leg alone runs it, over every shard's diff."""
+    shards = tmp_path / "pr-input" / "shards"
+    shards.mkdir(parents=True)
+    (shards / "manifest.json").write_text(
+        json.dumps({"shards": [{"name": "shard-00.diff", "files": ["a.py"]}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("READ_LEG", "shard-00.diff")
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    assert (
+        f"Agent 5 runs in this leg for the WHOLE PR: every shard's diff is in {shards}/"
+        in output
+    )
+
+
+def test_the_read_is_told_which_branch_its_checkout_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkout is the default branch, not the PR's base, so a backport's
+    "base already closes it" verdict needs the branch named to be refused."""
+    monkeypatch.setenv("DEFAULT_BRANCH", "trunk")
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    assert "the base checkout of the default branch `trunk`" in output
