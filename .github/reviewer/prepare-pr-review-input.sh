@@ -295,10 +295,9 @@ report="${PR_INPUT_DIR}/sanitizer-report.txt"
   fi
 } >"$report"
 
+# An empty report means nothing was neutralized, and the reviewer then says nothing about it.
 if [[ -s "$report" ]]; then
   echo "sanitizer neutralized injection-shaped content; see ${report}" >&2
-else
-  echo "(sanitizer found no injection-shaped content in the diff or metadata)" >"$report"
 fi
 
 # Size routing happens AFTER sanitization and elision, so the shards are slices

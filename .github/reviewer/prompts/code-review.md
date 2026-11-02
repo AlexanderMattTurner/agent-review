@@ -57,7 +57,7 @@ To do this, follow these steps precisely:
 5. Filter out any issues that were not validated in step 4, and any issue whose confidence is below 80. This step will give us our list of high signal issues for our review.
 
 6. Return the structured output. Its schema is enforced, so fill each field as follows:
-   - `summary`: at most 120 words. State the verdict in the first line. If the sanitizer report lists neutralized content, say so, because a human should know the diff carried it. If no issues survived step 5, write "No issues found. Checked for bugs and CLAUDE.md compliance."
+   - `summary`: at most 120 words. State the verdict in the first line. If the sanitizer report lists neutralized content, say so, because a human should know the diff carried it. If the report is empty, do not mention the sanitizer. If no issues survived step 5, write "No issues found. Checked for bugs and CLAUDE.md compliance."
    - `findings`: ONE entry per unique issue that survived step 5. Never add an issue that did not survive it.
    - `category`: `bug` for a logic or compile error, `security` for a security issue, `claude-md` for a CLAUDE.md violation.
    - `confidence`: the validator's score from step 4.
