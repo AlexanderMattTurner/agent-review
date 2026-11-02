@@ -236,9 +236,7 @@ jobs:
       - name: Serve the trusted checkout as the PR's base
         # After prepare: its fetch of refs/pull/N/head must still reach GitHub.
         if: steps.prepare.outputs.has_deltas == 'true'
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: bash .github/reviewer/serve-checkout-as-pr-base.sh "${BASE_REF}"
+        run: bash .github/reviewer/serve-checkout-as-pr-base.sh
 
       - name: Review the merge deltas with Claude (Sonnet)
         if: steps.prepare.outputs.has_deltas == 'true'

@@ -491,10 +491,7 @@ jobs:
       - name: Serve the trusted checkout as the PR's base
         # The action restores its config from the event's base.ref, which can
         # be deleted while this job queues, or a stacked PR's own branch.
-        if: github.event.pull_request.base.ref != ''
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: bash "${REVIEWER_DIR}/serve-checkout-as-pr-base.sh" "${BASE_REF}"
+        run: bash "${REVIEWER_DIR}/serve-checkout-as-pr-base.sh"
 
       # One credential attempt. Every copy below is this same step: the judge
       # step after it sets LADDER_GO, LADDER_RUNG and LADDER_KIND for the next

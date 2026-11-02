@@ -6,6 +6,7 @@ URL the script does not redirect to an empty local repository, so a fetch that
 escaped finds no branch instead of reaching the network.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -19,9 +20,9 @@ REPO = "example-owner/example-repo"
 DELETED_BASE = "claude/stacked-parent"
 
 
-def git(cwd: Path, *args: str) -> str:
+def git(cwd: Path, *args: str, check: bool = True) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args], cwd=cwd, check=check, capture_output=True, text=True
     ).stdout
 
 
@@ -62,12 +63,21 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return ws
 
 
-def run_script(ws: Path, repository: str = REPO) -> subprocess.CompletedProcess[str]:
+def run_script(
+    ws: Path, repository: str = REPO, payload: dict[str, object] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the script with an event file shaped like a pull_request_target one,
+    or like `payload` when given."""
+    event = ws.parent / "event.json"
+    if payload is None:
+        payload = {"pull_request": {"base": {"ref": DELETED_BASE}}}
+    event.write_text(json.dumps(payload), encoding="utf-8")
     return subprocess.run(
-        ["bash", str(SCRIPT), DELETED_BASE],
+        ["bash", str(SCRIPT)],
         cwd=ws,
         env={
             **os.environ,
+            "GITHUB_EVENT_PATH": str(event),
             "RUNNER_TEMP": str(ws.parent),
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": repository,
@@ -101,3 +111,12 @@ def test_refuses_when_the_rule_does_not_cover_origin(checkout: Path) -> None:
 
     assert result.returncode == 1
     assert f"origin serves '' for {DELETED_BASE}, not HEAD" in result.stderr
+
+
+def test_a_payload_without_a_pr_base_changes_nothing(checkout: Path) -> None:
+    result = run_script(checkout, payload={"inputs": {"pr-number": "7"}})
+
+    assert result.returncode == 0
+    assert (
+        git(checkout, "config", "--local", "--get-regexp", "^url\\.", check=False) == ""
+    )

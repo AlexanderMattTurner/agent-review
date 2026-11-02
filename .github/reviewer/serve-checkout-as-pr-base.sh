@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Make `git fetch origin <base-ref>` in the current checkout return the checkout's
-# own HEAD. Args: <base-ref>, the PR base the event payload names.
+# Make `git fetch origin <base>` in the current checkout return the checkout's
+# own HEAD, for the base that $GITHUB_EVENT_PATH names. Takes no arguments.
 #
 # PROBLEM CLASS — claude-code-action restores CLAUDE.md and .claude/ from the
 # PR's base branch on every PR event. It reads `pull_request.base.ref` from the
@@ -19,7 +19,10 @@
 # later fetch of this repository reads the mirror.
 set -euo pipefail
 
-base_ref="${1:?usage: serve-checkout-as-pr-base.sh <base-ref>}"
+# The same file the action reads. A payload with no PR base (a dispatch) gets no
+# restore from the action, so there is nothing to serve.
+base_ref="$(jq -r '.pull_request.base.ref // empty' "${GITHUB_EVENT_PATH:?}")"
+[[ -n "$base_ref" ]] || exit 0
 mirror="${RUNNER_TEMP:?}/trusted-origin"
 
 [[ -d "${mirror}.git" ]] || git init -q --bare "${mirror}.git"
