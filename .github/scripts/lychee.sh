@@ -19,14 +19,14 @@ pins="${here}/../tool-versions.sh"
 source "$pins"
 
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) target=x86_64-unknown-linux-gnu digest="${LYCHEE_SHA256_linux_amd64:-}" ;;
-  Linux-aarch64) target=aarch64-unknown-linux-gnu digest="${LYCHEE_SHA256_linux_arm64:-}" ;;
-  Darwin-x86_64) target=x86_64-apple-darwin digest="${LYCHEE_SHA256_darwin_amd64:-}" ;;
-  Darwin-arm64) target=aarch64-apple-darwin digest="${LYCHEE_SHA256_darwin_arm64:-}" ;;
-  *)
-    echo "lychee.sh: no pinned lychee build for $(uname -s)-$(uname -m)." >&2
-    exit 1
-    ;;
+Linux-x86_64) target=x86_64-unknown-linux-gnu digest="${LYCHEE_SHA256_linux_amd64:-}" ;;
+Linux-aarch64) target=aarch64-unknown-linux-gnu digest="${LYCHEE_SHA256_linux_arm64:-}" ;;
+Darwin-x86_64) target=x86_64-apple-darwin digest="${LYCHEE_SHA256_darwin_amd64:-}" ;;
+Darwin-arm64) target=aarch64-apple-darwin digest="${LYCHEE_SHA256_darwin_arm64:-}" ;;
+*)
+  echo "lychee.sh: no pinned lychee build for $(uname -s)-$(uname -m)." >&2
+  exit 1
+  ;;
 esac
 # An empty pin must never degrade into running an unverified binary.
 [[ -n "${LYCHEE_VERSION:-}" && -n "$digest" ]] || {
