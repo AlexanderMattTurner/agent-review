@@ -1,0 +1,17 @@
+{
+  "kind": "defect",
+  "source": "AlexanderMattTurner/agent-glovebox@ef8b37506238d4707c7b13ccefa8d37cebede976",
+  "summary": "PR #9439 (diff from its base 6f2c65fc to ef8b3750) runs the kit image build and cosign under a login-free Docker config so a stale ghcr.io login stops failing public reads, but two other host builds of the same public images still send that login.",
+  "must_flag": [
+    {
+      "path": "bin/lib/kata/engine-build.sh",
+      "why": "line 43 runs `docker build` of engine.Dockerfile under the user's own DOCKER_CONFIG, so the stale ghcr.io login the PR exists to bypass still fails the Kata engine build with `denied`; the fix is one login-free wrapper every public read calls."
+    },
+    {
+      "path": "bin/lib/vm/template.bash",
+      "why": "base line 771 (head line 792, in _vm_rescue_export, outside the diff's hunks) runs `docker buildx build` of the signed image with the stored login, the same mechanism; the PR's own later commit 2c4b2f35 moves both sites onto one _vm_without_registry_logins."
+    }
+  ],
+  "must_not_flag": [],
+  "context_expect": []
+}
