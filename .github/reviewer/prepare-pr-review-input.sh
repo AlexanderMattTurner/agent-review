@@ -277,7 +277,7 @@ emit_output "diff_lines=$diff_lines"
 # separate jq. Both payloads go to FILES, not jq's argv: `--argjson` puts the whole value
 # on the command line, and a wide PR's files payload dies with E2BIG above roughly 2 MB —
 # exactly the PRs the files-API fallback serves. `--slurpfile` wraps each in an array.
-retry_stdout gh pr view "$PR" --json title,body,author >"$meta_pr"
+retry_stdout gh pr view "$PR" --json title,body,author,baseRefName >"$meta_pr"
 retry_stdout gh api --paginate --slurp "repos/{owner}/{repo}/pulls/${PR}/files" >"$meta_pages"
 # The RESOLVED review threads, so the reviewer can judge a gap a thread named and its
 # resolution left in place. They are as untrusted as the body and take the same sanitizer pass.

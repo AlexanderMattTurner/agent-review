@@ -189,7 +189,12 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
                 "gating_findings": [
                     _quote(f)
                     for f in findings
-                    if f.get("path") == entry["path"] and _is_gating(f)
+                    # A site outside the diff anchors elsewhere and names its path in the body.
+                    if (
+                        f.get("path") == entry["path"]
+                        or entry["path"] in str(f.get("body") or "")
+                    )
+                    and _is_gating(f)
                 ],
             }
             for entry in case["must_flag"]

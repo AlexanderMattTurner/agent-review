@@ -326,3 +326,14 @@ def test_only_the_first_shard_leg_runs_the_property_read(
         f"Agent 5 runs in this leg for the WHOLE PR: every shard's diff is in {shards}/"
         in output
     )
+
+
+def test_the_read_is_told_which_branch_its_checkout_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkout is the default branch, not the PR's base, so a backport's
+    "base already closes it" verdict needs the branch named to be refused."""
+    monkeypatch.setenv("DEFAULT_BRANCH", "trunk")
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    assert "the base checkout of the default branch `trunk`" in output
