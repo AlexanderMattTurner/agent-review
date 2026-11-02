@@ -96,8 +96,10 @@ def test_downloads_once_then_runs_the_cached_binary(sandbox: Path) -> None:
     first = run(sandbox, "--offline", "a.md")
     second = run(sandbox, "--offline", "b.md")
 
-    assert (first.returncode, first.stdout) == (0, "fake-lychee --offline a.md\n")
-    assert (second.returncode, second.stdout) == (0, "fake-lychee --offline b.md\n")
+    assert first.returncode == 0
+    assert first.stdout == "fake-lychee --offline a.md\n"
+    assert second.returncode == 0
+    assert second.stdout == "fake-lychee --offline b.md\n"
     calls = curl_calls(sandbox)
     assert len(calls) == 1
     assert (
