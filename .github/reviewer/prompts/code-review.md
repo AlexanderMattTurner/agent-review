@@ -48,7 +48,7 @@ To do this, follow these steps precisely:
 
    Anchor each property finding on the changed line that implements the fix it faults. Its `body` names any site outside the diff as `path:line` in the base checkout.
 
-   Example: a PR makes `ALLOWED_HOSTS` in `config.py` the single list of trusted hosts and points the Python checker at it. A grep for one of its host names finds `scripts/check.sh:12`, which still holds a hand-typed copy. The finding anchors on the new `ALLOWED_HOSTS` line, names `scripts/check.sh:12`, and names the fix: the shell check reads the one list.
+   Example: a PR makes `ALLOWED_HOSTS` in `config.py` the single list of trusted hosts and points the Python checker at it. A grep for one of its host names finds a line in `scripts/check.sh` that still holds a hand-typed copy. The finding anchors on the new `ALLOWED_HOSTS` line, names that `scripts/check.sh` line by `path:line`, and names the fix: the shell check reads the one list.
 
    **CRITICAL: We only want HIGH SIGNAL issues.** Flag issues where:
    - The code will fail to compile or parse (syntax errors, type errors, missing imports, unresolved references)
