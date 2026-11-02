@@ -489,12 +489,12 @@ jobs:
         run: /usr/bin/python3 "${REVIEWER_DIR}/review-ladder.py" plan
 
       - name: Point the action's config restore at the default branch
-        # Under pull_request_target the action ignores `base_branch` and runs
-        # `git fetch origin <pull_request.base.ref>` from the event file. That
-        # ref is author-chosen, and a stacked PR's base can be deleted while the
-        # job waits for a runner, which fails every attempt. Expressions read a
-        # separate copy of the event, so only the action sees this edit.
-        if: github.event_name == 'pull_request_target'
+        # On any event whose payload names a PR base, the action ignores
+        # `base_branch` and runs `git fetch origin <pull_request.base.ref>` from
+        # the event file. That ref is author-chosen, and a stacked PR's base can
+        # be deleted while the job waits for a runner, which fails every attempt.
+        # Expressions read a separate copy of the event, so only the action sees this edit.
+        if: github.event.pull_request.base.ref != ''
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
@@ -540,7 +540,7 @@ jobs:
           # minting its GitHub App token, which would carry write scopes.
           github_token: ${{ github.token }}
           prompt: ${{ steps.plan.outputs.prompt }}
-          # INVARIANT — under pull_request_target the action restores CLAUDE.md
+          # INVARIANT — on a PR event the action restores CLAUDE.md
           # and .claude/ over the checkout from the event's base.ref, which the
           # step above set to this same branch. A dispatch restores nothing, and
           # its checkout is already this branch.
