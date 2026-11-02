@@ -48,6 +48,8 @@ To do this, follow these steps precisely:
 
    A site outside the diff anchors on the nearest changed line. Its `body` names the outside site as `path:line` in the base checkout.
 
+   Example: a PR runs one `docker build` under a login-free config so a stale registry login stops failing public pulls. Grep for `docker build` finds `lib/engine-build.sh:43`, which still runs with the stored login. The finding anchors on the PR's new wrapper line, names `lib/engine-build.sh:43` in `body`, and names the fix: one login-free wrapper that every public read calls.
+
    **CRITICAL: We only want HIGH SIGNAL issues.** Flag issues where:
    - The code will fail to compile or parse (syntax errors, type errors, missing imports, unresolved references)
    - The code will definitely produce wrong results regardless of inputs (clear logic errors)
