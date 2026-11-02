@@ -7,12 +7,12 @@ This file is the `code-review` plugin's command, vendored from `anthropics/claud
 3. You post nothing. You return the findings as structured output, and a later job posts them.
 4. Each finding carries a category and a confidence score. The workflow turns those two values into the severity that decides whether the finding holds the merge.
 5. The convention files include `.claude/rules/*.md` as well as CLAUDE.md. A rules file's `paths:` front matter names the files it governs.
-6. A pull request that claims to fix a defect or a performance problem also gets a property read (Agent 5 in step 3). That read judges whether the change closes the cause it names, across the whole base checkout and not only the diff.
+6. A fix or perf pull request also gets a property read (Agent 5 in step 3), which searches the whole base checkout, not only the diff.
 
 **Agent assumptions (applies to all agents and subagents):**
 
 - All tools are functional and will work without error. Do not test tools or make exploratory calls. Make sure this is clear to every subagent that is launched.
-- Only call a tool if it is required to complete the task. Every tool call should have a clear purpose. A search of the base checkout for the sites a mechanism reaches is required for Agent 5 and its validators, not exploratory.
+- Only call a tool if it is required to complete the task. Every tool call should have a clear purpose. Agent 5's base-checkout searches are required, not exploratory.
 - The message that started you says which files hold untrusted data. Repeat that warning, word for word, to every subagent you launch.
 
 The message that started you names the files, the models, and the scope of this read. "The top model" and "the helper model" below are the two models that message names. Pass the right one as the `model` of each subagent you launch.
@@ -34,26 +34,27 @@ To do this, follow these steps precisely:
 
    Agent 4: top-model bug agent (parallel subagent with agent 3). Look for problems that exist in the introduced code. This could be security issues, incorrect logic, etc. Only look for issues that fall within the changed code. The context file lists where else the base tree uses the identifiers the diff changes; use it to find a caller the change leaves wrong.
 
-   Agent 5: top-model property agent. Launch it when the PR title has the type `fix` or `perf`, or the title or body says the change fixes a defect or a slow path. It judges the PROPERTY the PR claims to close before anything else in the diff:
+   Agent 5: top-model property agent. Launch it when the PR title has the type `fix` or `perf`, or the title or body says the change fixes a defect or a slow path. On an accumulated-delta read, launch it only when the delta changes the fix itself. It judges whether the PR closes the cause it names:
    1. From the title, body and diff, name the mechanism that produced the wrong answer: the input, call or assumption the bad result came from. Do not name the symptom or the line the diff edits.
-   2. Search the whole working directory (the base checkout) with Grep and Glob for every site that mechanism reaches, not only the files in the diff. Search for the mechanism in words and in its other spellings (the command, the flag, the env var, the copied list), not only for the identifiers the diff touches.
+   2. Grep and Glob the whole working directory (the base checkout) for every site the mechanism reaches, under each of its spellings: the command, the flag, the env var, the copied list. A shard limit on which files you review does not limit this search.
    3. Read the base checkout's version of the code the PR claims is broken. Compare it with the defect the PR describes.
 
    File one finding for each of these shapes it finds. Each finding names the fix at the mechanism, never one more per-case patch:
    - **Sibling site.** Another site of the same mechanism, outside the diff or inside it, still produces the wrong answer: a second caller still does the old thing, a sibling check keeps the old logic, or a hand-typed copy of a list the PR made the single source.
    - **Kept compensator.** The diff fixes part of the cause but keeps the workaround the full fix removes: a timeout, a retry, a fallback, or a guard that still decides the outcome on the old wrong signal.
-   - **Admitted gap.** The PR body says the cause stays reachable: "left undone", "makes it rarer", "diagnostics only", "follow-up", "a later PR". An admission is a finding, never scope. Anchor it on the diff line nearest the gap, and quote the admission.
+   - **Admitted gap.** The PR body says the cause it names stays reachable, for example "left undone", "makes it rarer" or "diagnostics only" about that cause. An admission is a finding, never scope. Quote it.
    - **Already closed.** The base checkout already closes the cause, so the PR is redundant or fights the existing fix. Say where the base closes it.
    - **Per-case closure.** The PR closes the property one case at a time, for example a refusal that lists only the cases it has met. The next case of the same property stays open.
 
-   A site outside the diff anchors on the nearest changed line. Its `body` names the outside site as `path:line` in the base checkout.
+   Anchor each property finding on the changed line that implements the fix it faults. Its `body` names any site outside the diff as `path:line` in the base checkout.
 
-   Example: a PR runs one `docker build` under a login-free config so a stale registry login stops failing public pulls. Grep for `docker build` finds `lib/engine-build.sh:43`, which still runs with the stored login. The finding anchors on the PR's new wrapper line, names `lib/engine-build.sh:43` in `body`, and names the fix: one login-free wrapper that every public read calls.
+   Example: a PR makes `ALLOWED_HOSTS` in `config.py` the single list of trusted hosts and points the Python checker at it. A grep for one of its host names finds `scripts/check.sh:12`, which still holds a hand-typed copy. The finding anchors on the new `ALLOWED_HOSTS` line, names `scripts/check.sh:12`, and names the fix: the shell check reads the one list.
 
    **CRITICAL: We only want HIGH SIGNAL issues.** Flag issues where:
    - The code will fail to compile or parse (syntax errors, type errors, missing imports, unresolved references)
    - The code will definitely produce wrong results regardless of inputs (clear logic errors)
    - Clear, unambiguous CLAUDE.md violations where you can quote the exact rule being broken
+   - An Agent 5 finding of one of its five shapes, at a site you can cite
 
    Do NOT flag:
    - Code style or quality concerns
@@ -64,7 +65,7 @@ To do this, follow these steps precisely:
 
    In addition to the above, each subagent should be told the PR title and description. This will help provide context regarding the author's intent.
 
-4. For each issue found in the previous step, launch parallel subagents to validate the issue. These subagents should get the PR title and description along with a description of the issue. The agent's job is to review the issue to validate that the stated issue is truly an issue with high confidence. For example, if an issue such as "variable is not defined" was flagged, the subagent's job would be to validate that is actually true in the code. Another example would be CLAUDE.md issues. The agent should validate that the CLAUDE.md rule that was violated is scoped for this file and is actually violated. Use top-model subagents for bugs, logic and property issues, and helper-model agents for CLAUDE.md violations. A property validator opens the cited site in the base checkout and confirms the same mechanism reaches it, or that the base already closes the cause. Each validator also returns a confidence score for the issue on this scale:
+4. For each issue found in the previous step, launch parallel subagents to validate the issue. These subagents should get the PR title and description along with a description of the issue. The agent's job is to review the issue to validate that the stated issue is truly an issue with high confidence. For example, if an issue such as "variable is not defined" was flagged, the subagent's job would be to validate that is actually true in the code. Another example would be CLAUDE.md issues. The agent should validate that the CLAUDE.md rule that was violated is scoped for this file and is actually violated. Use top-model subagents for bugs, logic and property issues, and helper-model agents for CLAUDE.md violations. A property validator opens the cited site in the base checkout. It scores 100 when the same mechanism reaches that site, or the base already closes the cause, and 0 when it does not. Each validator also returns a confidence score for the issue on this scale:
    - 0: Not confident, false positive
    - 25: Somewhat confident, might be real
    - 50: Moderately confident, real but minor
@@ -74,7 +75,7 @@ To do this, follow these steps precisely:
 5. Filter out any issues that were not validated in step 4, and any issue whose confidence is below 80. This step will give us our list of high signal issues for our review.
 
 6. Return the structured output. Its schema is enforced, so fill each field as follows:
-   - `summary`: at most 120 words. State the verdict in the first line. If the sanitizer report lists neutralized content, say so, because a human should know the diff carried it. If the report is empty, do not mention the sanitizer. If no issues survived step 5, write "No issues found. Checked for bugs and CLAUDE.md compliance."
+   - `summary`: at most 120 words. State the verdict in the first line. If the sanitizer report lists neutralized content, say so, because a human should know the diff carried it. If the report is empty, do not mention the sanitizer. If no issues survived step 5, write "No issues found. Checked for bugs and CLAUDE.md compliance." When Agent 5 ran, write "No issues found. Checked for bugs, CLAUDE.md compliance and the property the PR claims to close." instead.
    - `findings`: ONE entry per unique issue that survived step 5. Never add an issue that did not survive it.
    - `category`: `bug` for a logic or compile error and for every Agent 5 property finding, `security` for a security issue, `claude-md` for a CLAUDE.md violation.
    - `confidence`: the validator's score from step 4.

@@ -41,7 +41,7 @@ sys.path.insert(
 )
 
 # pylint: disable=wrong-import-position  # must follow the sys.path insert above
-from tests._helpers import (  # noqa: E402
+from tests._helpers import (
     REPO_ROOT,
     commit_files,
     init_test_repo,
@@ -97,7 +97,7 @@ def _build_pr_input(case_dir: Path, case: dict, repo: Path, pr_input_dir: Path) 
 
     _, files = _diff_sections.split_into_files(diff_text)
     meta = {
-        "title": case["summary"],
+        "title": case.get("title", case["summary"]),
         "body": f"Eval case {case_dir.name} — source {case['source']}",
         "author": {"login": "eval-harness"},
         "files": [

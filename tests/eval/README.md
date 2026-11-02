@@ -25,6 +25,7 @@ with no such dependency ships an empty `tree/`.
 | `kind`           | `"defect"` \| `"non_bug"`     | Whether a correct review must file a blocking/warning finding.                                                             |
 | `source`         | string                        | `<owner>/<repo>@<sha>` the diff came from.                                                                                 |
 | `summary`        | string                        | One sentence describing the change.                                                                                        |
+| `title`          | string, optional              | The real PR title `run-live.py` shows the model. Absent, it shows `summary`. Set it when `summary` states the answer.      |
 | `must_flag`      | array of `{path, why}`        | Paths a correct review must raise a finding on. Non-empty for every `defect` case.                                         |
 | `must_not_flag`  | array of strings              | Paths a correct review must NOT raise a finding on (the false-positive traps).                                             |
 | `context_expect` | array of `{identifier, path}` | Identifier/path pairs that must appear in `build-review-context.py`'s `context.txt`, under that identifier's `##` section. |
