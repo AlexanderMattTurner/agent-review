@@ -12,8 +12,8 @@
 # one — nor a fold that picks by array order instead of submittedAt.
 #
 # Consumers: decide-pr-review-trigger.sh, recheck-pr-review-owed.sh,
-# review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh,
-# post-oversized-review.sh, and .github/scripts/auto-approve-skipped-pr.sh.
+# review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh, and
+# .github/scripts/auto-approve-skipped-pr.sh.
 
 # retry_stdout: sourced here rather than assumed, so a consumer gets the retry
 # ladder by sourcing this file alone. lib-ci-retry.sh guards against double-source.
@@ -69,9 +69,7 @@ reviewer_reviews_ndjson() {
 
 # The markers that say a review SPENT this PR's read budget come from
 # review-markers.bash. WHOLE_DIFF_READ_MARKER goes on the summary review
-# post-pr-review.sh posts once the agent has read the diff. OVERSIZED_REVIEW_MARKER
-# goes on the notice post-oversized-review.sh posts for a diff too large to read;
-# that run still spent a job, so it still spends budget. AUTO_APPROVAL_MARKER is on
+# post-pr-review.sh posts once the agent has read the diff. AUTO_APPROVAL_MARKER is on
 # the stand-in approval auto-approve-skipped-pr.sh posts, the one non-read this
 # library can name.
 #
@@ -224,11 +222,11 @@ require_delta_review_budget() {
 # first pass.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
-    jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
+    jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" \
       --arg marked_from "${READS_MARKED_FROM:-}" --arg approval "$AUTO_APPROVAL_MARKER" \
       "select((.body // \"\") as \$b
               | ([\$b | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length == 0)
-              and ((\$b | contains(\$read)) or (\$b | contains(\$oversized))
+              and ((\$b | contains(\$read))
                 or (\$marked_from != \"\" and ((\$b | contains(\$approval)) | not)
                     and ((.submittedAt // \"\") < \$marked_from))))"
 }

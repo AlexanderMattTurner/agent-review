@@ -62,6 +62,7 @@ def _call(
         ],
         capture_output=True,
         text=True,
+        check=False,
         env={
             **server.env,
             "REVIEWER_LOGIN_BARE": REVIEWER,
@@ -196,6 +197,7 @@ def _lib_marker(name: str) -> str:
         ["bash", "-c", f'source "$1"; printf %s "${name}"', "_", str(LIB)],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout, f"the library must define {name}"
@@ -267,17 +269,15 @@ def test_an_unmarked_bot_review_spends_no_read(github):
     assert _latest(github) == ""
 
 
-def test_the_oversized_notice_spends_a_read(github):
-    """A run that found the diff too large to read still spent the job — the
-    checkout, the Node setup, the sanitizer install and the diff fetch. Excluded
-    from the count it would re-run on every push forever, because the notice adds
-    nothing the next decide can see."""
+def test_an_older_reviewer_s_too_large_notice_spends_no_read(github):
+    """An older reviewer posted this notice instead of reading a large diff. It
+    read nothing, so the pull request's next push still buys the read."""
     github.add_review(
         state="COMMENTED",
-        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}",
+        body="too large\n<!-- oversized-review -->",
         submitted_at="2026-07-01T00:00:00Z",
     )
-    assert _spent(github) == 1
+    assert _spent(github) == 0
 
 
 def test_a_review_older_than_the_caller_s_cutover_spends_a_read(github):
@@ -372,6 +372,7 @@ def _stamp(head: str, *, read: str = "first", scope: str = "whole") -> str:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
@@ -476,33 +477,6 @@ def test_a_pr_with_no_review_at_all_reports_no_coverage(github):
     assert _deltas(github) == 0
 
 
-def test_an_oversized_notice_advances_the_covered_head(github):
-    """It read no diff, but it is a paid decision about that head. A notice that
-    left the record where it was kept the accumulated read owed forever: the
-    re-dispatch bound counts only FAILED runs, and an oversized run succeeds."""
-    github.add_review(
-        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
-        f"{_stamp(HEAD_A, scope='oversized')}"
-    )
-    coverage = _coverage(github)
-    assert coverage["head"] == HEAD_A
-    assert coverage["scope"] == "oversized"
-
-
-def test_an_oversized_notice_on_the_accumulated_read_spends_that_budget(github):
-    """And spends the RIGHT one. Stamped `read=delta`, it is excluded from the
-    first-read count and included in the accumulated one, so a pull request that
-    is too large to read cannot be re-dispatched past its budget."""
-    github.add_review(body=_stamped(HEAD_A))
-    github.add_review(
-        body=f"still too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
-        f"{_stamp(HEAD_B, read='delta', scope='oversized')}",
-        submitted_at="2026-07-02T00:00:00Z",
-    )
-    assert _spent(github) == 1
-    assert _deltas(github) == 1
-
-
 def _abandoned(server: FakePRReviews, **env: str) -> str:
     proc = _call(
         server, 'reviewer_reviews_ndjson "$2" "$3" "$4" | delta_read_abandoned', **env
@@ -553,14 +527,3 @@ def test_the_abandoned_read_is_terminal_whatever_the_budget(github):
         submitted_at="2026-07-02T00:00:00Z",
     )
     assert _abandoned(github) == "true"
-
-
-def test_an_oversized_notice_is_not_an_abandoned_read(github):
-    """Both read no diff, and only one gives up. The oversized notice stamps the
-    LIVE head and opens a thread a human resolves, so the read it stands for was
-    delivered; the give-up notice stamps an older head and delivers nothing."""
-    github.add_review(
-        body=f"too large\n{_lib_marker('OVERSIZED_REVIEW_MARKER')}\n"
-        f"{_stamp(HEAD_B, read='delta', scope='oversized')}"
-    )
-    assert _abandoned(github) == "false"

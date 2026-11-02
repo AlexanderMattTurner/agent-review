@@ -16,8 +16,10 @@
 #      Nothing requires a PR to target the default branch, so a `base.ref`
 #      checkout would run branch A's rewritten machinery while PR B's own diff
 #      stays clean.
-#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`,
-#      and they pass the agent-sanitizer before the agent sees them. The agent
+#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`
+#      (or, for a diff GitHub will not serve, a git fetch into a scratch bare
+#      repository that runs no diff driver), and they pass the agent-sanitizer
+#      before the agent sees them. The agent
 #      has no shell and no network tool, so it cannot fetch them past the
 #      sanitizer.
 #   3. Least privilege per job. `read`, the only job that runs a model, holds
@@ -70,7 +72,7 @@ on:
         default: ""
         type: string
       max-reviews-per-pr:
-        description: "How many whole-diff reads one pull request may spend, across its whole life, from 0 to 999. A run that finds the diff too large to read spends one too — it still paid for the job, and counting it is what stops an oversized pull request re-running on every push. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
+        description: "How many whole-diff reads one pull request may spend, across its whole life, from 0 to 999. It bounds the AUTOMATIC arms only: the `[opus-review]` head-commit opt-in and the review label fire whatever the count says, though a read either posts still counts against it. 0 leaves a pull request with no automatic read at all, so only those two arms review it — do NOT pair 0 with the review-findings gate, which then holds every pull request until somebody adds the label."
         required: false
         default: 1
         type: number
@@ -129,11 +131,11 @@ on:
         required: false
         default: 4000
         type: number
-      max-shardable-lines:
-        description: "The largest diff that is sharded at all. Above it, or when the diff needs more than max-shardable-lines / shard-max-lines shards, the PR gets a human-review notice and no automated read."
+      reviewer-defect-issue:
+        description: "Number of an issue in the CALLING repository. When the reviewer falls short on a pull request — a read leg failed after its retries, findings could not be posted, or files went unread — the `post` job comments there once, naming the pull request, the head, what fell short and the run. Empty writes the same text to the job summary and a warning instead. Either way the merge gate judges the findings the review has; nothing waits for a person."
         required: false
-        default: 192000
-        type: number
+        default: ""
+        type: string
       review-timeout-seconds:
         description: "Wall clock ONE credential attempt may spend on the read, rounded up to whole minutes."
         required: false
@@ -278,7 +280,6 @@ jobs:
       skip: ${{ steps.recheck.outputs.skip }}
       # The sanitized input exists, for a head that is still the live one.
       prepared: ${{ steps.prepare.conclusion == 'success' && steps.prepare.outputs.stale != 'true' }}
-      unreviewable: ${{ steps.prepare.outputs.unreviewable }}
       # The read matrix: the sharder's list, or the one `whole` leg for a diff
       # that fits one context.
       shards: ${{ steps.prepare.outputs.sharded == 'true' && steps.prepare.outputs.shards || '["whole"]' }}
@@ -359,9 +360,8 @@ jobs:
 
       - name: Fetch and sanitize the untrusted PR input
         # Writes the sanitized files the agent reads, and ROUTES the review: a
-        # diff over max-diff-lines is split per file for the read matrix, and
-        # only a diff too large to shard, or a PR aimed at a branch other than
-        # the default, sets unreviewable=true and gets the human-review notice.
+        # diff over max-diff-lines is split per file for the read matrix. No
+        # size skips the read.
         id: prepare
         if: steps.recheck.outputs.skip != 'true' && steps.fresh.outputs.stale != 'true'
         env:
@@ -372,7 +372,6 @@ jobs:
           ELIDE_COMMAND: ${{ inputs.elide-command }}
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
           SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
-          MAX_SHARDABLE_LINES: ${{ inputs.max-shardable-lines }}
           # What the coverage stamp will claim, and where an accumulated read
           # starts. HEAD_SHA is the head decide resolved: prepare refuses to read a
           # pull request whose head moved since, rather than stamping a head that
@@ -402,7 +401,7 @@ jobs:
   read:
     name: Claude PR review (read)
     needs: [decide, prepare]
-    if: needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs.unreviewable == 'false'
+    if: needs.prepare.outputs.prepared == 'true'
     runs-on: ubuntu-latest
     strategy:
       # No fail-fast: one leg's credential exhaustion must not cancel the others.
@@ -626,8 +625,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Folds every read leg's review.json into ONE PR review, or posts the
-  # oversized notice, and re-evaluates the caller's merge gate. It runs no model.
+  # Folds every read leg's review.json into ONE PR review, reports any way the
+  # reviewer fell short, and re-evaluates the caller's merge gate. It runs no model.
   post:
     name: Post the PR review
     needs: [decide, prepare, read]
@@ -649,6 +648,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write # post the review
+      issues: write # comment on reviewer-defect-issue when the reviewer falls short
       statuses: write # post-review-command re-posts a merge gate's verdict
       checks: read # a caller's gate may read another reviewer's check run
     steps:
@@ -686,7 +686,6 @@ jobs:
         # leg failed, and the legs that delivered still owe the PR their findings.
         # merge-multiple: v8 extracts a lone pattern match flat into `path` but
         # several into `path/<artifact>/`; merging always gives `path/<leg>/`.
-        if: needs.prepare.outputs.unreviewable == 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pr-review-findings-*
@@ -698,30 +697,16 @@ jobs:
         # read is incomplete, and leaves the marker that keeps it from counting
         # as a read; merge-shard-reviews.mjs owns that rule.
         id: fold
-        if: always() && steps.input.outcome == 'success' && needs.prepare.outputs.unreviewable == 'false'
+        if: always() && steps.input.outcome == 'success'
         env:
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           SHARD_REVIEW_DIR: ${{ runner.temp }}/read-legs
         run: node "${REVIEWER_DIR}/merge-shard-reviews.mjs"
 
-      - name: Post the oversized notice as a review plus a human-review thread
-        # A diff too large to read gets no automated read, so the notice posts as
-        # a COMMENT review plus one thread a HUMAN resolves after reviewing — the
-        # PR merges on that sign-off instead of staying blocked.
-        if: needs.prepare.outputs.unreviewable == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ needs.decide.outputs.pr }}
-          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
-          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
-          # The notice stamps coverage, so it needs the budget that paid for it.
-          READ: ${{ needs.decide.outputs.read }}
-        run: bash "${REVIEWER_DIR}/post-oversized-review.sh"
-
       - name: Post the structured review
         # Turns review.json into ONE PR review with inline comments and suggested
         # edits, validating every anchor against the diff first.
+        id: post
         if: always() && steps.fold.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -731,15 +716,28 @@ jobs:
           HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
           # The whole read's price the fold summed, for the footer.
           EXECUTION_FILE: ${{ runner.temp }}/pr-input/cost.json
+          REVIEWER_SHORTFALL_FILE: ${{ runner.temp }}/reviewer-shortfalls.txt
         run: bash "${REVIEWER_DIR}/post-pr-review.sh"
 
-      - name: Fail loud if a read leg delivered no review
-        # The review already says so and carries no read marker; this reds the
-        # run, so the lost leg is visible beside the review that names it.
-        if: always() && steps.fold.outputs.complete == 'false'
-        run: |
-          echo "::error::a read leg delivered no review, so the posted review is incomplete and does not count as a read"
-          exit 1
+      - name: Report where the reviewer fell short
+        # A shortfall is a defect in the reviewer, never a reason to hold the PR
+        # for a person: this posts ONE comment on reviewer-defect-issue (or the
+        # job summary and a warning), and the gate below judges the findings
+        # the review has.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.decide.outputs.pr }}
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+          REVIEWER_SHORTFALL_FILE: ${{ runner.temp }}/reviewer-shortfalls.txt
+          REVIEWER_DEFECT_ISSUE: ${{ inputs.reviewer-defect-issue }}
+          READ_RESULT: ${{ needs.read.result }}
+          FOLD_OUTCOME: ${{ steps.fold.outcome }}
+          POST_OUTCOME: ${{ steps.post.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "${REVIEWER_DIR}/report-reviewer-shortfall.sh"
 
       - &gate-repost
         name: Re-evaluate the caller's merge gate on the LIVE head

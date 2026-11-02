@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import reviewer_marker
-
 REPO_ROOT = Path(
     subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -226,7 +224,7 @@ def dismissed(calls: str) -> bool:
     return "dismissals" in calls
 
 
-CLEARED = dict(threads=[thread(resolved=True)], reviews=[review("CHANGES_REQUESTED")])
+CLEARED = {"threads": [thread(resolved=True)], "reviews": [review("CHANGES_REQUESTED")]}
 SELF_APPROVAL = "GraphQL: Can not approve your own pull request (addPullRequestReview)"
 ACTIONS_BARRED = "GitHub Actions is not permitted to approve pull requests"
 
@@ -422,25 +420,23 @@ def test_one_thread_resolved_by_somebody_else_still_clears(tmp_path: Path):
     assert dismissed(calls)
 
 
-def test_a_needs_a_human_hold_the_author_resolved_still_holds(tmp_path: Path):
-    # A hold thread asks for a reader other than the author. The author's own
-    # Resolve on it leaves it holding, so another thread resolved by somebody
-    # else does not make the whole hold clear. The merge gate reads the same
-    # predicate, so the two agree.
-    marker = reviewer_marker("HUMAN_HOLD_MARKER")
+def test_an_older_reviewer_s_needs_a_human_thread_clears_on_the_author_s_resolve(
+    tmp_path: Path,
+):
+    # An older reviewer opened hold threads only a non-author could clear. No
+    # thread waits for a person now, so the author's Resolve settles it, and the
+    # thread somebody else resolved still clears the hold.
     res, calls = run(
         tmp_path,
         threads=[
-            thread(resolved_by=AUTHOR, body=f"too large to read\n{marker}"),
+            thread(resolved_by=AUTHOR, body="too large\n<!-- needs-human-resolver -->"),
             thread(resolved_by=OTHER),
         ],
         reviews=[review("CHANGES_REQUESTED")],
         approve_error=SELF_APPROVAL,
     )
     assert res.returncode == 0, res.stderr
-    assert not dismissed(calls)
-    assert "pr review" not in calls
-    assert "1 reviewer thread(s) still hold" in res.stderr
+    assert dismissed(calls)
 
 
 def test_the_two_api_spellings_of_one_login_are_one_author(tmp_path: Path):
@@ -528,10 +524,10 @@ def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Pa
 def test_a_hold_thread_posted_before_its_notice_review_belongs_to_that_hold(
     tmp_path: Path, earlier: list[str]
 ):
-    """The oversized and degraded paths open their hold thread FIRST, as a
-    standalone comment, and post the notice review after it. GitHub wraps that
-    comment in a body-less review that is OLDER than the notice. Timing alone
-    would put the hold thread outside its own hold, and nothing could clear it."""
+    """The degraded path opens its finding threads FIRST, as standalone
+    comments, and posts the summary review after them. GitHub wraps each comment
+    in a body-less review that is OLDER than the summary. Timing alone would put
+    the thread outside its own hold, and nothing could clear it."""
     thread_at, notice_at = "2026-03-01T00:00:00Z", "2026-03-01T00:00:05Z"
     res, calls = run(
         tmp_path,

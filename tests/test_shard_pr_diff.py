@@ -244,34 +244,26 @@ def test_a_non_diff_input_fails_loud(tmp_path: Path) -> None:
     assert "not a unified diff" in cli.stderr
 
 
-def test_over_max_shards_refuses_with_its_own_exit_code(tmp_path: Path) -> None:
-    """Too big to shard exits 3 (not 1) and writes NOTHING.
-
-    The caller routes 3 to the human-review notice and any other non-zero to a red
-    job, so the two must not collide; and a half-written shard set would read to a
-    later step as a complete one.
-    """
+def test_over_max_shards_grows_the_shards_and_drops_nothing(tmp_path: Path) -> None:
+    """A diff that needs more shards than GitHub's matrix runs gets LARGER shards,
+    never an unread remainder: every line still lands in one of at most
+    --max-shards shards, and the manifest records the budget actually used."""
     diff = tmp_path / "d.diff"
-    diff.write_text(
-        "".join(_file_section(f"f{i}.py", 20) for i in range(10)), encoding="utf-8"
-    )
+    text = "".join(_file_section(f"f{i}.py", 20) for i in range(10))
+    diff.write_text(text, encoding="utf-8")
     out = tmp_path / "out"
 
-    result = _run(diff, out, max_lines=100, max_shards=2)
-    assert result.returncode == 3, result.stderr
-    assert "over --max-shards=2" in result.stderr
-    assert not out.exists(), "an over-budget run must leave no shards behind"
+    result = _run(diff, out, max_lines=30, max_shards=3)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    names = [s["name"] for s in manifest["shards"]]
+    assert 1 < len(names) <= 3
+    assert manifest["max_lines"] > 30
+    assert not any(s["oversize"] for s in manifest["shards"])
+    assert "".join((out / n).read_text(encoding="utf-8") for n in names) == text
 
-    # The distinct code is only useful if the process reports it, and that is
-    # what `prepare-pr-review-input.sh` branches on.
-    assert (
-        _run_cli(diff, tmp_path / "out-cli", max_lines=100, max_shards=2).returncode
-        == 3
-    )
-
-    # Non-vacuity: the same input under a budget that fits still succeeds, so the
-    # refusal is the bound firing rather than the input being unshardable.
-    assert _run(diff, out, max_lines=100, max_shards=24).returncode == 0
+    # Non-vacuity: with no bound, the same budget needs more than three shards.
+    assert len(mod.pack(mod.split_into_files(text)[1], 30)) > 3
 
 
 def test_content_before_the_first_file_header_rides_with_shard_0(

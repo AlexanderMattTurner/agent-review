@@ -53,7 +53,7 @@ CASES = [
 REVIEWER_CASES = [
     ("prepare-pr-review-input.sh", ["PR", "PR_INPUT_DIR"]),
     ("post-pr-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
-    ("post-oversized-review.sh", ["PR", "GH_REPO", "PR_INPUT_DIR"]),
+    ("report-reviewer-shortfall.sh", ["GH_REPO", "PR", "HEAD_SHA", "RUN_URL"]),
 ]
 
 

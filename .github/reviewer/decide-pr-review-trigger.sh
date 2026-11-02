@@ -21,7 +21,7 @@
 # Triggers: `opened` fires whenever the budget is at least 1. `ready_for_review` /
 # `synchronize` fire only when: (1) "[opus-review]" is in the head commit TITLE,
 # bounded to once per tagged commit, opted in by a PUSH alone; (2) the PR has spent
-# fewer reads than the budget, which re-arms `opened` after an oversized diff or a
+# fewer reads than the budget, which re-arms `opened` after an incomplete read or a
 # cancelled job.
 #
 # `dispatch` is the fourth arm and the only one that reads a PR twice: the sweep
@@ -212,8 +212,8 @@ spent="$(real_reviewer_reviews "$owner" "$name" "${PR:-}" 2>/dev/null)" || revie
 # Trigger 2: any state — APPROVED, DISMISSED, or a still-live CHANGES_REQUESTED / COMMENTED —
 # means the reviewer looked, so it spends one of the budgeted reads; past the budget only
 # `$KEYWORD` buys another pass. A count of 0 after a SUCCESSFUL query means no first pass ever
-# ran, so this event is it, which is what re-arms `opened` when `opened` produced no review (an
-# oversized diff, a cancelled job). Without that re-arm such a PR is never reviewed again.
+# ran, so this event is it, which is what re-arms `opened` when `opened` spent no read (an
+# incomplete read, a cancelled job). Without that re-arm such a PR is never reviewed again.
 if [[ "$reviews_rc" -ne 0 ]]; then
   emit false "could not read $REPO#${PR:-} reviews (exhausted the retry ladder, rc=$reviews_rc) — not reviewing rather than guessing"
 elif [[ "$count" -lt "$MAX_REVIEWS_PER_PR" ]]; then

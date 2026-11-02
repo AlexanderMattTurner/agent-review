@@ -2,13 +2,14 @@
 
 **A reusable GitHub Actions workflow that reviews a pull request with Claude and gates the merge on the findings.** The read itself is Anthropic's `code-review` plugin, run through [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action). This repository is the layer around that read: it decides when a pull request gets a read, feeds the plugin a sanitized diff, posts the findings as inline review threads, and holds the merge while a serious finding is unresolved.
 
-The read runs in one of three shapes, and the size of the diff picks the shape:
+The read runs in one of two shapes, and the size of the diff picks the shape. Every pull request gets an automated read:
 
 1. **A diff of at most `max-diff-lines` lines gets one read.** The plugin's agents review it, and the workflow posts their findings as one review. Each finding is anchored to a line of the diff, so you read it beside the code that caused it.
-2. **A larger diff is split per file, and each part gets its own read.** The parts run at the same time with the same prompt and the same models. The workflow folds their findings into one review. If a part delivers no review, the review says that the read is incomplete, and a thread asks a human to read the files that part held.
-3. **A diff too large even to split gets no automated read.** The workflow posts a notice and opens one thread. A human reviews the code and resolves that thread. The pull request is never blocked with no way out.
+2. **A larger diff is split per file, and each part gets its own read.** The parts run at the same time with the same prompt and the same models. The workflow folds their findings into one review. If a part delivers no review, the review says that the read is incomplete.
 
-Diff size is the usual reason for the third shape, and not the only one. A pull request touching more than 3,000 files also lands there, because GitHub's files API cannot hand back a complete diff for one. So can a diff that needs more parts than the limit allows, because a part never splits a file. So does a pull request that targets a branch other than your default branch: `claude-code-action` loads `CLAUDE.md` and `.claude/` from the pull request's target branch, so the reviewer reads only pull requests whose target is the default branch.
+No size skips the read. GitHub runs at most 256 parts of one read, so a diff that needs more gets larger parts. GitHub refuses to send the diff of a pull request that touches more than 300 files, so the workflow fetches the merge base and the head with git, as data, and diffs them itself.
+
+When the reviewer falls short — a part fails after its retries, a finding cannot be posted, or files go unread — it says so once, as a comment on the issue you name in `reviewer-defect-issue`, or in the job summary and a warning when you name none. A shortfall never holds the pull request for a person: the merge gate judges the findings the review has.
 
 You call it from your own repository by `uses:`, pinned to a commit with the release version in a trailing comment.
 
@@ -29,6 +30,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      issues: write
       statuses: write
       actions: read
       checks: read
@@ -79,7 +81,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `pr-number`                | none                  | The pull request an accumulated read runs on. A `workflow_dispatch` run carries no pull request payload, so the caller passes its own `inputs.pr` here. Leave it empty on a `pull_request_target` run.                              |
 | `max-diff-lines`           | `12000`               | Above this many diff lines the read splits per file.                                                                                                                                                                                |
 | `shard-max-lines`          | `4000`                | The most diff lines one part of a split read holds. A part never splits a file, so one large file gets a part of its own.                                                                                                           |
-| `max-shardable-lines`      | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                               |
+| `reviewer-defect-issue`    | none                  | An issue number in YOUR repository. When the reviewer falls short on a pull request, it comments there once with the pull request, the head, what fell short and the run. Empty writes the job summary and a warning instead.       |
 | `review-timeout-seconds`   | `1500`                | The wall clock one credential attempt may spend on the read, rounded up to whole minutes.                                                                                                                                           |
 
 ## The read
@@ -113,7 +115,7 @@ Which severities hold the merge is set by `gating` and `delta_gating` in `config
 
 ## Budget
 
-Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. Two things start a read whatever the count says: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Each is somebody asking for this pull request to be read, so both still work at `max-reviews-per-pr: 0` while no push starts a review on its own. A read either one posts still counts, because the number bounds what one pull request costs. A run that finds the diff too large to read spends one as well: it paid for the job, and counting it is what stops an oversized pull request re-running on every push. Reviews this bot posts without reading a diff — the stand-in approval on a skipped pull request, an approval once a hold clears — spend nothing. Do not pair `0` with the review-findings gate: that gate holds the merge until a review exists, and it takes only `pending` or `failure` for a pull request with none, so every pull request would stay blocked until somebody added the label.
+Each pull request gets `max-reviews-per-pr` whole-diff reads, and one by default. Two things start a read whatever the count says: a commit whose title carries `[opus-review]`, and the `needs-auto-review` label. Each is somebody asking for this pull request to be read, so both still work at `max-reviews-per-pr: 0` while no push starts a review on its own. A read either one posts still counts, because the number bounds what one pull request costs. Reviews this bot posts without reading a diff — the stand-in approval on a skipped pull request, an approval once a hold clears — spend nothing. Do not pair `0` with the review-findings gate: that gate holds the merge until a review exists, and it takes only `pending` or `failure` for a pull request with none, so every pull request would stay blocked until somebody added the label.
 
 A push after that read is not read again on its own. Reading every push is what the budget exists to prevent, so the later pushes are BATCHED into one accumulated read: `max-delta-reviews-per-pr` of them, and one by default. That read covers only the files pushed since the head the last review read, and it is charged to its own budget, so an accumulated read never spends a whole-diff read.
 

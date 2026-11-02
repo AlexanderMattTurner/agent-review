@@ -8,10 +8,10 @@
 # `gh pr diff`, so an injection payload hidden in the diff cannot reach it intact.
 #
 # Above MAX_DIFF_LINES the diff no longer fits one model context, so this
-# SHARDS it per-file and emits the shard list for parallel reads. Only a diff
-# too large even to shard falls back to the human-review notice. The >300-file
-# case (GitHub refuses the diff media type outright) is rebuilt from the files
-# API first, then routed by size like any other.
+# SHARDS it per-file and emits the shard list for parallel reads. No size skips
+# the read. A diff GitHub refuses to serve (over 300 files, or too large) is built
+# from a git fetch of the merge base and the head instead, then routed by size
+# like any other.
 #
 # A READ=delta run covers the pushes after SINCE, which an earlier review already
 # read: the compare API names those files and the diff is narrowed to them. A
@@ -23,10 +23,9 @@
 # Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
 # covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
 # size bounds below are optional.
-# Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
-# shard_count (the last two written by shard-pr-diff.py). Writes into
-# $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
-# sanitizer-report.txt, shards/, oversized-notice.txt.
+# Emits to GITHUB_OUTPUT: diff_lines, sharded, stale, shards, shard_count (the
+# last two written by shard-pr-diff.py). Writes into $PR_INPUT_DIR:
+# diff.txt/meta.txt, context.txt, coverage.json, sanitizer-report.txt, shards/.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,14 +56,9 @@ MAX_DIFF_LINES="${MAX_DIFF_LINES:-12000}"
 # The legs run in parallel, so the review's wall-clock is one leg's read; a
 # smaller shard trades that for a finding likelier to fall across a boundary.
 SHARD_MAX_LINES="${SHARD_MAX_LINES:-4000}"
-# The largest diff that can be sharded AT ALL; above it a PR gets the human-review notice
-# and no read. 192k keeps a wide margin over the largest PR in this repo's history (81,731
-# lines). INVARIANT — DERIVED, never a second constant: the ceiling is stated once here, so
-# changing SHARD_MAX_LINES cannot lower it by omission, and an operator overriding
-# SHARD_MAX_LINES still gets a consistent fan-out.
-MAX_SHARDABLE_LINES="${MAX_SHARDABLE_LINES:-192000}"
-# The fan-out bound proper: a pathological diff must not spawn unbounded runners.
-MAX_SHARDS="${MAX_SHARDS:-$((MAX_SHARDABLE_LINES / SHARD_MAX_LINES))}"
+# GitHub runs at most 256 jobs from one matrix. A diff that needs more shards gets
+# larger shards rather than an unread remainder: shard-pr-diff.py grows each one.
+MAX_SHARDS="${MAX_SHARDS:-256}"
 
 mkdir -p "$PR_INPUT_DIR" # bare-mkdir-ok: Linux CI runner (no BSD mkdir -p symlink semantics)
 
@@ -86,14 +80,10 @@ sanitizer_crash="$(mktemp)"
 trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$meta_threads" "$sanitizer_crash"' EXIT
 
 # `gh pr diff` asks for the REST diff media type, which GitHub refuses with HTTP
-# 406 above 300 CHANGED FILES — a cap on file count, not diff size, so even a
-# small-diff wide PR gets no read at all. The files endpoint has no such cap,
-# so rebuild the diff from it. Every OTHER gh failure stays red.
-
-# `gh` exits 1 for every API refusal, so the 406 above is indistinguishable by
-# exit code from a 5xx blip. This splits them: 3 is GitHub's ANSWER about this
-# PR's width, which re-running only reproduces, so the retry below excludes it
-# and reaches the rebuild immediately.
+# 406 above 300 CHANGED FILES, and for a diff too large to render. Both are
+# GitHub's ANSWER about this PR, which re-running only reproduces, so they exit 3
+# and the retry below excludes them. `gh` exits 1 for every other refusal, a 5xx
+# blip included, and those stay retried and then red.
 gh_pr_diff_once() {
   # `--allow-escape-sequences` is safe here: these bytes reach only the
   # sanitizer below, never a real terminal.
@@ -102,8 +92,29 @@ gh_pr_diff_once() {
   # would otherwise leave the job log with the ci-retry counter and no trace of
   # WHAT GitHub answered, which is the one thing a later reader needs.
   cat "$gh_err" >&2
-  grep -qiE 'exceeded the maximum number of files|too_large' "$gh_err" && return 3
+  grep -qiE 'exceeded the maximum number of|too_large' "$gh_err" && return 3
   return 1
+}
+
+# The diff GitHub would not serve, built by git from the merge base and the head.
+# INVARIANT — the PR's commits are DATA here: they land in a scratch bare
+# repository with no work tree, and `--no-ext-diff --no-textconv` keeps any diff
+# driver from running, so nothing the PR wrote is executed. The compare API names
+# the merge base, so this is the same three-dot diff `gh pr diff` serves.
+fetch_pr_diff_with_git() {
+  local out="$1" base merge_base scratch rc=0
+  base="$(retry_stdout gh pr view "$PR" --json baseRefOid --jq .baseRefOid)"
+  merge_base="$(retry_stdout gh api "repos/{owner}/{repo}/compare/${base}...${HEAD_SHA}?per_page=1" \
+    --jq .merge_base_commit.sha)"
+  scratch="$(mktemp -d)"
+  git init -q --bare "$scratch"
+  # gh is the credential helper, so a private repository fetches with GH_TOKEN.
+  retry git -C "$scratch" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+    fetch -q --no-tags --depth=1 "${GITHUB_SERVER_URL:-https://github.com}/${GH_REPO}.git" \
+    "$merge_base" "$HEAD_SHA" || rc=$?
+  ((rc != 0)) || git -C "$scratch" diff --no-ext-diff --no-textconv "$merge_base" "$HEAD_SHA" >"$out" || rc=$?
+  rm -rf "$scratch"
+  return "$rc"
 }
 
 fetch_whole_pr_diff() {
@@ -111,39 +122,11 @@ fetch_whole_pr_diff() {
   RETRY_EXIT_CODES=1 retry_stdout gh_pr_diff_once >"$out" || diff_rc=$?
   ((diff_rc == 0)) && return 0
   ((diff_rc == 3)) || return "$diff_rc"
-  echo "gh pr diff refused the >300-file diff; rebuilding it from the files API" >&2
-  local files
-  files="$(retry_stdout gh api --paginate "repos/{owner}/{repo}/pulls/${PR}/files")"
-  # INVARIANT: the rebuilt diff is the WHOLE diff or no diff. The files endpoint
-  # stops at 3000 entries with no cursor past it, so a wider PR arrives silently
-  # short — and a partial diff sanitized and sharded reads as a complete review of
-  # a PR whose later files nobody looked at. Refusing routes it to the
-  # human-review notice instead.
-  local fetched changed
-  # `--paginate` concatenates one ARRAY PER PAGE, so the count flattens them.
-  fetched="$(jq -s 'flatten | length' <<<"$files")"
-  changed="$(retry_stdout gh pr view "$PR" --json changedFiles --jq .changedFiles)"
-  if [[ -n "$changed" ]] && ((fetched < changed)); then
-    echo "the files API served ${fetched} of ${changed} changed files; a rebuilt diff would be partial" >&2
-    return 3
-  fi
-  python3 "$here/pr/files-to-diff.py" <<<"$files" >"$out"
+  echo "gh pr diff refused this PR's diff; building it with git instead" >&2
+  fetch_pr_diff_with_git "$out"
 }
 
-# 3 is the rebuild's refusal to serve a partial diff. It is a verdict about this
-# PR's width, not a fault: the read is skipped and a human is asked, the same
-# ending an unshardable diff takes.
-fetch_rc=0
-fetch_whole_pr_diff "$raw_diff" || fetch_rc=$?
-if ((fetch_rc == 3)); then
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: this PR changes more files than GitHub's own files API will serve, so no complete diff can be built for a review. A change this large should get a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  exit 0
-fi
-((fetch_rc == 0)) || exit "$fetch_rc"
+fetch_whole_pr_diff "$raw_diff"
 
 # The head, re-read AFTER the diff fetch. A push inside the fetch window would
 # otherwise be stamped as covered by a read that never saw it, which is the one
@@ -160,7 +143,6 @@ fi
 if [[ "$live_head" != "$HEAD_SHA" ]]; then
   emit_output "stale=true"
   emit_output "sharded=false"
-  emit_output "unreviewable=false"
   echo "the head moved ($HEAD_SHA -> $live_head) during the fetch; this run reads nothing" >&2
   exit 0
 fi
@@ -272,12 +254,13 @@ python3 "$here/build-review-context.py" \
 diff_lines="$(wc -l <"${PR_INPUT_DIR}/diff.txt" | tr -d '[:space:]')"
 emit_output "diff_lines=$diff_lines"
 
-# meta.txt names every path the diff contains: the reviewer reads both halves and must not
-# find them disagreeing. gh refuses `--jq` alongside `--slurp`, so the projection is a
+# meta.txt names the paths the diff contains: the reviewer reads both halves and must not
+# find them disagreeing. The files API stops at 3000 entries, so `changedFiles` rides along
+# and says when the list is shorter than the diff. gh refuses `--jq` alongside `--slurp`, so the projection is a
 # separate jq. Both payloads go to FILES, not jq's argv: `--argjson` puts the whole value
 # on the command line, and a wide PR's files payload dies with E2BIG above roughly 2 MB —
 # exactly the PRs the files-API fallback serves. `--slurpfile` wraps each in an array.
-retry_stdout gh pr view "$PR" --json title,body,author,baseRefName >"$meta_pr"
+retry_stdout gh pr view "$PR" --json title,body,author,baseRefName,changedFiles >"$meta_pr"
 retry_stdout gh api --paginate --slurp "repos/{owner}/{repo}/pulls/${PR}/files" >"$meta_pages"
 # The RESOLVED review threads, so the reviewer can judge a gap a thread named and its
 # resolution left in place. They are as untrusted as the body and take the same sanitizer pass.
@@ -313,43 +296,14 @@ fi
 # of exactly what the reviewer would otherwise have read.
 if ((diff_lines <= MAX_DIFF_LINES)); then
   emit_output "sharded=false"
-  emit_output "unreviewable=false"
   exit 0
 fi
 
-# Over the single-context cap. The ceiling is checked HERE, on the line count: a
-# diff dominated by one file splits into one shard however large it is, so the
-# shard cap below would admit a million-line file as a single reviewable slice.
-if ((diff_lines > MAX_SHARDABLE_LINES)); then
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: this PR's diff is ${diff_lines} lines, over the ${MAX_SHARDABLE_LINES}-line ceiling for an automated read. A change this large should get a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  echo "diff ${diff_lines} lines exceeds MAX_SHARDABLE_LINES=${MAX_SHARDABLE_LINES}; asking for a human review" >&2
-  exit 0
-fi
-
-# Shard, and give up when even the sharded fan-out would be unbounded.
-shard_rc=0
 python3 "$here/shard-pr-diff.py" \
   --diff "${PR_INPUT_DIR}/diff.txt" \
   --out-dir "${PR_INPUT_DIR}/shards" \
   --max-lines "$SHARD_MAX_LINES" \
-  --max-shards "$MAX_SHARDS" || shard_rc=$?
-
-# 3 is the sharder's over-budget refusal; any other non-zero stays a red job.
-if ((shard_rc == 3)); then
-  emit_output "sharded=false"
-  emit_output "unreviewable=true"
-  printf '%s\n' \
-    "Automated review skipped: this PR's diff is ${diff_lines} lines, which needs more than the ${MAX_SHARDS}-shard fan-out limit even after splitting it per file. A change this large should get a human review — please review it manually." \
-    >"${PR_INPUT_DIR}/oversized-notice.txt"
-  echo "diff ${diff_lines} lines needs more than MAX_SHARDS=${MAX_SHARDS} shards; asking for a human review" >&2
-  exit 0
-fi
-((shard_rc == 0)) || exit "$shard_rc"
+  --max-shards "$MAX_SHARDS"
 
 emit_output "sharded=true"
-emit_output "unreviewable=false"
 echo "diff ${diff_lines} lines exceeds MAX_DIFF_LINES=${MAX_DIFF_LINES}; sharded for a fan-out review" >&2

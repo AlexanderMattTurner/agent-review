@@ -203,9 +203,9 @@ uncovered_verdict() {
 reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
 # Clause (a): has the reviewer read this, or does it owe no read? `read_owed`
 # false means clause (b) still decides — a pull request in the skip set can
-# carry a finding thread anyway, because the oversized and degraded review paths
-# open one without posting a review, so greening on the waiver alone would
-# publish success over an open hold.
+# carry a finding thread anyway, because the degraded review path posts its
+# finding comments before its review, so greening on the waiver alone could
+# publish success over an open finding.
 read_owed=false
 if [[ -z "$reviews" ]] && ! pr_review_is_skipped "$owner" "$name" "$PR"; then
   read_owed=true

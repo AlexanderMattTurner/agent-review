@@ -12,12 +12,12 @@
 # read again, while review-findings-gate.sh holds the merge on a review sitting right there. A
 # rejection therefore DEGRADES: each finding posts as its own comment, so a bad anchor costs one
 # finding, and the summary posts as a real COMMENT review, which is what records the read. Any
-# finding still refused raises the needs-a-human hold, so the gate cannot green on findings nobody
-# can resolve.
+# finding still refused is a reviewer defect: its text posts as a PR comment, and one line naming
+# the loss goes to REVIEWER_SHORTFALL_FILE for report-reviewer-shortfall.sh.
 #
 # Requires: gh authenticated (GH_TOKEN), GH_REPO, PR, PR_INPUT_DIR; node with the scripts on the
 # module path. HEAD_SHA (the PR head sha) pins the review to the reviewed commit, and the degraded
-# path needs it to anchor a comment at all.
+# path needs it to anchor a comment at all. REVIEWER_SHORTFALL_FILE is optional.
 set -euo pipefail
 
 : "${PR:?PR number required}"
@@ -25,8 +25,6 @@ set -euo pipefail
 : "${PR_INPUT_DIR:?PR_INPUT_DIR required}"
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=.github/reviewer/lib/review-threads.bash
-source "$_SCRIPT_DIR/lib/review-threads.bash"
 # WHOLE_DIFF_READ_MARKER — stamped on the summary review below. It is what makes this
 # read spend the PR's budget; an unstamped review counts for nothing, so a crash before
 # the summary leaves the read unrecorded and the next push buys it again.
@@ -47,8 +45,8 @@ COVERAGE_FILE="${PR_INPUT_DIR}/coverage.json"
 COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
 # What the summary review carries to record the read. A sharded read that lost a leg
 # (merge-shard-reviews.mjs wrote INCOMPLETE_FILE) carries neither the read marker nor
-# the coverage stamp, so it spends no budget and claims no head; a hold raised below
-# keeps the gate red until a human reads the files no leg read.
+# the coverage stamp, so it spends no budget and claims no head, and the next push
+# buys a whole read. report-reviewer-shortfall.sh names the files no leg read.
 INCOMPLETE_FILE="${PR_INPUT_DIR}/incomplete-read.txt"
 READ_STAMP="${WHOLE_DIFF_READ_MARKER}"$'\n'"${COVERAGE_STAMP}"
 [[ ! -f "$INCOMPLETE_FILE" ]] || READ_STAMP="$INCOMPLETE_READ_MARKER"
@@ -59,9 +57,9 @@ REVIEW_READ="$(jq -r '.read // "first"' "$COVERAGE_FILE")"
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.
 export REVIEWER_LOGIN_BARE="github-actions"
 
-# DEGRADED_REVIEW_MARKER (lib/review-markers.bash) is stamped on the summary review and the
-# needs-a-human thread, and read back below to keep the degraded path idempotent. Exported because
-# the jq program that looks for it runs in a `gh` process.
+# DEGRADED_REVIEW_MARKER (lib/review-markers.bash) is stamped on the summary review, and read back
+# below to keep the degraded path idempotent. Exported because the jq program that looks for it
+# runs in a `gh` process.
 export DEGRADED_REVIEW_MARKER
 
 # Whether this head already carries a completed degraded review by the reviewer, keyed on marker AND
@@ -86,10 +84,10 @@ SALVAGE_BODY_LIMIT="${SALVAGE_BODY_LIMIT:-60000}"
 SALVAGE_MARKER="<!-- salvaged-review-findings -->"
 
 # Post the refused findings' text as PR comments — an issue comment carries no anchor, so nothing
-# in the diff can refuse it. Prints each comment's URL on stdout for the hold to link, and appends
-# the number of each part GitHub refused to LOST_PARTS, so the hold can keep the run-log fallback
-# for a PARTIAL loss — links alone would read as the complete set. The gate reads review THREADS,
-# so these comments gate nothing on their own; the hold is what holds.
+# in the diff can refuse it. Prints each comment's URL on stdout for the shortfall report to link,
+# and appends the number of each part GitHub refused to LOST_PARTS, so the report can keep the
+# run-log fallback for a PARTIAL loss — links alone would read as the complete set. The gate reads
+# review THREADS, so these comments gate nothing.
 post_salvaged_findings() {
   local dir="$1" lost="$2" lost_parts="$3" chunk part=0 size=0 file file_size
   chunk="$(mktemp)"
@@ -129,10 +127,10 @@ _post_one_salvage_comment() {
   {
     printf '%s\n\n' "$SALVAGE_MARKER"
     printf '🔴 **%d finding(s) GitHub would not anchor to this diff — part %d.**\n\n' "$lost" "$part"
-    printf '<sub>These have no review thread of their own. The needs-a-human hold on this PR stays red until someone reads them.</sub>\n\n'
+    printf '<sub>These have no review thread of their own, so they do not hold the merge. Read them before you merge.</sub>\n\n'
     cat "$findings"
   } >"$body"
-  # A refused part must not stop the parts after it, and must not pass for posted either: the hold
+  # A refused part must not stop the parts after it, and must not pass for posted either: the report
   # links what landed, so a silent loss leaves a reader a list that looks complete and is not.
   # echo-fallback-ok: the warning goes to stderr, so no URL list is fed a benign string
   retry_stdout gh api -X POST "repos/${GH_REPO}/issues/${PR}/comments" \
@@ -149,7 +147,7 @@ _post_one_salvage_comment() {
 # gate, another read) rather than reviewed with its findings missing (green gate, nobody holding the
 # merge).
 post_review_comment_by_comment() {
-  local one salvage_dir salvage_links salvage_lost url total=0 failed=0 comment payload_comments
+  local one salvage_dir salvage_links salvage_lost total=0 failed=0 comment payload_comments
   if degraded_review_already_posted; then
     echo "degraded review already posted for PR ${PR}; not re-posting" >&2
     return 0
@@ -192,10 +190,9 @@ post_review_comment_by_comment() {
   rm -f "$one"
   echo "posted $((total - failed)) of ${total} findings as individual review comments" >&2
 
-  # The refused findings' own text, onto the PR, before the hold that points at it. A run log ages
-  # out and needs an Actions reader; a PR comment is where the person the hold stops is already
-  # looking. Never fatal: losing the salvage must not cost the summary review below, which is what
-  # records that the read happened at all.
+  # The refused findings' own text, onto the PR. A run log ages out and needs an Actions reader; a
+  # PR comment is where the PR's author is already looking. Never fatal: losing the salvage must not
+  # cost the summary review below, which is what records that the read happened at all.
   salvage_links=""
   salvage_lost="$(mktemp)"
   ((failed == 0)) ||
@@ -203,31 +200,18 @@ post_review_comment_by_comment() {
     salvage_links=""
   rm -rf "$salvage_dir"
 
-  # Before the summary review: the review greens the gate's reviewed-at-all leg, so a lost finding
-  # must already have its hold by the time it lands. ANY lost finding raises it — which severities
+  # One line for report-reviewer-shortfall.sh. ANY lost finding is reported — which severities
   # gate is review-findings-gate.sh's question, and re-deciding it here would be a second copy of
   # that predicate, free to disagree with it.
   if ((failed > 0)); then
-    local prose
-    prose="$(mktemp)"
-    {
-      printf '🔴 %d of this review'"'"'s %d findings could not be posted — this PR needs a HUMAN read of them.\n\n' "$failed" "$total"
-      printf 'GitHub refused the review as one payload and then refused these comments individually, so they have no thread of their own. Address them, then resolve this thread; the review-findings gate stays red until it is resolved.\n\n'
-      if [[ -n "$salvage_links" ]]; then
-        printf 'Their full text is on this PR:\n\n'
-        while IFS= read -r url; do printf -- '- %s\n' "$url"; done <<<"$salvage_links"
-      fi
-      # A PARTIAL loss still needs the fallback: the links above would otherwise read as the whole
-      # set while the refused part's findings are in the run log alone.
-      if [[ -s "$salvage_lost" ]]; then
-        printf '\nGitHub refused %s of those comments, so the findings they carried are in the run log only.\n' \
-          "$(wc -l <"$salvage_lost" | tr -d ' ')"
-      elif [[ -z "$salvage_links" ]]; then
-        printf 'Read the run log for what they said.\n'
-      fi
-    } >"$prose"
-    raise_human_review_finding "$DEGRADED_REVIEW_MARKER" "$prose"
-    rm -f "$prose"
+    local where="the run log"
+    # A PARTIAL loss still names the run log: the links alone would read as the whole set.
+    if [[ -n "$salvage_links" ]]; then
+      where="$(tr '\n' ' ' <<<"$salvage_links")"
+      [[ ! -s "$salvage_lost" ]] || where+="and the run log"
+    fi
+    printf '%d of %d findings could not be posted as review threads, so they do not gate; their text is in %s\n' \
+      "$failed" "$total" "${where% }" >>"${REVIEWER_SHORTFALL_FILE:-/dev/stderr}"
   fi
   rm -f "$salvage_lost"
 
@@ -258,20 +242,6 @@ fi
 if [[ "$status" != "PAYLOAD" ]]; then
   echo "no structured review to post" >&2
   exit 0
-fi
-
-# An incomplete read's hold goes up BEFORE its review: the review greens the gate's
-# reviewed-at-all leg, so the files no leg read must already hold the merge.
-if [[ -f "$INCOMPLETE_FILE" ]]; then
-  : "${HEAD_SHA:?HEAD_SHA required to anchor the incomplete-read hold}"
-  incomplete_prose="$(mktemp)"
-  {
-    printf '🔴 The automated read of this PR is INCOMPLETE — it needs a HUMAN review of the files no reader covered.\n\n'
-    cat "$INCOMPLETE_FILE"
-    printf '\nReview those files yourself, then resolve this thread; the review-findings gate stays red until it is resolved.\n'
-  } >"$incomplete_prose"
-  raise_human_review_finding "$INCOMPLETE_READ_MARKER" "$incomplete_prose"
-  rm -f "$incomplete_prose"
 fi
 
 # The read stamp goes on the payload's own summary body, so the ONE post that records

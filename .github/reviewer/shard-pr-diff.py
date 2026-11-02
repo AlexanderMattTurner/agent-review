@@ -2,13 +2,16 @@
 """Split a unified diff into per-file shards small enough for one model read.
 
 The PR reviewer reads the whole diff in one context, so above roughly 12,000
-lines (~13.6 tokens/line, measured) it no longer fits and the review is skipped
-entirely.
+lines (~13.6 tokens/line, measured) it no longer fits and is read in shards.
 
 Shards never split a file. A reviewer handed half a hunk cannot tell an unsafe
 change from a truncation, so a file bigger than the shard budget gets its own
 oversize shard instead: still a complete file, just a larger read. The caller
 sees `oversize` in the manifest and can decide.
+
+--max-shards is GitHub's limit on one matrix. A diff that would need more shards
+gets a larger per-shard budget until it fits, so every line still lands in a
+shard; the manifest's `max_lines` records the budget used.
 
 Every shard is read the same way: the same prompt, the same models and the
 same credential ladder as a whole-diff read. Only the slice of diff differs.
@@ -18,9 +21,7 @@ per-shard line counts and file lists, and the totals a review's coverage line is
 built from. With GITHUB_OUTPUT set, also emits `shard_count` and `shards` (a JSON
 array of shard basenames, for a workflow matrix).
 
-Exit codes: 0 on success, OVER_BUDGET_EXIT when the diff needs more than
---max-shards shards (the caller falls back to a human-review notice), 1 on an
-input that is not a diff at all.
+Exit codes: 0 on success, 1 on an input that is not a diff at all.
 """
 
 import argparse
@@ -32,11 +33,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # pylint: disable=wrong-import-position  # must follow the sys.path insert above
 from _diff_sections import FILE_HEADER, file_path_of, split_into_files  # noqa: E402
-
-# Distinct from 1 (a broken/absent input) so the caller can tell "this diff is too
-# big even to shard — post the human-review notice" from "the sharder itself
-# failed", which must stay a red job rather than a quiet notice.
-OVER_BUDGET_EXIT = 3
 
 
 def pack(files: list[list[str]], max_lines: int) -> list[list[list[str]]]:
@@ -61,6 +57,22 @@ def pack(files: list[list[str]], max_lines: int) -> list[list[list[str]]]:
     return shards
 
 
+def pack_within(
+    files: list[list[str]], max_lines: int, max_shards: int
+) -> tuple[list[list[list[str]]], int]:
+    """Pack at max_lines, growing the budget until at most max_shards shards
+    come out (0 means no bound). Returns the shards and the budget used.
+
+    Terminates: once the budget reaches the whole diff, one shard holds it.
+    """
+    budget = max_lines
+    shards = pack(files, budget)
+    while max_shards and len(shards) > max_shards:
+        budget += -(-budget // 8)
+        shards = pack(files, budget)
+    return shards, budget
+
+
 def main() -> None:
     """Split the diff at --diff into shards under --out-dir, with a manifest."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -80,7 +92,7 @@ def main() -> None:
         "--max-shards",
         type=int,
         default=0,
-        help="refuse (exit 3) above this many shards; 0 (default) means no bound",
+        help="grow --max-lines until at most this many shards; 0 (default) means no bound",
     )
     args = parser.parse_args()
 
@@ -91,15 +103,7 @@ def main() -> None:
             f"{args.diff}: no `{FILE_HEADER}` sections — not a unified diff"
         )
 
-    shards = pack(files, args.max_lines)
-    # Refuse BEFORE writing anything, so an over-budget run leaves no half-written
-    # shard set a later step could mistake for a complete one.
-    if args.max_shards and len(shards) > args.max_shards:
-        print(
-            f"{args.diff}: needs {len(shards)} shards, over --max-shards={args.max_shards}",
-            file=sys.stderr,
-        )
-        raise SystemExit(OVER_BUDGET_EXIT)
+    shards, max_lines = pack_within(files, args.max_lines, args.max_shards)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +124,7 @@ def main() -> None:
                 "lines": line_count,
                 "files": paths,
                 # One file that alone exceeds the budget: kept whole on purpose.
-                "oversize": line_count > args.max_lines,
+                "oversize": line_count > max_lines,
             }
         )
 
@@ -130,7 +134,7 @@ def main() -> None:
                 "shards": manifest,
                 "total_lines": diff_text.count("\n"),
                 "total_files": len(files),
-                "max_lines": args.max_lines,
+                "max_lines": max_lines,
             },
             indent=2,
         )
@@ -146,7 +150,7 @@ def main() -> None:
     oversize = sum(1 for s in manifest if s["oversize"])
     print(
         f"split {diff_text.count(chr(10))} lines across {len(files)} files "
-        f"into {len(manifest)} shards (max {args.max_lines} lines"
+        f"into {len(manifest)} shards (max {max_lines} lines"
         + (f", {oversize} oversize" if oversize else "")
         + ")"
     )

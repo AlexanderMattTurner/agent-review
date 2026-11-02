@@ -148,7 +148,7 @@ def load_script_module(name: str, path: Path) -> types.ModuleType:
 def load_script(rel: str) -> types.ModuleType:
     """Import the script at REPO_ROOT/<rel> in-process (see load_script_module),
     under a module name derived from the filename: suffix dropped, every
-    non-identifier character mapped to `_` (`pr/files-to-diff.py` -> files_to_diff)."""
+    non-identifier character mapped to `_` (`shard-pr-diff.py` -> shard_pr_diff)."""
     path = REPO_ROOT / rel
     return load_script_module(re.sub(r"\W", "_", path.stem), path)
 
