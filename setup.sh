@@ -30,7 +30,7 @@ fi
 
 # Install Python dependencies if applicable
 if [[ -f uv.lock ]] && command -v uv &>/dev/null; then
-  uv sync
+  uv sync --all-extras
 fi
 
 # Register the syntax-aware merge driver .gitattributes names. Those attributes
