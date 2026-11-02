@@ -488,6 +488,19 @@ jobs:
           REVIEW_TIMEOUT_SECONDS: ${{ inputs.review-timeout-seconds }}
         run: /usr/bin/python3 "${REVIEWER_DIR}/review-ladder.py" plan
 
+      - name: Point the action's config restore at the default branch
+        # Under pull_request_target the action ignores `base_branch` and runs
+        # `git fetch origin <pull_request.base.ref>` from the event file. That
+        # ref is author-chosen, and a stacked PR's base can be deleted while the
+        # job waits for a runner, which fails every attempt. Expressions read a
+        # separate copy of the event, so only the action sees this edit.
+        if: github.event_name == 'pull_request_target'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          jq --arg ref "${DEFAULT_BRANCH}" '.pull_request.base.ref = $ref' "${GITHUB_EVENT_PATH}" >"${RUNNER_TEMP}/pr-review-event.json"
+          mv "${RUNNER_TEMP}/pr-review-event.json" "${GITHUB_EVENT_PATH}"
+
       # One credential attempt. Every copy below is this same step: the judge
       # step after it sets LADDER_GO, LADDER_RUNG and LADDER_KIND for the next
       # copy. The token is chosen by rung number here, in the expression, so no
@@ -527,10 +540,10 @@ jobs:
           # minting its GitHub App token, which would carry write scopes.
           github_token: ${{ github.token }}
           prompt: ${{ steps.plan.outputs.prompt }}
-          # INVARIANT — the action restores CLAUDE.md and .claude/ from this branch
-          # over the checkout before the model starts. Under pull_request_target it
-          # reads this input, not the PR's base, so a PR stacked on another branch
-          # still runs on the default branch's instructions.
+          # INVARIANT — under pull_request_target the action restores CLAUDE.md
+          # and .claude/ over the checkout from the event's base.ref, which the
+          # step above set to this same branch. A dispatch restores nothing, and
+          # its checkout is already this branch.
           base_branch: ${{ github.event.repository.default_branch }}
           # The model is named here, ahead of the plan's flags, so the step that
           # spends the credential states which model it pays for.
