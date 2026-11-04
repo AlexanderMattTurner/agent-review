@@ -177,6 +177,30 @@ def test_a_clean_result_without_the_findings_is_not_an_answer(
     assert attempts == [(1, "oauth"), (2, "oauth")]
 
 
+def test_an_answer_given_while_background_agents_ran_is_not_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that answered while its background reviewers still ran posted an
+    empty review as clean. It must leave no findings.json and let the next rung
+    read again, and every attempt runs with background tasks disabled."""
+    early = [
+        {"type": "system", "subtype": "task_started", "is_backgrounded": True},
+        *_answered(),
+    ]
+    foreground = [
+        {"type": "system", "subtype": "task_started", "is_backgrounded": False},
+        {**_answered()[0], "structured_output": {"summary": "full", "findings": []}},
+    ]
+    logs = {1: early, 2: foreground}
+    attempts, _, env = _walk(
+        tmp_path, monkeypatch, {1: "oauth", 2: "oauth"}, log_for=logs.__getitem__
+    )
+    assert attempts == [(1, "oauth"), (2, "oauth")]
+    findings = json.loads((tmp_path / "pr-input" / "findings.json").read_text())
+    assert findings == {"summary": "full", "findings": []}
+    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+
 def test_a_timed_out_attempt_stops_the_ladder_and_the_gate_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

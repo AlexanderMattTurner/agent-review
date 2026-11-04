@@ -14,7 +14,8 @@ step but an attempt holds a credential, and each attempt holds only its own.
 
   plan  env RUNG_<i>_KIND, REVIEW_TIMEOUT_SECONDS, MODEL, MODEL_LOW, PROMPT_FILE,
         EXTRA_INSTRUCTIONS_FILE, PR_NUMBER, REPO, DEFAULT_BRANCH, PR_INPUT_DIR. Writes the
-        outputs prompt and claude_args, and arms attempt 1.
+        outputs prompt and claude_args, sets READ_ENV for every later step, and arms
+        attempt 1.
   next  env LADDER_*, RUNNER_TEMP, PR_INPUT_DIR. Moves the attempt's log aside,
         writes findings.json on a win, sets REVIEW_EXECUTION_FILE, and arms the
         next attempt or sets LADDER_GO=false.
@@ -51,6 +52,12 @@ FILE_TOOLS = ("Read", "Grep", "Glob")
 SCOPED_PATHS = ("./**", "/{d}/**", "/{p}/**")
 AGENT_TOOLS = "Task,Agent,TodoWrite"
 DENIED_TOOLS = "Bash,BashOutput,KillShell,WebFetch,WebSearch,Write,Edit,NotebookEdit,Read(//proc/**),Grep(//proc/**),Glob(//proc/**)"
+
+# The CLI environment every read runs under. INVARIANT — no sub-agent runs in the
+# background. Under --json-schema, a turn that ends while sub-agents still run gets
+# the CLI's "call StructuredOutput now" nudge, so the read answers before its
+# reviewers report and posts an empty review that reads as clean.
+READ_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 # What a killed attempt reports. `zero_cost` false, because a run the wall clock cut
 # short may already have billed a whole read. `wall_clock_only` stops the ladder: a
@@ -241,6 +248,7 @@ def plan() -> None:
         {
             "LADDER_PLAN": json.dumps(slots),
             "LADDER_TIMEOUT_MINUTES": str(max(1, math.ceil(timeout / 60))),
+            **READ_ENV,
         }
     )
     arm(1, slots)
@@ -260,19 +268,33 @@ def plan() -> None:
     )
 
 
-def result_of(log: Path) -> dict | None:
-    """The attempt's terminal result event, or None for a log that is missing,
-    empty, truncated or result-less."""
+def events_of(log: Path) -> list[dict]:
+    """The attempt's log events; empty for a log that is missing, empty or
+    truncated."""
     try:
         events = json.loads(log.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return []
     if isinstance(events, dict):
         events = [events]
     if not isinstance(events, list):
-        return None
-    results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"]
+        return []
+    return [e for e in events if isinstance(e, dict)]
+
+
+def result_of(log: Path) -> dict | None:
+    """The attempt's terminal result event, or None for a log without one."""
+    results = [e for e in events_of(log) if e.get("type") == "result"]
     return results[-1] if results else None
+
+
+def backgrounded_agents(log: Path) -> int:
+    """How many sub-agents the attempt launched in the background. Their reports
+    can arrive after the read's answer, so that answer may omit them."""
+    return sum(
+        e.get("subtype") == "task_started" and e.get("is_backgrounded") is True
+        for e in events_of(log)
+    )
 
 
 def outcome_of(result: dict | None) -> RungOutcome:
@@ -324,6 +346,15 @@ def next_slot() -> None:
         )
     else:
         outcome = outcome_of(result)
+    # This refusal is what keeps a read that READ_ENV failed to hold from posting
+    # its partial answer as a complete review.
+    if not outcome.errored and (late := backgrounded_agents(log)):
+        print(
+            f"::error::attempt {slot} answered while {late} background sub-agent(s) "
+            "could still report, so its findings are incomplete",
+            flush=True,
+        )
+        outcome = RungOutcome(errored=True, zero_cost=False)
     if log.is_file() and log.stat().st_size:
         set_env({"REVIEW_EXECUTION_FILE": str(log)})
     if not outcome.errored:

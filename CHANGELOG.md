@@ -26,6 +26,8 @@ the prose from the release's commits.
 
 ### Fixed
 
+- A review no longer posts an empty verdict when its reviewer sub-agents run in the background. The read's coordinating agent could launch its bug and convention reviewers in the background and end its turn. The CLI then forced the structured answer at once, so the review said it found nothing before most reviewers had reported. Every read now runs with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, and a read whose log still shows a background sub-agent counts as a failed attempt, not as a clean review.
+
 - A review no longer fails when the pull request's base branch is deleted while the read job waits for a runner. The read and the merge-delta review now restore `CLAUDE.md` and `.claude/` from the trusted default-branch checkout. Before, they fetched the base branch named in the event, which failed every attempt with `couldn't find remote ref`. A stacked pull request also no longer runs on its base branch's `.claude/` config.
 
 - A review no longer ends with a sentence about the input sanitizer when the sanitizer found nothing. The summary mentions the sanitizer only when it neutralized something in the diff or the metadata.
