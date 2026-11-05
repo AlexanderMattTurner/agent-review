@@ -47,6 +47,7 @@ DEFINITIONS_MAX = 20
 MIN_COPY_CHARS = 30
 MAX_COPY_LINES = 40
 MAX_OPEN_PRS = 30
+SHELL_GLOBS = ("*.sh", "*.bash", "*.zsh")
 # The whole run's wall clock. The prepare job that runs this has its own timeout,
 # and a slow `git log -L` must cost the review its evidence, never its read.
 BUDGET_SECONDS = 300
@@ -221,10 +222,20 @@ def copies(base: str, head: str) -> list[str]:
     """Section (b): other definitions of a changed name, and changed lines found elsewhere."""
     lines: list[str] = []
     for path, name in touched_definitions(base, head):
-        pattern = rf"(def|class|function)[[:space:]]+{name}\b|^[[:space:]]*{name}[[:space:]]*\(\)"
-        hits = git("grep", "-n", "-I", "-E", "-e", pattern, ok=(0, 1)).splitlines()
+        keyword = rf"(def|class|function)[[:space:]]+{name}\b"
+        hits = git("grep", "-n", "-I", "-E", "-e", keyword, ok=(0, 1)).splitlines()
+        # `name()` alone is a call in most languages, so it names a definition only in shell.
+        shell = rf"^[[:space:]]*{name}[[:space:]]*\(\)"
+        hits += git(
+            "grep", "-n", "-I", "-E", "-e", shell, "--", *SHELL_GLOBS, ok=(0, 1)
+        ).splitlines()
+        # git grep -n prints path:line:text; the text is source, so it stays out.
         others = sorted(
-            h.rsplit(":", 1)[0] for h in hits if not h.startswith(f"{path}:")
+            {
+                ":".join(h.split(":", 2)[:2])
+                for h in hits
+                if not h.startswith(f"{path}:")
+            }
         )
         if others:
             lines.append(

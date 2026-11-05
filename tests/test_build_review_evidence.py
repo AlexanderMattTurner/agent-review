@@ -60,6 +60,9 @@ def _pr(tmp_path: Path) -> tuple[Path, str, str]:
             ".gitattributes": "*.py diff=python\n",
             "m.py": _module("return 1"),
             "copy.sh": f"{COPY}\n",
+            "lib.py": "def fetch():\n    return `x`\n",
+            "run.py": "def go():\n    fetch()\n",
+            "util.sh": "fetch() {\n  :\n}\n",
             "tests/test_m.py": "def test_fetch():\n    assert True\n",
         },
         "feat: add fetch",
@@ -116,6 +119,16 @@ def test_the_evidence_names_the_earlier_fix_the_copy_and_the_open_pr(pr) -> None
     assert "#8" not in text and "#9 " not in text
     assert not marker.exists()
     assert _build(checkout, head)[1].read_text("utf-8") == text
+
+
+def test_another_definition_is_named_by_path_and_line_and_a_call_is_not(pr) -> None:
+    """lib.py and util.sh define `fetch`; run.py only calls it, on a line of its own."""
+    checkout, head, _ = pr
+    proc, out = _build(checkout, head)
+    assert proc.returncode == 0, proc.stderr
+    assert "- `fetch` (m.py) is also defined at lib.py:1, util.sh:1\n" in out.read_text(
+        "utf-8"
+    )
 
 
 def test_a_failed_open_pr_list_is_not_known_and_the_git_sections_still_ship(pr) -> None:
