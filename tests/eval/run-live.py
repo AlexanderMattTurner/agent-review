@@ -21,6 +21,7 @@ count this run will spend are printed before the first `claude` invocation.
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -167,7 +168,13 @@ def _run_one(case_dir: Path, case: dict, model: str, workdir: Path) -> dict:
     log_path = workdir / "execution.json"
     with log_path.open("wb") as log_file:
         try:
-            subprocess.run(command, stdout=log_file, cwd=repo, check=False)
+            subprocess.run(
+                command,
+                stdout=log_file,
+                cwd=repo,
+                env={**os.environ, **_ladder.READ_ENV},
+                check=False,
+            )
         except FileNotFoundError:
             sys.exit("::error:: no `claude` on PATH")
 
