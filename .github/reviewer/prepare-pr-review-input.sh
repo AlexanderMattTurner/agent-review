@@ -19,13 +19,17 @@
 # `diverged` and the whole diff is read instead — the one disposition that cannot
 # claim coverage it does not have.
 #
+# An author outside the repository may start at most MAX_UNTRUSTED_READ_LEGS read
+# legs. A diff that needs more is WITHHELD until a trusted person adds REVIEW_LABEL.
+#
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
-# Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
-# covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
-# size bounds below are optional.
-# Emits to GITHUB_OUTPUT: diff_lines, sharded, stale, shards, shard_count (the
-# last two written by shard-pr-diff.py). Writes into $PR_INPUT_DIR:
-# diff.txt/meta.txt, context.txt, coverage.json, sanitizer-report.txt, shards/.
+# Env: PR, PR_INPUT_DIR, HEAD_SHA, MAX_UNTRUSTED_READ_LEGS; READ (first|delta,
+# default first), SINCE (the covered head a delta read starts after),
+# REVIEWER_SHA, ELIDE_COMMAND, REVIEW_LABEL and the size bounds below are optional.
+# Emits to GITHUB_OUTPUT: diff_lines, sharded, stale, withheld, shards,
+# shard_count (the last two written by shard-pr-diff.py). Writes into
+# $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
+# sanitizer-report.txt, shards/, and withheld.txt for a withheld read.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +63,15 @@ SHARD_MAX_LINES="${SHARD_MAX_LINES:-4000}"
 # GitHub runs at most 256 jobs from one matrix. A diff that needs more shards gets
 # larger shards rather than an unread remainder: shard-pr-diff.py grows each one.
 MAX_SHARDS="${MAX_SHARDS:-256}"
+# Required, with no default here: review.yaml's `max-untrusted-read-legs` input owns
+# the number, and a second default in this script is a copy that drifts. The pattern
+# refuses a leading zero, which bash arithmetic reads as octal.
+MAX_UNTRUSTED_READ_LEGS="${MAX_UNTRUSTED_READ_LEGS:?MAX_UNTRUSTED_READ_LEGS required — review.yaml passes its max-untrusted-read-legs input}"
+[[ "$MAX_UNTRUSTED_READ_LEGS" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+  echo "max-untrusted-read-legs must be a whole number from 0 to 999 with no leading zero, not '$MAX_UNTRUSTED_READ_LEGS'" >&2
+  exit 1
+}
+REVIEW_LABEL="${REVIEW_LABEL:-needs-auto-review}"
 
 mkdir -p "$PR_INPUT_DIR" # bare-mkdir-ok: Linux CI runner (no BSD mkdir -p symlink semantics)
 
@@ -292,10 +305,42 @@ if [[ -s "$report" ]]; then
   echo "sanitizer neutralized injection-shaped content; see ${report}" >&2
 fi
 
+# PROBLEM CLASS — an author outside the repository spending the caller's credentials.
+# A fork's pull request gets a read under pull_request_target, and no size skips the
+# read, so one huge pull request would start up to 256 parallel legs on the caller's
+# top model. INVARIANT — this refusal bounds that spend: past MAX_UNTRUSTED_READ_LEGS,
+# an author GitHub does not name OWNER, MEMBER or COLLABORATOR gets no read until the
+# pull request carries REVIEW_LABEL, which only a person with triage access can add.
+# The read job then never starts, and post records the withheld read the gate holds on.
+withhold_untrusted_fan_out() {
+  local legs="$1" pr_rest association
+  if ((legs <= MAX_UNTRUSTED_READ_LEGS)); then
+    emit_output "withheld=false"
+    return 0
+  fi
+  pr_rest="$(retry_stdout gh api "repos/{owner}/{repo}/pulls/${PR}" \
+    --jq '{association: (.author_association // ""), labels: [.labels[]?.name]}')"
+  association="$(jq -r '.association' <<<"$pr_rest")"
+  case "$association" in
+  OWNER | MEMBER | COLLABORATOR) ;;
+  *)
+    if ! jq -e --arg label "$REVIEW_LABEL" 'any(.labels[]; . == $label)' <<<"$pr_rest" >/dev/null; then
+      printf "The diff needs %d read legs, and an author whose association is %s may start at most %d. A maintainer adds the \`%s\` label to start the read.\n" \
+        "$legs" "${association:-unknown}" "$MAX_UNTRUSTED_READ_LEGS" "$REVIEW_LABEL" >"${PR_INPUT_DIR}/withheld.txt"
+      emit_output "withheld=true"
+      echo "withheld the read: ${legs} legs for an author whose association is ${association:-unknown}, over the cap of ${MAX_UNTRUSTED_READ_LEGS}" >&2
+      return 0
+    fi
+    ;;
+  esac
+  emit_output "withheld=false"
+}
+
 # Size routing happens AFTER sanitization and elision, so the shards are slices
 # of exactly what the reviewer would otherwise have read.
 if ((diff_lines <= MAX_DIFF_LINES)); then
   emit_output "sharded=false"
+  withhold_untrusted_fan_out 1
   exit 0
 fi
 
@@ -307,3 +352,7 @@ python3 "$here/shard-pr-diff.py" \
 
 emit_output "sharded=true"
 echo "diff ${diff_lines} lines exceeds MAX_DIFF_LINES=${MAX_DIFF_LINES}; sharded for a fan-out review" >&2
+# A plain assignment, so an unreadable manifest stops the run here instead of
+# counting as zero legs, which no cap would withhold.
+legs="$(jq -e '.shards | length' "${PR_INPUT_DIR}/shards/manifest.json")"
+withhold_untrusted_fan_out "$legs"

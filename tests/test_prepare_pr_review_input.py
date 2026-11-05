@@ -154,6 +154,8 @@ def _fake_bins(
     added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
+    association: str = "OWNER",
+    labels: tuple[str, ...] = (),
 ) -> None:
     """Put a fake `gh` and a fake `node` (the sanitizer stand-in: cats stdin) on PATH.
 
@@ -165,7 +167,8 @@ def _fake_bins(
     `escape_byte` adds one hunk holding a literal ESC byte, mirroring the
     payload `gh pr diff` would otherwise refuse to print. `added_line` adds
     a hunk adding that one line, and `pr_body` is the PR description. `node_script` replaces the fake
-    `node`'s body.
+    `node`'s body. `association` and `labels` are what the REST read of the PR
+    answers: GitHub's `author_association` for its author, and its label names.
     """
     flaky = ""
     if flaky_budget:
@@ -233,6 +236,9 @@ def _fake_bins(
         f'  jq -r "$q" "{tmp_path}/compare.json"\n'
         # The review-thread read: one GraphQL page, put through the caller's own
         # `--jq` by the real jq, as `gh --jq` does per page.
+        # The REST read of the PR itself, for its author's association and labels.
+        'elif [[ "$1" == "api" && "$2" =~ /pulls/[0-9]+$ ]]; then\n'
+        f'  jq -r "$q" "{tmp_path}/pr-rest.json"\n'
         'elif [[ "$2" == "graphql" ]]; then\n'
         '  while [[ $# -gt 0 && "$1" != "--jq" ]]; do shift; done\n'
         f'  jq -c "$2" "{tmp_path}/threads.json"\n'
@@ -293,6 +299,15 @@ def _fake_bins(
         encoding="utf-8",
     )
     (tmp_path / "threads.json").write_text(json.dumps(THREADS_PAGE), encoding="utf-8")
+    (tmp_path / "pr-rest.json").write_text(
+        json.dumps(
+            {
+                "author_association": association,
+                "labels": [{"name": name} for name in labels],
+            }
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "compare.json").write_text(
         json.dumps(compare or {"status": "identical", "files": []}), encoding="utf-8"
     )
@@ -328,6 +343,9 @@ def _run(
     added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
+    association: str = "OWNER",
+    labels: tuple[str, ...] = (),
+    max_untrusted_read_legs: int = 4,
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
     """Run the script with fakes on PATH; return (proc, GITHUB_OUTPUT map, input dir).
 
@@ -350,6 +368,8 @@ def _run(
         added_line=added_line,
         pr_body=pr_body,
         node_script=node_script,
+        association=association,
+        labels=labels,
     )
     extra_env = {}
     if flaky_budget:
@@ -400,6 +420,7 @@ def _run(
             # the commit it covered must not post one.
             "HEAD_SHA": HEAD_SHA,
             "PR_INPUT_DIR": str(input_dir),
+            "MAX_UNTRUSTED_READ_LEGS": str(max_untrusted_read_legs),
             **{k: str(v) for k, v in bounds.items() if v is not None},
             **extra_env,
             **(env or {}),
@@ -609,6 +630,104 @@ def test_oversized_diff_is_sharded_rather_than_skipped(tmp_path: Path) -> None:
         (input_dir / "shards" / name).read_text(encoding="utf-8") for name in shards
     )
     assert body == (input_dir / "diff.txt").read_text(encoding="utf-8")
+
+
+# ── The read-leg cap for an author outside the repository ─────────────────────
+#
+# Six files at ten lines a shard are three legs, over a cap of two. A fork's
+# pull request runs under pull_request_target on the caller's credentials, so
+# the cap is what bounds the spend one stranger's pull request can start.
+
+
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"]
+)
+def test_an_untrusted_author_over_the_leg_cap_is_withheld(
+    tmp_path: Path, association: str
+) -> None:
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=6,
+        max_diff_lines=10,
+        shard_max_lines=10,
+        association=association,
+        max_untrusted_read_legs=2,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "true"
+    reason = (input_dir / "withheld.txt").read_text(encoding="utf-8")
+    assert (
+        f"needs 3 read legs, and an author whose association is {association}" in reason
+    )
+    assert "may start at most 2" in reason
+    assert "`needs-auto-review` label" in reason
+
+
+@pytest.mark.parametrize(
+    ("association", "labels", "legs_cap"),
+    [
+        # A trusted author keeps the full fan-out.
+        ("OWNER", (), 2),
+        ("MEMBER", (), 2),
+        ("COLLABORATOR", (), 2),
+        # A person with triage access opted the pull request in.
+        ("CONTRIBUTOR", ("needs-auto-review",), 2),
+        # The diff fits the cap.
+        ("CONTRIBUTOR", (), 3),
+    ],
+)
+def test_the_leg_cap_withholds_nothing_else(
+    tmp_path: Path, association: str, labels: tuple[str, ...], legs_cap: int
+) -> None:
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=6,
+        max_diff_lines=10,
+        shard_max_lines=10,
+        association=association,
+        labels=labels,
+        max_untrusted_read_legs=legs_cap,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "false"
+    assert int(outputs["shard_count"]) == 3
+    assert not (input_dir / "withheld.txt").exists()
+
+
+def test_a_whole_read_is_one_leg_against_the_cap(tmp_path: Path) -> None:
+    """An unsharded diff is one leg, so only a cap of 0 withholds it."""
+    (tmp_path / "one").mkdir()
+    (tmp_path / "zero").mkdir()
+    proc, outputs, _ = _run(
+        tmp_path / "one",
+        files=2,
+        max_diff_lines=100,
+        association="NONE",
+        max_untrusted_read_legs=1,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "false"
+    proc, outputs, _ = _run(
+        tmp_path / "zero",
+        files=2,
+        max_diff_lines=100,
+        association="NONE",
+        max_untrusted_read_legs=0,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "true"
+
+
+@pytest.mark.parametrize("cap", ["08", "-1", "1000", ""])
+def test_a_malformed_leg_cap_fails_loud(tmp_path: Path, cap: str) -> None:
+    proc, _, _ = _run(
+        tmp_path, files=2, max_diff_lines=100, env={"MAX_UNTRUSTED_READ_LEGS": cap}
+    )
+    assert proc.returncode != 0
+    assert (
+        "MAX_UNTRUSTED_READ_LEGS" in proc.stderr
+        or "max-untrusted-read-legs" in proc.stderr
+    )
 
 
 def test_a_diff_needing_more_than_max_shards_is_still_read_whole(

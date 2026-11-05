@@ -131,8 +131,13 @@ on:
         required: false
         default: 4000
         type: number
+      max-untrusted-read-legs:
+        description: "The most read legs an author outside the repository may start, from 0 to 999. An author GitHub does not name OWNER, MEMBER or COLLABORATOR gets no read when the diff needs more legs than this, until a person with triage access adds the `review-label` label. Until then the review-findings gate holds the merge and says why. A trusted author always gets every leg the diff needs."
+        required: false
+        default: 4
+        type: number
       reviewer-defect-issue:
-        description: "Number of an issue in the CALLING repository. When the reviewer falls short on a pull request — a read leg failed after its retries, findings could not be posted, or files went unread — the `post` job comments there once, naming the pull request, the head, what fell short and the run. Empty writes the same text to the job summary and a warning instead. Either way the merge gate judges the findings the review has; nothing waits for a person."
+        description: "Number of an issue in the CALLING repository. When the reviewer falls short on a pull request — a read leg failed after its retries, findings could not be posted, or files went unread — the `post` job comments there once, naming the pull request, the head, what fell short and the run. Empty writes the same text to the job summary and a warning instead. Either way the review-findings gate holds the merge until a complete read, or until a person other than the author resolves the reviewer's hold thread."
         required: false
         default: ""
         type: string
@@ -280,6 +285,8 @@ jobs:
       skip: ${{ steps.recheck.outputs.skip }}
       # The sanitized input exists, for a head that is still the live one.
       prepared: ${{ steps.prepare.conclusion == 'success' && steps.prepare.outputs.stale != 'true' }}
+      # The diff needs more legs than its untrusted author may start, so no leg reads it.
+      withheld: ${{ steps.prepare.outputs.withheld == 'true' }}
       # The read matrix: the sharder's list, or the one `whole` leg for a diff
       # that fits one context.
       shards: ${{ steps.prepare.outputs.sharded == 'true' && steps.prepare.outputs.shards || '["whole"]' }}
@@ -361,7 +368,8 @@ jobs:
       - name: Fetch and sanitize the untrusted PR input
         # Writes the sanitized files the agent reads, and ROUTES the review: a
         # diff over max-diff-lines is split per file for the read matrix. No
-        # size skips the read.
+        # size skips the read, but an untrusted author past the leg cap is
+        # withheld until a trusted person adds the review label.
         id: prepare
         if: steps.recheck.outputs.skip != 'true' && steps.fresh.outputs.stale != 'true'
         env:
@@ -372,6 +380,9 @@ jobs:
           ELIDE_COMMAND: ${{ inputs.elide-command }}
           MAX_DIFF_LINES: ${{ inputs.max-diff-lines }}
           SHARD_MAX_LINES: ${{ inputs.shard-max-lines }}
+          # The fan-out an untrusted author may start, and the label that lifts it.
+          MAX_UNTRUSTED_READ_LEGS: ${{ inputs.max-untrusted-read-legs }}
+          REVIEW_LABEL: ${{ inputs.review-label }}
           # What the coverage stamp will claim, and where an accumulated read
           # starts. HEAD_SHA is the head decide resolved: prepare refuses to read a
           # pull request whose head moved since, rather than stamping a head that
@@ -401,7 +412,7 @@ jobs:
   read:
     name: Claude PR review (read)
     needs: [decide, prepare]
-    if: needs.prepare.outputs.prepared == 'true'
+    if: needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs.withheld != 'true'
     runs-on: ubuntu-latest
     strategy:
       # No fail-fast: one leg's credential exhaustion must not cancel the others.
@@ -697,7 +708,7 @@ jobs:
         # read is incomplete, and leaves the marker that keeps it from counting
         # as a read; merge-shard-reviews.mjs owns that rule.
         id: fold
-        if: always() && steps.input.outcome == 'success'
+        if: always() && steps.input.outcome == 'success' && needs.prepare.outputs.withheld != 'true'
         env:
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
           SHARD_REVIEW_DIR: ${{ runner.temp }}/read-legs
@@ -719,12 +730,23 @@ jobs:
           REVIEWER_SHORTFALL_FILE: ${{ runner.temp }}/reviewer-shortfalls.txt
         run: bash "${REVIEWER_DIR}/post-pr-review.sh"
 
+      - name: Record the withheld read
+        # No leg ran, so this review is the only record of why. The gate below
+        # holds the merge on its marker until a read the label opts into.
+        if: always() && steps.input.outcome == 'success' && needs.prepare.outputs.withheld == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.decide.outputs.pr }}
+          PR_INPUT_DIR: ${{ runner.temp }}/pr-input
+        run: bash "${REVIEWER_DIR}/post-withheld-read.sh"
+
       - name: Report where the reviewer fell short
-        # A shortfall is a defect in the reviewer, never a reason to hold the PR
-        # for a person: this posts ONE comment on reviewer-defect-issue (or the
-        # job summary and a warning), and the gate below judges the findings
-        # the review has.
-        if: always()
+        # A shortfall is a defect in the reviewer: this posts ONE comment on
+        # reviewer-defect-issue (or the job summary and a warning). The gate
+        # below holds the merge on the shortfall marker the review carries. A
+        # withheld read is the cap working, not a defect, so it reports nothing.
+        if: always() && needs.prepare.outputs.withheld != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
