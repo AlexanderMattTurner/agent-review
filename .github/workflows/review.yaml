@@ -16,11 +16,12 @@
 #      Nothing requires a PR to target the default branch, so a `base.ref`
 #      checkout would run branch A's rewritten machinery while PR B's own diff
 #      stays clean.
-#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`
-#      and the head's git objects the evidence builder fetches and never checks
-#      out, and they pass the agent-sanitizer before the agent sees them. The agent
+#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`,
+#      and they pass the agent-sanitizer before the agent sees them. The agent
 #      has no shell and no network tool, so it cannot fetch them past the
 #      sanitizer.
+#      The root-cause evidence builder in `prepare` fetches the head's git objects
+#      and never checks them out; its file takes the same sanitizer pass.
 #   3. Least privilege per job. `read`, the only job that runs a model, holds
 #      `contents: read` alone and posts nothing, in every matrix leg. `post` and
 #      `gate` hold the write scopes and run no model.

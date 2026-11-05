@@ -19,13 +19,16 @@
 # `diverged` and the whole diff is read instead — the one disposition that cannot
 # claim coverage it does not have.
 #
+# ROOT_CAUSE_EVIDENCE=true (optional) also writes $PR_INPUT_DIR/evidence.md, the
+# sanitized output of build-review-evidence.py, beside the files listed below.
+#
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
 # Env: PR, PR_INPUT_DIR, HEAD_SHA; READ (first|delta, default first), SINCE (the
-# covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND,
-# ROOT_CAUSE_EVIDENCE (true writes evidence.md) and the size bounds below are optional.
+# covered head a delta read starts after), REVIEWER_SHA, ELIDE_COMMAND and the
+# size bounds below are optional.
 # Emits to GITHUB_OUTPUT: diff_lines, sharded, unreviewable, stale, shards,
 # shard_count (the last two written by shard-pr-diff.py). Writes into
-# $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, evidence.md, coverage.json,
+# $PR_INPUT_DIR: diff.txt/meta.txt, context.txt, coverage.json,
 # sanitizer-report.txt, shards/, oversized-notice.txt.
 set -euo pipefail
 
