@@ -24,9 +24,14 @@ the prose from the release's commits.
 
 ### Changed
 
+- **Breaking:** the accumulated review is now off by default. `max-delta-reviews-per-pr` defaults to `0`, and so does `max_delta_reviews_per_pr` in the severity config. Each accumulated read could post findings whose fixes owed another read, so a pull request never settled. With `0` the merge gate goes green once the first read's findings are resolved, and its description names the commit the reading stopped at. A caller that wants the read back sets `max-delta-reviews-per-pr` and the config key to the same number.
 - The reviewer now spends the paid Anthropic API key last, not first. A review tries every Claude Code subscription token before it bills real credits. The paid key moves from `rung_1` to `rung_8`, and rungs 1 to 7 hold the subscription tokens. No single rung is required any more: the review refuses to run only when no rung holds a paid key. A caller that still passes the paid key in `rung_1` keeps working: the reviewer tells a paid key from a subscription token by its prefix, authenticates it the right way, and tries it last. The free same-credential retry now runs only when one credential is configured.
 
 ### Fixed
+
+- A review no longer posts an empty verdict when its reviewer sub-agents run in the background. The read's coordinating agent could launch its bug and convention reviewers in the background and end its turn. The CLI then forced the structured answer at once, so the review said it found nothing before most reviewers had reported. Every read now runs with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, and a read whose log still shows a background sub-agent counts as a failed attempt, not as a clean review.
+
+- A review no longer fails when the pull request's base branch is deleted while the read job waits for a runner. The read and the merge-delta review now restore `CLAUDE.md` and `.claude/` from the trusted default-branch checkout. Before, they fetched the base branch named in the event, which failed every attempt with `couldn't find remote ref`. A stacked pull request also no longer runs on its base branch's `.claude/` config.
 
 - A review no longer ends with a sentence about the input sanitizer when the sanitizer found nothing. The summary mentions the sanitizer only when it neutralized something in the diff or the metadata.
 

@@ -346,13 +346,14 @@ def _run(
     association: str = "OWNER",
     labels: tuple[str, ...] = (),
     max_untrusted_read_legs: int = 4,
+    cwd: Path = REPO_ROOT,
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
     """Run the script with fakes on PATH; return (proc, GITHUB_OUTPUT map, input dir).
 
     A size bound passed as None is left OUT of the environment, so the script's
     own default governs that run. `patch_pad_bytes` pads every file's `patch` in
     the files-API reply, which is how a test grows that reply without growing the
-    diff.
+    diff. `cwd` is the checkout the script runs in.
     """
     _fake_bins(
         tmp_path,
@@ -402,7 +403,7 @@ def _run(
     proc = subprocess.run(
         ["bash", str(SCRIPT)],
         check=False,
-        cwd=REPO_ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         env={
@@ -1077,3 +1078,57 @@ def test_a_delta_keeps_the_section_of_a_file_git_quotes(tmp_path: Path) -> None:
     assert "diff --git a/f0.py" not in diff, diff
     coverage = json.loads((input_dir / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["scope"] == f"since:{SINCE}"
+
+
+def _checkout(tmp_path: Path) -> Path:
+    """A one-commit checkout whose origin lacks HEAD_SHA, so the evidence fetch fails."""
+    remote = tmp_path / "remote"
+    init_test_repo(remote)
+    commit_files(remote, {"m.py": "x = 1\n"}, "feat: m")
+    checkout = tmp_path / "checkout"
+    git_out(tmp_path, "clone", "-q", "--depth=1", f"file://{remote}", str(checkout))
+    return checkout
+
+
+@pytest.mark.parametrize("asked", [True, False])
+def test_root_cause_evidence_is_written_through_the_sanitizer_only_when_asked(
+    tmp_path: Path, asked: bool
+) -> None:
+    """The evidence quotes PR text, so the agent gets it only after the sanitizer.
+    A head the fetch cannot reach costs the evidence, never the read."""
+    env = {"ROOT_CAUSE_EVIDENCE": "true"} if asked else {}
+    proc, outputs, input_dir = _run(
+        tmp_path, files=1, max_diff_lines=100, env=env, cwd=_checkout(tmp_path)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["sharded"] == "false"
+    sanitized = (tmp_path / "sanitizer_input").read_text(encoding="utf-8")
+    assert ("# Root-cause evidence for PR #123" in sanitized) is asked
+    assert (input_dir / "evidence.md").is_file() is asked
+    if asked:
+        evidence = (input_dir / "evidence.md").read_text(encoding="utf-8")
+        assert "No merge base (git merge-base: " in evidence
+
+
+def test_a_dead_evidence_builder_leaves_a_file_that_says_so(tmp_path: Path) -> None:
+    """A builder that exits non-zero still leaves the read a file, and the job green."""
+    real = shutil.which("python3")
+    python = tmp_path / "python3"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        '[[ "$1" == *build-review-evidence.py ]] && exit 1\n'
+        f'exec {real} "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    proc, _, input_dir = _run(
+        tmp_path,
+        files=1,
+        max_diff_lines=100,
+        env={"ROOT_CAUSE_EVIDENCE": "true"},
+        cwd=_checkout(tmp_path),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "build-review-evidence.py failed" in proc.stderr
+    evidence = (input_dir / "evidence.md").read_text(encoding="utf-8")
+    assert "- not known: the evidence builder failed" in evidence

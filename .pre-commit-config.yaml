@@ -93,12 +93,16 @@ repos:
   # file (link rot from a moved or renamed target). `--offline` resolves only
   # local file links and skips every http(s)/mailto link, so the check is
   # deterministic and never flakes on a slow or unreachable external site.
-  - repo: https://github.com/lycheeverse/lychee
-    rev: lychee-v0.24.2
+  # lychee.sh says why this is a local hook rather than lychee's own.
+  - repo: local
     hooks:
       - id: lychee
+        name: lychee (offline markdown link check)
+        entry: bash .github/scripts/lychee.sh
+        language: system
         args: [--offline, --no-progress]
         types: [markdown]
+        require_serial: true
 
   # Honesty + identity CI lints: catch a green check that hides a failed
   # command (pipefail/|| true/2>/dev/null), a path-filtered required check that

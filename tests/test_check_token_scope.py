@@ -20,11 +20,14 @@ def run_scope_check(
     """Run check-token-scope.sh with a fake curl that emits the given headers."""
     echo_lines = "\n".join(f"echo {h!r}" for h in headers)
     fake_curl = tmp_path / "curl"
-    fake_curl.write_text(f"#!/usr/bin/env bash\n{echo_lines}\nexit {curl_exit}\n")
+    fake_curl.write_text(
+        f"#!/usr/bin/env bash\n{echo_lines}\nexit {curl_exit}\n", encoding="utf-8"
+    )
     fake_curl.chmod(0o755)
     env = {
         **os.environ,
         "TOKEN": "fake-token",
+        "TOKEN_SECRET_NAME": "SYNC_PAT_UNDER_TEST",
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
     }
     return subprocess.run(
@@ -70,3 +73,15 @@ def test_fails_when_curl_errors(tmp_path: Path) -> None:
         curl_exit=6,
     )
     assert result.returncode != 0
+
+
+def test_the_error_names_the_secret_the_workflow_reads(tmp_path: Path) -> None:
+    """The fix has to land in the secret the workflow reads, so the message names
+    that one. A hard-coded name sent users to set a secret nothing consumed."""
+    result = run_scope_check(
+        tmp_path,
+        ["HTTP/2 200", "x-oauth-scopes: repo, read:org"],
+    )
+    assert result.returncode != 0
+    assert "SYNC_PAT_UNDER_TEST" in result.stdout + result.stderr
+    assert "TEMPLATE_SYNC_TOKEN " not in result.stdout + result.stderr

@@ -17,8 +17,8 @@ REVIEWER = REPO_ROOT / ".github" / "reviewer"
 
 # (script, required env vars, vars to scrub from inherited environment)
 CASES = [
-    # check-token-scope.sh requires TOKEN
-    ("check-token-scope.sh", ["TOKEN"]),
+    # check-token-scope.sh requires TOKEN and the name of the secret it came from
+    ("check-token-scope.sh", ["TOKEN", "TOKEN_SECRET_NAME"]),
     # check-existing-security-pr.sh requires GH_TOKEN and DEFAULT_BRANCH
     ("check-existing-security-pr.sh", ["GH_TOKEN", "DEFAULT_BRANCH"]),
     # list-dependabot-prs.sh requires GH_TOKEN
@@ -27,8 +27,10 @@ CASES = [
     ("fetch-security-report.sh", ["GH_TOKEN", "REPO"]),
     # template-sync.sh requires GITHUB_OUTPUT
     ("template-sync.sh", ["GITHUB_OUTPUT"]),
-    # cancel-pr-runs.sh requires REPO, HEAD_REF, HEAD_SHA, GH_TOKEN
-    ("cancel-pr-runs.sh", ["REPO", "HEAD_REF", "HEAD_SHA", "GH_TOKEN"]),
+    # template-sync-marker-gate.sh requires BASE_SHA and GITHUB_TOKEN
+    ("template-sync-marker-gate.sh", ["BASE_SHA", "GITHUB_TOKEN"]),
+    # cancel-pr-runs.sh requires REPO, HEAD_REF, HEAD_SHA, CLOSED_AT, GH_TOKEN
+    ("cancel-pr-runs.sh", ["REPO", "HEAD_REF", "HEAD_SHA", "CLOSED_AT", "GH_TOKEN"]),
     # PR-review suite. The first-pass reviewer's own scripts moved to
     # .github/reviewer/, where the reusable review.yaml runs them.
     ("auto-approve-skipped-pr.sh", ["PR", "GH_REPO"]),

@@ -22,6 +22,9 @@
 # An author outside the repository may start at most MAX_UNTRUSTED_READ_LEGS read
 # legs. A diff that needs more is WITHHELD until a trusted person adds REVIEW_LABEL.
 #
+# ROOT_CAUSE_EVIDENCE=true (optional) also writes $PR_INPUT_DIR/evidence.md, the
+# sanitized output of build-review-evidence.py, beside the files listed below.
+#
 # Requires: gh authenticated (GH_TOKEN/GH_REPO), node + `pnpm install` done.
 # Env: PR, PR_INPUT_DIR, HEAD_SHA, MAX_UNTRUSTED_READ_LEGS; READ (first|delta,
 # default first), SINCE (the covered head a delta read starts after),
@@ -90,7 +93,8 @@ meta_pages="$(mktemp)"
 meta_raw="$(mktemp)"
 meta_threads="$(mktemp)"
 sanitizer_crash="$(mktemp)"
-trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$meta_threads" "$sanitizer_crash"' EXIT
+evidence_raw="$(mktemp)"
+trap 'rm -f "$raw_diff" "$gh_err" "$meta_pr" "$meta_pages" "$meta_raw" "$meta_threads" "$sanitizer_crash" "$evidence_raw"' EXIT
 
 # `gh pr diff` asks for the REST diff media type, which GitHub refuses with HTTP
 # 406 above 300 CHANGED FILES, and for a diff too large to render. Both are
@@ -262,6 +266,18 @@ jq -n --arg head "$HEAD_SHA" --arg base "$base_sha" --arg reviewer "$REVIEWER_SH
 python3 "$here/build-review-context.py" \
   --diff "${PR_INPUT_DIR}/diff.txt" --out "${PR_INPUT_DIR}/context.txt" --repo-dir .
 
+# Earlier fixes, copies and open PRs for the property read. The file quotes PR
+# text, so it takes the sanitizer pass. It is advisory: a builder that dies
+# leaves a file saying so, never a red prepare job.
+if [[ "${ROOT_CAUSE_EVIDENCE:-false}" == true ]]; then
+  if ! python3 "$here/build-review-evidence.py" --pr "$PR" --head "$HEAD_SHA" --out "$evidence_raw"; then
+    echo "::warning::build-review-evidence.py failed, so every evidence section is not known" >&2
+    printf '# Root-cause evidence for PR #%s\n\n- not known: the evidence builder failed; the prepare job log says why.\n' \
+      "$PR" >"$evidence_raw"
+  fi
+  sanitize_into evidence "${PR_INPUT_DIR}/evidence.md" "${PR_INPUT_DIR}/evidence.report.txt" <"$evidence_raw"
+fi
+
 # Counted on the SANITIZED diff, and after the elision, so every downstream
 # budget is spent on lines a review can act on.
 diff_lines="$(wc -l <"${PR_INPUT_DIR}/diff.txt" | tr -d '[:space:]')"
@@ -297,6 +313,10 @@ report="${PR_INPUT_DIR}/sanitizer-report.txt"
   if [[ -s "${PR_INPUT_DIR}/meta.report.txt" ]]; then
     echo "## Metadata"
     cat "${PR_INPUT_DIR}/meta.report.txt"
+  fi
+  if [[ -s "${PR_INPUT_DIR}/evidence.report.txt" ]]; then
+    echo "## Evidence"
+    cat "${PR_INPUT_DIR}/evidence.report.txt"
   fi
 } >"$report"
 

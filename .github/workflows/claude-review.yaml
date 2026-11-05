@@ -131,7 +131,7 @@ jobs:
       # `max_delta_reviews_per_pr` in config/review-severities.json, which the
       # gate reads: a reviewer budget above the gate's lets a head merge while
       # its read is still in flight.
-      max-delta-reviews-per-pr: 1
+      max-delta-reviews-per-pr: 0
       # Re-post the `Automated review posted` verdict once the review (and its
       # finding threads) exist. Nothing else would: the review posts with the
       # workflow GITHUB_TOKEN, whose events start no workflow run, so
@@ -233,6 +233,11 @@ jobs:
         env:
           PR_INPUT_DIR: ${{ runner.temp }}/pr-input
         run: bash .github/scripts/prepare-merge-delta-input.sh
+
+      - name: Serve the trusted checkout as the PR's base
+        # After prepare: its fetch of refs/pull/N/head must still reach GitHub.
+        if: steps.prepare.outputs.has_deltas == 'true'
+        run: bash .github/reviewer/serve-checkout-as-pr-base.sh
 
       - name: Review the merge deltas with Claude (Sonnet)
         if: steps.prepare.outputs.has_deltas == 'true'
