@@ -304,6 +304,22 @@ require_reads_marked_from() {
   }
 }
 
+# pr_author_facts <owner/name> <pr> — one REST read of the PR, as JSON {association,
+# trusted, labels}. `trusted` is true only for an `author_association` of OWNER,
+# MEMBER or COLLABORATOR. Non-zero once the retry ladder is exhausted.
+#
+# PROBLEM CLASS — deciding in more than one place which pull request author may
+# spend the caller's credentials. prepare-pr-review-input.sh caps an untrusted
+# author's read legs, and decide-pr-review-trigger.sh ignores an untrusted
+# author's `[opus-review]` commit title. Both ask here, so the two cannot disagree.
+pr_author_facts() {
+  # shellcheck disable=SC2016 # `$a` is a jq variable
+  retry_stdout gh api "repos/${1}/pulls/${2}" \
+    --jq '(.author_association // "") as $a
+          | {association: $a, trusted: ($a | IN("OWNER", "MEMBER", "COLLABORATOR")),
+             labels: [.labels[]?.name]}'
+}
+
 # latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON
 # object, or NOTHING when there are none, which a caller reads with `[[ -n … ]]`.
 #

@@ -20,7 +20,8 @@
 #
 # Triggers: `opened` fires whenever the budget is at least 1. `ready_for_review` /
 # `synchronize` fire only when: (1) "[opus-review]" is in the head commit TITLE,
-# bounded to once per tagged commit, opted in by a PUSH alone; (2) the PR has spent
+# bounded to once per tagged commit, opted in by a PUSH alone, and only for a
+# trusted author (pr_author_facts); (2) the PR has spent
 # fewer reads than the budget, which re-arms `opened` after an incomplete read or a
 # cancelled job.
 #
@@ -181,9 +182,18 @@ if [[ "$ACTION" == "synchronize" ]]; then
   # whose early exit SIGPIPEs the still-writing `gh` under pipefail.
   message="$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message' 2>/dev/null)" || message=""
   subject="${message%%$'\n'*}"
+  # INVARIANT — this is what keeps an untrusted author from buying a paid read per
+  # push: the author writes the commit title, so only an author pr_author_facts
+  # trusts may opt in by it. Anyone else falls through to the budget below, and the
+  # review label, which needs triage access, stays their way in. A failed read
+  # counts as untrusted.
   if grep -qiF "$KEYWORD" <<<"$subject"; then
-    emit true "$KEYWORD in head commit title"
-    exit 0
+    facts="$(pr_author_facts "$REPO" "${PR:-}" 2>/dev/null)" || facts="null"
+    if [[ "$(jq -r '.trusted // false' <<<"$facts" 2>/dev/null)" == "true" ]]; then
+      emit true "$KEYWORD in head commit title"
+      exit 0
+    fi
+    echo "ignoring $KEYWORD: the author's association is $(jq -r '.association // "unreadable"' <<<"$facts" 2>/dev/null), so only the $REVIEW_LABEL label opts this PR in"
   fi
 fi
 

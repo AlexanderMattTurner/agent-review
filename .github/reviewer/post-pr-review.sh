@@ -74,7 +74,7 @@ raise_hold_if_short() {
     if ((refused > 0)); then
       printf -- '- %d finding(s) could not be posted as review threads; their text is in a comment on this pull request or the run log.\n' "$refused"
     fi
-    printf "\nA complete read clears this hold. A commit titled \`[opus-review]\` asks for one. To merge without it, a person other than the author of this pull request resolves this thread.\n"
+    printf "\nA complete read clears this hold. A maintainer asks for one with the review label, or a commit titled \`[opus-review]\` from a trusted author. To merge without it, a person other than the author of this pull request resolves this thread.\n"
   } >"$prose"
   raise_shortfall_hold "$prose"
   rm -f "$prose"

@@ -44,6 +44,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/lib-ci-retry.sh"
 # shellcheck source=.github/reviewer/lib/review-threads.bash disable=SC1091
 source "$here/lib/review-threads.bash"
+# shellcheck source=.github/reviewer/lib/pr-reviews.bash disable=SC1091
+source "$here/lib/pr-reviews.bash"
 
 : "${PR:?PR number required}"
 : "${PR_INPUT_DIR:?PR_INPUT_DIR required}"
@@ -333,27 +335,22 @@ fi
 # pull request carries REVIEW_LABEL, which only a person with triage access can add.
 # The read job then never starts, and post records the withheld read the gate holds on.
 withhold_untrusted_fan_out() {
-  local legs="$1" pr_rest association
+  local legs="$1" facts association
   if ((legs <= MAX_UNTRUSTED_READ_LEGS)); then
     emit_output "withheld=false"
     return 0
   fi
-  pr_rest="$(retry_stdout gh api "repos/{owner}/{repo}/pulls/${PR}" \
-    --jq '{association: (.author_association // ""), labels: [.labels[]?.name]}')"
-  association="$(jq -r '.association' <<<"$pr_rest")"
-  case "$association" in
-  OWNER | MEMBER | COLLABORATOR) ;;
-  *)
-    if ! jq -e --arg label "$REVIEW_LABEL" 'any(.labels[]; . == $label)' <<<"$pr_rest" >/dev/null; then
-      printf "The diff needs %d read legs, and an author whose association is %s may start at most %d. A maintainer adds the \`%s\` label to start the read.\n" \
-        "$legs" "${association:-unknown}" "$MAX_UNTRUSTED_READ_LEGS" "$REVIEW_LABEL" >"${PR_INPUT_DIR}/withheld.txt"
-      emit_output "withheld=true"
-      echo "withheld the read: ${legs} legs for an author whose association is ${association:-unknown}, over the cap of ${MAX_UNTRUSTED_READ_LEGS}" >&2
-      return 0
-    fi
-    ;;
-  esac
-  emit_output "withheld=false"
+  # Plain assignments, so a failed read stops the run rather than reading as trusted.
+  facts="$(pr_author_facts "$GH_REPO" "$PR")"
+  association="$(jq -r '.association' <<<"$facts")"
+  if jq -e --arg label "$REVIEW_LABEL" '.trusted or any(.labels[]; . == $label)' <<<"$facts" >/dev/null; then
+    emit_output "withheld=false"
+    return 0
+  fi
+  printf "The diff needs %d read legs, and an author whose association is %s may start at most %d. A maintainer adds the \`%s\` label to start the read.\n" \
+    "$legs" "${association:-unknown}" "$MAX_UNTRUSTED_READ_LEGS" "$REVIEW_LABEL" >"${PR_INPUT_DIR}/withheld.txt"
+  emit_output "withheld=true"
+  echo "withheld the read: ${legs} legs for an author whose association is ${association:-unknown}, over the cap of ${MAX_UNTRUSTED_READ_LEGS}" >&2
 }
 
 # Size routing happens AFTER sanitization and elision, so the shards are slices
