@@ -24,7 +24,9 @@
   },
   "dependencies": {
     "agent-control-plane-core": "0.2.2",
-    "semver": "^7.8.5"
+    "semver": "^7.8.5",
+    "tree-sitter-bash": "0.25.1",
+    "web-tree-sitter": "0.25.10"
   },
   "lint-staged": {
     "*.{css,scss}": [
@@ -53,8 +55,8 @@
       "shfmt -i 2 -w"
     ],
     "*.py": [
-      "ruff check --fix",
-      "ruff format"
+      "bash .hooks/ruff.sh check --fix",
+      "bash .hooks/ruff.sh format"
     ]
   },
   "devDependencies": {

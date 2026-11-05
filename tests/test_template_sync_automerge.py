@@ -44,7 +44,8 @@ def run(tmp_path: Path, **overrides: str):
         f'printf "%s\\n" "$*" >> "{log}"\n'
         # The read-back the script performs after arming.
         'if [[ "$1 $2" == "pr view" ]]; then echo true; fi\n'
-        "exit 0\n"
+        "exit 0\n",
+        encoding="utf-8",
     )
     (bin_dir / "gh").chmod(0o755)
     env = {
@@ -62,7 +63,7 @@ def run(tmp_path: Path, **overrides: str):
         env=env,
         cwd=REPO_ROOT,
     )
-    calls = log.read_text() if log.exists() else ""
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
     return res, calls
 
 
@@ -87,6 +88,20 @@ def test_a_structurally_resolved_conflict_still_arms(tmp_path: Path):
     res, calls = run(tmp_path, HAS_CONFLICTS="true", ALL_DETERMINISTIC="true")
     assert res.returncode == 0
     assert "--auto" in calls
+
+
+def test_a_kept_local_conflict_refuses_even_when_the_rest_resolved(tmp_path: Path):
+    # A file CI loads keeps its local copy, so it is in neither CHANGED_PATHS nor the
+    # resolver's input; mergiraf resolving every OTHER conflict must not arm the merge.
+    res, calls = run(
+        tmp_path,
+        HAS_CONFLICTS="true",
+        ALL_DETERMINISTIC="true",
+        MARKERLESS_FILES=".github/workflows/ci.yaml",
+    )
+    assert res.returncode == 0
+    assert "--auto" not in calls
+    assert "hand port" in res.stdout
 
 
 def test_an_adopter_downgrade_refuses(tmp_path: Path):
@@ -126,7 +141,8 @@ def test_a_rejected_arming_fails_loud(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "gh").write_text(
-        '#!/usr/bin/env bash\nif [[ "$1 $2" == "pr view" ]]; then echo false; fi\nexit 0\n'
+        '#!/usr/bin/env bash\nif [[ "$1 $2" == "pr view" ]]; then echo false; fi\nexit 0\n',
+        encoding="utf-8",
     )
     (bin_dir / "gh").chmod(0o755)
     res = subprocess.run(

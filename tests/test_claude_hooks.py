@@ -16,6 +16,7 @@ SAFE_LAUNCH_PARSE = REPO_ROOT / ".claude" / "hooks" / "safe-launch-parse.py"
 SAFE_LAUNCH = REPO_ROOT / ".claude" / "hooks" / "safe-launch.sh"
 PRE_PUSH_CHECK = REPO_ROOT / ".claude" / "hooks" / "pre-push-check.sh"
 LIB_CHECKS = REPO_ROOT / ".claude" / "hooks" / "lib-checks.sh"
+SCRIPT_CONFIGURED = REPO_ROOT / ".github" / "scripts" / "script-configured.sh"
 
 
 def _run_parser_raw(
@@ -238,7 +239,7 @@ def test_gh_repo_extraction(
     )
     exports = [
         line
-        for line in env_file.read_text().splitlines()
+        for line in env_file.read_text(encoding="utf-8").splitlines()
         if line.startswith("export GH_REPO=")
     ]
     if expected is None:
@@ -254,6 +255,36 @@ def test_gh_repo_extraction(
         assert sourced.stdout == expected
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_name": "Write", "tool_input": {"file_path": "/p/.hooks/x\n/../../t"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "/p/.hooks/x\r/../t"}},
+        {"tool_name": "Write\nBash", "tool_input": {"file_path": "/p/.hooks/x"}},
+    ],
+    ids=["newline-path", "carriage-return-path", "newline-name"],
+)
+def test_safe_launch_parse_refuses_a_line_break(payload: dict) -> None:
+    """safe-launch reads the two values by line, so a value holding a line break
+    would become a field of its own. Such a payload must print nothing."""
+    result = _run_parser_raw(json.dumps(payload))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [{"file_path": 5}, {"file_path": ["/p/.hooks/x"]}, {"edits": "x"}, "not-a-dict"],
+    ids=["int-path", "list-path", "string-edits", "string-input"],
+)
+def test_safe_launch_parse_ignores_a_non_string_path(tool_input: object) -> None:
+    result = _run_parser_raw(
+        json.dumps({"tool_name": "Write", "tool_input": tool_input})
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Write\n\n"
+
+
 @pytest.fixture
 def safe_launch_sandbox(tmp_path: Path) -> Path:
     """Project dir containing a copy of safe-launch.sh under .claude/hooks/,
@@ -266,7 +297,9 @@ def safe_launch_sandbox(tmp_path: Path) -> Path:
     parser = hooks_dir / "safe-launch-parse.py"
     parser.write_bytes(SAFE_LAUNCH_PARSE.read_bytes())
     broken = hooks_dir / "broken-hook.sh"
-    broken.write_text("if true; then\n  echo unterminated\n")  # missing `fi`
+    broken.write_text(
+        "if true; then\n  echo unterminated\n", encoding="utf-8"
+    )  # missing `fi`
     return tmp_path
 
 
@@ -292,7 +325,7 @@ def test_safe_launch_degraded_path_blocks_symlink_escape(
     is under the safe dir, but it resolves elsewhere. Must fall through to
     the fail-safe "ask" default rather than silently allowing the edit."""
     outside_target = safe_launch_sandbox.parent / "outside-secret.sh"
-    outside_target.write_text("echo not a hook\n")
+    outside_target.write_text("echo not a hook\n", encoding="utf-8")
     escape_link = safe_launch_sandbox / ".claude" / "hooks" / "escape-link.sh"
     escape_link.symlink_to(outside_target)
 
@@ -301,6 +334,25 @@ def test_safe_launch_degraded_path_blocks_symlink_escape(
         {
             "tool_name": "Write",
             "tool_input": {"file_path": str(escape_link)},
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision":"ask"' in result.stdout
+    assert "allowing self-repair edit" not in result.stderr
+
+
+def test_safe_launch_degraded_path_asks_on_a_newline_split_path(
+    safe_launch_sandbox: Path,
+) -> None:
+    """The first line of this path sits under .claude/hooks/; the second climbs
+    out of the project. Line-based reading saw only the first and allowed the
+    write, so the payload must reach the "ask" default instead."""
+    hooks = safe_launch_sandbox / ".claude" / "hooks"
+    result = _run_safe_launch(
+        safe_launch_sandbox,
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": f"{hooks}/x\n/../../../target"},
         },
     )
     assert result.returncode == 0, result.stderr
@@ -328,11 +380,11 @@ def test_safe_launch_degraded_path_allows_real_self_repair(
 
 @pytest.fixture
 def pre_push_sandbox(tmp_path: Path) -> Path:
-    """Project dir containing a copy of pre-push-check.sh and lib-checks.sh."""
-    hooks_dir = tmp_path / ".claude" / "hooks"
-    hooks_dir.mkdir(parents=True)
-    for src in (PRE_PUSH_CHECK, LIB_CHECKS):
-        dst = hooks_dir / src.name
+    """Project dir containing pre-push-check.sh, lib-checks.sh and the
+    script-configured.sh predicate lib-checks.sh calls."""
+    for src in (PRE_PUSH_CHECK, LIB_CHECKS, SCRIPT_CONFIGURED):
+        dst = tmp_path / src.relative_to(REPO_ROOT)
+        dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(src.read_bytes())
         dst.chmod(0o755)
     return tmp_path
@@ -371,7 +423,7 @@ def test_pre_push_check_fails_loudly_when_jq_missing(
     """A configured package.json with no `jq` on PATH must fail the check,
     not silently skip all Node checks (there's no way to tell what's
     configured without jq)."""
-    (pre_push_sandbox / "package.json").write_text('{"scripts": {}}')
+    (pre_push_sandbox / "package.json").write_text('{"scripts": {}}', encoding="utf-8")
     result = _run_pre_push_check(pre_push_sandbox, _minimal_path(pre_push_sandbox))
     assert result.returncode == 1
     assert "jq is required" in result.stderr
@@ -382,7 +434,7 @@ def test_pre_push_check_fails_loudly_when_ruff_and_uv_missing(
 ) -> None:
     """A Python project with neither `ruff` nor `uv` on PATH must fail the
     check, not silently skip the ruff check."""
-    (pre_push_sandbox / "pyproject.toml").write_text("")
+    (pre_push_sandbox / "pyproject.toml").write_text("", encoding="utf-8")
     result = _run_pre_push_check(pre_push_sandbox, _minimal_path(pre_push_sandbox))
     assert result.returncode == 1
     assert "Neither ruff nor uv" in result.stderr
@@ -394,16 +446,54 @@ def test_pre_push_check_runs_ruff_when_available(
     """A Python project with `ruff` on PATH must actually invoke it with the
     exact expected argv (catches quoting/word-splitting regressions in the
     argv-based run_check)."""
-    (pre_push_sandbox / "pyproject.toml").write_text("")
+    (pre_push_sandbox / "pyproject.toml").write_text("", encoding="utf-8")
     path = _minimal_path(pre_push_sandbox)
     bin_dir = Path(path)
     marker = pre_push_sandbox / "ruff-invoked-with-args.txt"
     fake_ruff = bin_dir / "ruff"
-    fake_ruff.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" > "{marker}"\n')
+    fake_ruff.write_text(
+        f'#!/bin/bash\nprintf "%s\\n" "$@" > "{marker}"\n', encoding="utf-8"
+    )
     fake_ruff.chmod(0o755)
     result = _run_pre_push_check(pre_push_sandbox, path)
     assert result.returncode == 0, result.stderr
-    assert marker.read_text().splitlines() == ["check", "."]
+    assert marker.read_text(encoding="utf-8").splitlines() == ["check", "."]
+
+
+def test_pre_push_check_runs_ruff_at_the_pre_commit_pin(
+    pre_push_sandbox: Path,
+) -> None:
+    """A PATH ruff of another version enables other default rules, so it reds a
+    tree CI passes. With .hooks/ruff.sh, a pre-commit pin and uvx present, the
+    check must run ruff at that pin, read from the ruff entry, not a neighbour's."""
+    (pre_push_sandbox / "pyproject.toml").write_text("", encoding="utf-8")
+    wrapper = pre_push_sandbox / ".hooks" / "ruff.sh"
+    wrapper.parent.mkdir()
+    wrapper.write_bytes((REPO_ROOT / ".hooks" / "ruff.sh").read_bytes())
+    (pre_push_sandbox / ".pre-commit-config.yaml").write_text(
+        "repos:\n"
+        "  - repo: https://github.com/pre-commit/pre-commit-hooks\n"
+        "    rev: v6.0.0\n"
+        "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
+        '    rev: "v0.14.5"\n'
+        "    hooks:\n"
+        "      - id: ruff-check\n",
+        encoding="utf-8",
+    )
+    path = _minimal_path(pre_push_sandbox)
+    bin_dir = Path(path)
+    for tool in ("uvx", "ruff"):
+        script = bin_dir / tool
+        script.write_text(
+            f'#!/bin/bash\nprintf "%s\\n" "$@" > "{pre_push_sandbox}/{tool}.args"\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+    result = _run_pre_push_check(pre_push_sandbox, path)
+    assert result.returncode == 0, result.stderr
+    uvx_args = (pre_push_sandbox / "uvx.args").read_text(encoding="utf-8")
+    assert uvx_args.splitlines() == ["ruff@0.14.5", "check", "."]
+    assert not (pre_push_sandbox / "ruff.args").exists()
 
 
 def test_preserves_pre_set_gh_repo(sandbox: Path) -> None:
@@ -417,7 +507,7 @@ def test_preserves_pre_set_gh_repo(sandbox: Path) -> None:
     assert result.returncode == 0, result.stderr
     exports = [
         line
-        for line in env_file.read_text().splitlines()
+        for line in env_file.read_text(encoding="utf-8").splitlines()
         if line.startswith("export GH_REPO=")
     ]
     assert exports == []
