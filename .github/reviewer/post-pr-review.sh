@@ -12,12 +12,14 @@
 # read again, while review-findings-gate.sh holds the merge on a review sitting right there. A
 # rejection therefore DEGRADES: each finding posts as its own comment, so a bad anchor costs one
 # finding, and the summary posts as a real COMMENT review, which is what records the read. Any
-# finding still refused is a reviewer defect: its text posts as a PR comment, and one line naming
-# the loss goes to REVIEWER_SHORTFALL_FILE for report-reviewer-shortfall.sh.
+# finding still refused is a reviewer defect: its text posts as a PR comment, one line naming
+# the loss goes to REVIEWER_SHORTFALL_FILE for report-reviewer-shortfall.sh, and the summary
+# carries UNPOSTED_FINDINGS_MARKER, on which review-findings-gate.sh holds the merge. A read that
+# fell short (findings refused, or files unread) also opens the hold thread a person may resolve.
 #
 # Requires: gh authenticated (GH_TOKEN), GH_REPO, PR, PR_INPUT_DIR; node with the scripts on the
 # module path. HEAD_SHA (the PR head sha) pins the review to the reviewed commit, and the degraded
-# path needs it to anchor a comment at all. REVIEWER_SHORTFALL_FILE is optional.
+# path and the hold thread need it to anchor a comment at all. REVIEWER_SHORTFALL_FILE is optional.
 set -euo pipefail
 
 : "${PR:?PR number required}"
@@ -30,6 +32,8 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the summary leaves the read unrecorded and the next push buys it again.
 # shellcheck source=.github/reviewer/lib/pr-reviews.bash
 source "$_SCRIPT_DIR/lib/pr-reviews.bash"
+# shellcheck source=.github/reviewer/lib/review-threads.bash
+source "$_SCRIPT_DIR/lib/review-threads.bash"
 
 # The coverage stamp, off the record prepare wrote: which commits this read
 # covered and which budget paid. Stamped beside the read marker on BOTH posting
@@ -46,12 +50,32 @@ COVERAGE_STAMP="$(coverage_stamp_of "$COVERAGE_FILE")"
 # What the summary review carries to record the read. A sharded read that lost a leg
 # (merge-shard-reviews.mjs wrote INCOMPLETE_FILE) carries neither the read marker nor
 # the coverage stamp, so it spends no budget and claims no head, and the next push
-# buys a whole read. report-reviewer-shortfall.sh names the files no leg read.
+# buys a whole read. report-reviewer-shortfall.sh names the files no leg read, and
+# the merge gate holds on the marker until a complete read.
 INCOMPLETE_FILE="${PR_INPUT_DIR}/incomplete-read.txt"
 READ_STAMP="${WHOLE_DIFF_READ_MARKER}"$'\n'"${COVERAGE_STAMP}"
 [[ ! -f "$INCOMPLETE_FILE" ]] || READ_STAMP="$INCOMPLETE_READ_MARKER"
 # Which budget paid, for the reader that marks each finding of an accumulated read.
 REVIEW_READ="$(jq -r '.read // "first"' "$COVERAGE_FILE")"
+
+# raise_hold_if_short <refused-findings> — open the hold thread for a read that fell short,
+# AFTER the review that carries its shortfall marker: shortfall_hold_overridden accepts only
+# a thread at least as new as that review. A failed raise is a red step, and the merge stays
+# held on the marker, because only a person resolving a thread can stand in for the read.
+raise_hold_if_short() {
+  local refused="$1" prose
+  [[ -f "$INCOMPLETE_FILE" ]] || ((refused > 0)) || return 0
+  prose="$(mktemp)"
+  {
+    printf '**The automated reviewer fell short on this read, so the merge is held.**\n\n'
+    [[ ! -f "$INCOMPLETE_FILE" ]] || printf -- '- Some files went unread.\n'
+    ((refused == 0)) ||
+      printf -- '- %d finding(s) could not be posted as review threads; their text is in a comment on this pull request or the run log.\n' "$refused"
+    printf "\nA complete read clears this hold. A commit titled \`[opus-review]\` asks for one. To merge without it, a person other than the author of this pull request resolves this thread.\n"
+  } >"$prose"
+  raise_shortfall_hold "$prose"
+  rm -f "$prose"
+}
 
 # The reviewer posts with the workflow GITHUB_TOKEN, so its threads are authored by this bot, and
 # GraphQL returns an app bot's login without the REST `[bot]` suffix.
@@ -210,18 +234,20 @@ post_review_comment_by_comment() {
       where="$(tr '\n' ' ' <<<"$salvage_links")"
       [[ ! -s "$salvage_lost" ]] || where+="and the run log"
     fi
-    printf '%d of %d findings could not be posted as review threads, so they do not gate; their text is in %s\n' \
+    printf '%d of %d findings could not be posted as review threads, so the merge is held; their text is in %s\n' \
       "$failed" "$total" "${where% }" >>"${REVIEWER_SHORTFALL_FILE:-/dev/stderr}"
   fi
   rm -f "$salvage_lost"
 
   # The summary review carries no comments, so nothing in it can be refused for a bad anchor: this
   # is the post that MUST succeed, and a failure here is a hard red — an unrecorded read is one the
-  # next push pays for again.
-  local body
+  # next push pays for again. A refused finding adds UNPOSTED_FINDINGS_MARKER to it, which is what
+  # holds the merge: the finding has no thread of its own to hold it.
+  local body shortfall_marker=""
+  ((failed == 0)) || shortfall_marker=$'\n'"$UNPOSTED_FINDINGS_MARKER"
   body="$(mktemp)"
   {
-    printf '%s\n%s\n\n' "$DEGRADED_REVIEW_MARKER" "$READ_STAMP"
+    printf '%s\n%s%s\n\n' "$DEGRADED_REVIEW_MARKER" "$READ_STAMP" "$shortfall_marker"
     printf '<sub>GitHub refused this review as one payload, so %d of its %d findings were posted as individual comments.</sub>\n\n' "$((total - failed))" "$total"
     cat "${PR_INPUT_DIR}/review-summary.txt"
   } >"$body"
@@ -229,6 +255,7 @@ post_review_comment_by_comment() {
     -f "event=COMMENT" -F body=@"$body" >/dev/null
   rm -f "$body"
   echo "recorded the read as a COMMENT review" >&2
+  raise_hold_if_short "$failed"
 }
 
 # A non-zero exit from the reader means the reviewer wrote no valid review.json: it crashed before
@@ -256,6 +283,7 @@ trap 'rm -f "$api_err" "$stamped_payload"' EXIT
 if gh api -X POST "repos/${GH_REPO}/pulls/${PR}/reviews" \
   --input "$stamped_payload" >/dev/null 2>"$api_err"; then
   echo "posted structured review with inline comments" >&2
+  raise_hold_if_short 0
   exit 0
 fi
 

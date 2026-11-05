@@ -17,6 +17,9 @@
     "automated_approval": "<!-- automated-approval-no-read -->",
     "coverage_prefix": "<!-- review-coverage ",
     "delta_read_finding": "<!-- read: delta -->",
-    "severity_marker": "<!-- severity: %s -->"
+    "severity_marker": "<!-- severity: %s -->",
+    "unposted_findings": "<!-- unposted-findings -->",
+    "read_withheld": "<!-- read-withheld -->",
+    "human_hold": "<!-- needs-human-resolver -->"
   }
 }

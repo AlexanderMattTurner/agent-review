@@ -4,10 +4,10 @@
 #   no run is ever traced.
 # Report every way the automated reviewer fell short on this run, as ONE message.
 #
-# A shortfall is a defect in the reviewer, never a reason to hold the pull request for a person:
-# the merge gate judges the findings the review has. This only makes the defect visible. With
-# REVIEWER_DEFECT_ISSUE set it comments on that issue in GH_REPO; empty, or when GitHub refuses
-# the comment, it writes the same text to the job summary and a `::warning::`.
+# A shortfall is a defect in the reviewer, and this makes the defect visible to whoever maintains
+# it. The pull request is held separately: review-findings-gate.sh reads the shortfall marker on
+# the posted review. With REVIEWER_DEFECT_ISSUE set this comments on that issue in GH_REPO; empty,
+# or when GitHub refuses the comment, it writes the same text to the job summary and a warning.
 #
 # Shortfalls, in the order reported:
 #   - the read job delivered nothing to fold (FOLD_OUTCOME failure or skipped);
@@ -57,7 +57,7 @@ fi
 {
   printf "The automated reviewer fell short on %s#%s at head \`%s\`:\n\n" "$GH_REPO" "$PR" "$HEAD_SHA"
   cat "$items"
-  printf '\nThe merge gate judged the findings the review has. Run: %s\n' "$RUN_URL"
+  printf '\nThe merge gate holds the pull request until a complete read, or until a person other than its author resolves the hold thread. Run: %s\n' "$RUN_URL"
 } >"$body"
 
 issue="${REVIEWER_DEFECT_ISSUE:-}"

@@ -138,6 +138,40 @@ coverage_of_reviews() {
      | if length == 0 then empty else (sort_by(.submittedAt) | last) end"
 }
 
+# review_shortfalls — stdin is `reviewer_reviews_ndjson` output; prints the reads
+# that fell short and that no later complete read has made up for, as ONE JSON
+# object {kinds, since, latest}, or NOTHING when there are none. `kinds` names how
+# each fell short (incomplete, unposted, withheld), `since` is the oldest such
+# review's submittedAt and `latest` the newest.
+#
+# PROBLEM CLASS — a pull request merging with code the reviewer never read, or
+# with findings that hold nothing because GitHub refused to post them as threads.
+# The summary review of such a read carries INCOMPLETE_READ_MARKER,
+# UNPOSTED_FINDINGS_MARKER or READ_WITHHELD_MARKER, and the gate holds on this.
+#
+# A later read CLEARS a shortfall only when its own review carries the read
+# marker, no shortfall marker, and either a whole-diff scope or a shortfall review
+# with no coverage stamp. An unstamped shortfall advanced no coverage, so the next
+# read starts at the older covered head and reads what it missed. A stamped one
+# (findings refused) did advance it, so only a whole read sees those findings
+# again. The abandoned-read notice carries no read marker, so it clears nothing.
+review_shortfalls() {
+  jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
+    --arg incomplete "$INCOMPLETE_READ_MARKER" --arg unposted "$UNPOSTED_FINDINGS_MARKER" \
+    --arg withheld "$READ_WITHHELD_MARKER" \
+    "[.[] | (.body // \"\") as \$b | ([\$b | $_COVERAGE_CAPTURE] | first) as \$stamp
+          | {at: (.submittedAt // \"\"), stamped: (\$stamp != null),
+             scope: (\$stamp.scope // \"whole\"), read: (\$b | contains(\$read)),
+             kinds: [(if (\$b | contains(\$incomplete)) then \"incomplete\" else empty end),
+                     (if (\$b | contains(\$unposted)) then \"unposted\" else empty end),
+                     (if (\$b | contains(\$withheld)) then \"withheld\" else empty end)]}]
+     | [.[] | select(.read and (.kinds | length) == 0 and .scope != \$abandoned)] as \$clean
+     | [.[] | select((.kinds | length) > 0) | . as \$s
+            | select(any(\$clean[]; .at > \$s.at and (.scope == \"whole\" or (\$s.stamped | not))) | not)]
+     | if length == 0 then empty
+       else {kinds: ([.[].kinds[]] | unique), since: (map(.at) | min), latest: (map(.at) | max)} end"
+}
+
 # delta_reviews_count — stdin is `reviewer_reviews_ndjson` output; how many
 # ACCUMULATED-delta reads this PR has spent, which is the budget
 # `max-delta-reviews-per-pr` bounds.

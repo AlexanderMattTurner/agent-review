@@ -1,8 +1,8 @@
 """Behavioral tests for .github/reviewer/report-reviewer-shortfall.sh — the step
 that turns every way the reviewer fell short on a run into ONE message, posted
 as a comment on the caller's reviewer-defect issue, or written to the job
-summary and a warning when no issue is named. Nothing it writes waits for a
-person, so the merge gate judges the findings the review has.
+summary and a warning when no issue is named. The merge gate holds the pull
+request on its own, from the shortfall marker on the posted review.
 
 The real script runs against a fake `gh` on PATH that records each call and the
 comment body it was handed, and can refuse the post.

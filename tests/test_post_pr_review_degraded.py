@@ -7,7 +7,8 @@ must (1) post each finding as its own review comment, so one bad anchor costs
 one finding, (2) record the read as a real COMMENT review, which is what stops
 decide-pr-review-trigger.sh buying the whole read again on the next push, and
 (3) report a finding that was still lost as a reviewer shortfall, with
-a link to its salvaged text, while opening no thread that waits for a person.
+a link to its salvaged text, and (4) mark the summary so the merge gate holds,
+then open the hold thread a person other than the author may resolve.
 
 Nothing here is stubbed: the real `post-pr-review.sh` runs the real
 `post-pr-review.mjs` over a real review.json and diff, and the real `gh` posts
@@ -124,9 +125,27 @@ def _run(
 READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
 
 
+#: What review-findings-gate.sh reads as a read whose findings went unposted.
+UNPOSTED_MARKER = reviewer_marker("UNPOSTED_FINDINGS_MARKER")
+#: What marks the thread a person resolves to accept a read that fell short.
+HOLD_MARKER = reviewer_marker("HUMAN_HOLD_MARKER")
+
+
 def _holds(github: FakeReviewPoster) -> list[dict]:
-    """File-level threads, the shape an older reviewer's needs-a-human hold took."""
+    """File-level threads: the hold a read that fell short opens."""
     return [c for c in github.of_kind("comment") if c.get("subject_type") == "file"]
+
+
+def _assert_one_hold(github: FakeReviewPoster) -> dict:
+    """Exactly one hold thread, posted AFTER the review that carries the shortfall
+    marker, and carrying no severity, so the gate holds on the marker alone."""
+    [hold] = _holds(github)
+    assert HOLD_MARKER in hold["body"]
+    assert "<!-- severity:" not in hold["body"]
+    assert hold["commit_id"] == HEAD_SHA
+    kinds = [k for k, body in github.posted if body is hold or k == "review"]
+    assert kinds[-2:] == ["review", "comment"], kinds
+    return hold
 
 
 def _shortfall(pr_dir: Path) -> str:
@@ -203,15 +222,30 @@ def test_no_finding_lost_means_no_shortfall(tmp_path):
         assert _shortfall(pr_dir) == ""
 
 
-def test_a_lost_finding_is_reported_and_waits_for_nobody(tmp_path):
+def test_a_lost_finding_holds_the_merge_and_opens_a_hold(tmp_path):
+    """A refused finding has no thread to hold the merge, so the summary carries
+    the marker the gate holds on, and a hold thread follows it."""
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
         pr_dir = _pr_input(tmp_path)
         proc = _run(github, pr_dir)
         assert proc.returncode == 0, proc.stderr
-        assert _holds(github) == []
+        [review] = github.of_kind("review")
+        assert UNPOSTED_MARKER in review["body"]
+        assert "1 finding(s) could not be posted" in _assert_one_hold(github)["body"]
         assert "1 of 2 findings could not be posted" in _shortfall(pr_dir)
+
+
+def test_a_degraded_review_that_lost_nothing_holds_nothing(tmp_path):
+    """The pair: every finding posted as its own thread, so no marker and no hold."""
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        [review] = github.of_kind("review")
+        assert UNPOSTED_MARKER not in review["body"]
+        assert _holds(github) == []
 
 
 def test_the_findings_land_before_the_review_that_greens_the_gate(tmp_path):
@@ -222,7 +256,8 @@ def test_the_findings_land_before_the_review_that_greens_the_gate(tmp_path):
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
         _run(github, _pr_input(tmp_path))
-        kinds = [k for k, _ in github.posted]
+        hold = _assert_one_hold(github)
+        kinds = [k for k, body in github.posted if body is not hold]
         assert kinds[-1] == "review", kinds
         assert "comment" in kinds[:-1]
 
@@ -478,9 +513,10 @@ def test_a_read_that_cannot_say_what_it_covered_posts_nothing(tmp_path):
 INCOMPLETE_MARKER = reviewer_marker("INCOMPLETE_READ_MARKER")
 
 
-def test_an_incomplete_read_claims_no_read_and_waits_for_nobody(tmp_path):
+def test_an_incomplete_read_claims_no_read_and_opens_a_hold(tmp_path):
     """A sharded read that lost a leg must not spend the budget or claim the head,
-    on either posting path, and it opens no thread that waits for a person."""
+    on either posting path. Its marker holds the merge, and the hold thread after
+    it is what a person other than the author may resolve to accept it."""
     for refuse in (False, True):
         server_dir = tmp_path / f"refuse-{refuse}"
         input_dir = tmp_path / f"in-{refuse}"
@@ -496,4 +532,13 @@ def test_an_incomplete_read_claims_no_read_and_waits_for_nobody(tmp_path):
             assert INCOMPLETE_MARKER in review["body"]
             assert READ_MARKER not in review["body"]
             assert "<!-- review-coverage " not in review["body"]
-            assert _holds(github) == []
+            assert "Some files went unread." in _assert_one_hold(github)["body"]
+
+
+def test_a_complete_read_opens_no_hold(tmp_path):
+    """The pair: a whole read on the structured path posts its review alone."""
+    with FakeReviewPoster(tmp_path) as github:
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        assert len(github.of_kind("review")) == 1
+        assert _holds(github) == []
