@@ -457,6 +457,8 @@ jobs:
         if: inputs.setup-command != ''
         env:
           SETUP_COMMAND: ${{ inputs.setup-command }}
+          # The read job's setup lists the open PRs for the evidence file; other jobs get no token.
+          GH_TOKEN: ${{ github.job == 'read' && github.token || '' }}
         run: bash -c "$SETUP_COMMAND"
 
       - name: Fetch the sanitized input
