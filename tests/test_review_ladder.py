@@ -361,3 +361,20 @@ def test_the_read_is_told_which_branch_its_checkout_holds(
     _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
     output = (tmp_path / "github-output").read_text(encoding="utf-8")
     assert "the base checkout of the default branch `trunk`" in output
+
+
+@pytest.mark.parametrize("built", [True, False])
+def test_the_read_is_named_the_evidence_file_only_when_prepare_wrote_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, built: bool
+) -> None:
+    """The evidence quotes the PR, so it is listed as untrusted data; a caller that
+    turned it off gets no line pointing the agent at a file that is not there."""
+    evidence = tmp_path / "pr-input" / "evidence.md"
+    evidence.parent.mkdir()
+    if built:
+        evidence.write_text("x", encoding="utf-8")
+    _walk(tmp_path, monkeypatch, {8: "oauth"}, log_for=lambda _: _answered())
+    output = (tmp_path / "github-output").read_text(encoding="utf-8")
+    untrusted = output.split("UNTRUSTED DATA", 1)[1].split("These are TRUSTED", 1)[0]
+    line = f"- root-cause evidence (earlier fixes, copies, open PRs): {evidence}\n"
+    assert (line in untrusted) is built

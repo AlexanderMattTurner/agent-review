@@ -16,8 +16,9 @@
 #      Nothing requires a PR to target the default branch, so a `base.ref`
 #      checkout would run branch A's rewritten machinery while PR B's own diff
 #      stays clean.
-#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`,
-#      and they pass the agent-sanitizer before the agent sees them. The agent
+#   2. The PR's changes are read only as DATA, through `gh pr diff` in `prepare`
+#      and the head's git objects the evidence builder fetches and never checks
+#      out, and they pass the agent-sanitizer before the agent sees them. The agent
 #      has no shell and no network tool, so it cannot fetch them past the
 #      sanitizer.
 #   3. Least privilege per job. `read`, the only job that runs a model, holds
@@ -139,6 +140,11 @@ on:
         required: false
         default: 1500
         type: number
+      root-cause-evidence:
+        description: "Give the read a file of at most 8000 bytes, built before it starts: the `fix` commits of the last 30 days that changed what the PR changes, copies of its changed lines in the base tree, and open pull requests on the same files. The prompt's root-cause finding cites it. false builds none, and the read then judges a root cause from the diff and the checkout alone."
+        required: false
+        default: true
+        type: boolean
     secrets:
       rung_1:
         description: "First-tier Claude Code OAuth token; empty skips the first attempt."
@@ -380,6 +386,8 @@ jobs:
           HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
           READ: ${{ needs.decide.outputs.read }}
           SINCE: ${{ needs.decide.outputs.since }}
+          # The evidence fetches history and lists open PRs with this job's read-only token.
+          ROOT_CAUSE_EVIDENCE: ${{ inputs.root-cause-evidence }}
         run: bash "${REVIEWER_DIR}/prepare-pr-review-input.sh"
 
       - name: Hand the sanitized input to the read and post jobs
@@ -457,8 +465,6 @@ jobs:
         if: inputs.setup-command != ''
         env:
           SETUP_COMMAND: ${{ inputs.setup-command }}
-          # The read job's setup lists the open PRs for the evidence file; other jobs get no token.
-          GH_TOKEN: ${{ github.job == 'read' && github.token || '' }}
         run: bash -c "$SETUP_COMMAND"
 
       - name: Fetch the sanitized input
