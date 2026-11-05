@@ -130,7 +130,7 @@ jobs:
       # `max_delta_reviews_per_pr` in config/review-severities.json, which the
       # gate reads: a reviewer budget above the gate's lets a head merge while
       # its read is still in flight.
-      max-delta-reviews-per-pr: 1
+      max-delta-reviews-per-pr: 0
       # Re-post the `Automated review posted` verdict once the review (and its
       # finding threads) exist. Nothing else would: the review posts with the
       # workflow GITHUB_TOKEN, whose events start no workflow run, so
