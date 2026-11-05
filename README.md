@@ -81,6 +81,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `shard-max-lines`          | `4000`                | The most diff lines one part of a split read holds. A part never splits a file, so one large file gets a part of its own.                                                                                                           |
 | `max-shardable-lines`      | `192000`              | Above this many diff lines the pull request gets the human-review notice and no read.                                                                                                                                               |
 | `review-timeout-seconds`   | `1500`                | The wall clock one credential attempt may spend on the read, rounded up to whole minutes.                                                                                                                                           |
+| `root-cause-evidence`      | `true`                | Build the evidence file the `Root cause:` finding cites: earlier `fix` commits, copies of the changed lines, and overlapping open pull requests, at most 8000 bytes. `false` builds none.                                           |
 
 ## The read
 
@@ -90,12 +91,14 @@ The read is the `code-review` plugin's own command, vendored at a pinned commit 
 2. Four agents review the change in parallel. Two check it against those CLAUDE.md files, and two look for bugs and security problems in the changed code.
 3. A separate agent confirms each issue and gives it a confidence score from 0 to 100. An issue that fails confirmation, or scores under 80, is dropped.
 
-The vendored copy differs from the plugin in four ways, and each one keeps a property this repository already had:
+The vendored copy differs from the plugin in these ways:
 
 - The plugin fetches the pull request with `gh`. Here the agent has no shell and no network tool, and reads only the diff and metadata the sanitizer already cleaned.
 - The plugin stops on a draft, a trivial pull request, or one Claude already commented on. Here that step is removed, because the budget below decides when a pull request gets a read.
 - The plugin posts its own comments. Here it returns its findings as structured output, and a separate job posts them.
 - Each finding carries a category and a confidence score, so the workflow can set its severity.
+- The convention files include `.claude/rules/*.md`, each governing the paths its `paths:` front matter names.
+- A fix or perf pull request also gets a property read, which searches the whole base checkout for other sites of the cause it names. On a fix, that read also files a `Root cause:` finding when the change patches one more instance of a defect. Before the read, `build-review-evidence.py` lists the earlier `fix` commits of what the pull request changes, copies of its changed lines, and open pull requests on the same files, and the finding cites them.
 
 ### How a finding gets its severity
 
