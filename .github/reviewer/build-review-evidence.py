@@ -58,8 +58,8 @@ DEFINED = re.compile(
 )
 # Tests, docs and changelog fragments: a fix to one of these is not a product defect.
 NOT_PRODUCT = re.compile(
-    r"(^|/)(tests?|__tests__|docs?|changelog\.d)/|\.md$"
-    r"|(^|/)test_[^/]*$|_test\.[^/]+$|\.(test|spec)\.[^/]+$"
+    r"(?:^|/)(?:tests?|__tests__|docs?|changelog\.d)/|\.md$"
+    r"|(?:^|/)test_[^/]*$|_test\.[^/]+$|\.(?:test|spec)\.[^/]+$"
 )
 # INVARIANT: no git call starts a program the repository or its config names: no
 # pager, no fsmonitor, and every call that prints a patch passes --no-ext-diff
