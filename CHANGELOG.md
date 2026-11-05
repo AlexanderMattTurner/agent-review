@@ -22,6 +22,7 @@ the prose from the release's commits.
 
 ### Changed
 
+- **Breaking:** the accumulated review is now off by default. `max-delta-reviews-per-pr` defaults to `0`, and so does `max_delta_reviews_per_pr` in the severity config. Each accumulated read could post findings whose fixes owed another read, so a pull request never settled. With `0` the merge gate goes green once the first read's findings are resolved, and its description names the commit the reading stopped at. A caller that wants the read back sets `max-delta-reviews-per-pr` and the config key to the same number.
 - The reviewer now spends the paid Anthropic API key last, not first. A review tries every Claude Code subscription token before it bills real credits. The paid key moves from `rung_1` to `rung_8`, and rungs 1 to 7 hold the subscription tokens. No single rung is required any more: the review refuses to run only when no rung holds a paid key. A caller that still passes the paid key in `rung_1` keeps working: the reviewer tells a paid key from a subscription token by its prefix, authenticates it the right way, and tries it last. The free same-credential retry now runs only when one credential is configured.
 
 ### Fixed
