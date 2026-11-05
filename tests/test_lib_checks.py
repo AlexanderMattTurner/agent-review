@@ -1,4 +1,5 @@
-"""Tests for .claude/hooks/lib-checks.sh has_script.
+"""Tests for .claude/hooks/lib-checks.sh has_script, which asks
+.github/scripts/script-configured.sh.
 
 The load-bearing guard: a malformed package.json (or a missing jq) must fail
 LOUD with exit 2 — the "could not classify" contract — never be silently
@@ -30,19 +31,21 @@ def _run_has_script(project_dir: Path, name: str = "build", path: str | None = N
 def test_malformed_package_json_exits_2(tmp_path: Path) -> None:
     """RED without the guard: a broken package.json would fall through to
     'not configured' (exit 1) instead of the loud exit 2."""
-    (tmp_path / "package.json").write_text("{ not valid json ")
+    (tmp_path / "package.json").write_text("{ not valid json ", encoding="utf-8")
     # Provide a real PATH so jq is found and actually reports the parse error.
     import os
 
     result = _run_has_script(tmp_path, path=os.environ["PATH"])
     assert result.returncode == 2, result.stderr
-    assert "not valid JSON" in result.stderr
+    assert "cannot read package.json" in result.stderr
 
 
 def test_configured_script_returns_0(tmp_path: Path) -> None:
     import os
 
-    (tmp_path / "package.json").write_text('{"scripts": {"build": "tsc"}}')
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "tsc"}}', encoding="utf-8"
+    )
     result = _run_has_script(tmp_path, path=os.environ["PATH"])
     assert result.returncode == 0, result.stderr
 
@@ -52,7 +55,9 @@ def test_unconfigured_script_returns_1_not_2(tmp_path: Path) -> None:
     (exit 1) — distinct from the exit-2 'could not classify'."""
     import os
 
-    (tmp_path / "package.json").write_text('{"scripts": {"lint": "eslint"}}')
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"lint": "eslint"}}', encoding="utf-8"
+    )
     result = _run_has_script(tmp_path, path=os.environ["PATH"])
     assert result.returncode == 1
 
@@ -60,10 +65,29 @@ def test_unconfigured_script_returns_1_not_2(tmp_path: Path) -> None:
 def test_missing_jq_fails_loud(tmp_path: Path) -> None:
     """With a package.json present but jq absent from PATH, has_script must not
     silently return 'not configured' — jq's absence trips the loud exit 2."""
-    (tmp_path / "package.json").write_text('{"scripts": {"build": "tsc"}}')
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "tsc"}}', encoding="utf-8"
+    )
     # A PATH containing only bash (so the subprocess can start) but no jq.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(shutil.which("bash"))
     result = _run_has_script(tmp_path, path=str(bin_dir))
     assert result.returncode == 2, result.stderr
+
+
+def test_a_missing_predicate_fails_loud(tmp_path: Path) -> None:
+    """lib-checks.sh holds no copy of the predicate, so without
+    script-configured.sh beside it there is no answer: exit 2, never 1."""
+    lib = tmp_path / ".claude" / "hooks" / "lib-checks.sh"
+    lib.parent.mkdir(parents=True)
+    lib.write_bytes(LIB.read_bytes())
+    (tmp_path / "package.json").write_text('{"scripts": {}}', encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-c", f'source "{lib}"; has_script build'],
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "script-configured.sh, which is missing" in result.stderr

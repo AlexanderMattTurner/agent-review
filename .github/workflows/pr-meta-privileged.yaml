@@ -4,10 +4,9 @@ name: PR meta (privileged)
 #   * cancel — cancel a closed PR's orphaned in-flight runs (actions: write).
 #   * label  — label open PRs that have merge conflicts (pull-requests/issues: write).
 # Both run on pull_request_target so the token is write-capable from forks, and
-# both run NO PR-authored code: cancel sparse-checks-out only the trusted BASE
-# repo's .github/scripts, and label runs the resolver's labeler at a pinned SHA,
-# both with persist-credentials:false, so the elevated token never touches fork
-# content.
+# both run NO PR-authored code: each sparse-checks-out only the trusted BASE
+# repo's .github/scripts at the base ref with persist-credentials:false, so the
+# elevated token never touches fork content.
 #
 # These are kept in a SEPARATE file from the pr-meta gates on purpose: co-locating
 # a pull_request_target trigger with those gates would trip CodeQL's
@@ -66,11 +65,12 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CLOSED_AT: ${{ github.event.pull_request.closed_at }}
         run: bash .github/scripts/cancel-pr-runs.sh
 
   # ── Merge-conflict labeler ─────────────────────────────────────────────────────────────────────────────────────────
   # pull_request_target (not pull_request) so the label write has a write-scoped
-  # token even from forks; it runs the resolver's labeler at a pinned SHA with no
+  # token even from forks; it checks out only base-repo `.github/scripts` with no
   # persisted credentials and runs no PR-authored code, so the elevated token
   # touches nothing the PR controls. Fires on schedule (6-hourly backstop for
   # lazily-computed UNKNOWN mergeability), push to main (the base moved → every
@@ -99,14 +99,32 @@ jobs:
       group: merge-conflict-labeler-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/scripts
+            .github/tool-versions.sh
+            .github/workflows/auto-resolve-conflicts.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      # run-with-pyyaml.sh fetches PyYAML through uv. No cache: this job holds
+      # credentials, and a cache another run wrote is input it never reviewed.
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+      # The labeler runs with a write token, so it comes from the SAME pinned
+      # resolver commit auto-resolve-conflicts.yaml calls, never a moving branch
+      # whose owner could change what runs here.
+      - name: Read the resolver pin
+        id: pin
+        run: bash .github/scripts/run-with-pyyaml.sh .github/scripts/resolver-ref.py --github-output
       # The labeler ships WITH the resolver it triggers, so no repository keeps a
-      # copy of it to drift from the label the resolver reads. The job holds a
-      # write token, so it runs a pinned commit, never a moving branch.
+      # copy of it to drift from the label the resolver reads.
       - name: Check out the resolver that provides the labeler
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: AlexanderMattTurner/agent-resolve-merge-conflicts
-          ref: f6dea60f29ba915171ac9bf96e7dbcdcc4c819a0 # v1.40.2, same pin as auto-resolve-conflicts.yaml
+          repository: ${{ steps.pin.outputs.repository }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: resolver
           persist-credentials: false
       - name: Sync merge-conflict labels

@@ -12,6 +12,11 @@ minimumReleaseAge: 4320
 minimumReleaseAgeExclude:
   - agent-control-plane-core
 
+# tree-sitter-bash ships a native addon AND tree-sitter-bash.wasm. The hooks load
+# only the wasm through web-tree-sitter, so its native build never runs.
+allowBuilds:
+  tree-sitter-bash: false
+
 # GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 DoS via malformed TOML (high).
 # Transitive via markdownlint-cli2; override until markdownlint-cli2 bumps it.
 overrides:

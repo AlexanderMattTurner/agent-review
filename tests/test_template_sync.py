@@ -7,9 +7,11 @@ resulting file contents + GITHUB_OUTPUT entries.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests._helpers import GIT_IDENTITY_ENV, REPO_ROOT, commit_all, init_test_repo
 
@@ -18,7 +20,7 @@ SCRIPT = REPO_ROOT / ".github" / "scripts" / "template-sync.sh"
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
 
 def parse_outputs(github_output: Path) -> dict[str, str]:
@@ -68,6 +70,14 @@ def workdir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def declare_sync_paths(template_copy: Path, sync_paths: str) -> None:
+    """Write the template workflow whose `env.SYNC_PATHS` the sync reads."""
+    write(
+        template_copy / ".github" / "workflows" / "template-sync.yaml",
+        yaml.safe_dump({"env": {"SYNC_PATHS": sync_paths}}),
+    )
+
+
 def run_sync(
     child: Path,
     template: Path,
@@ -75,26 +85,29 @@ def run_sync(
     sync_paths: str,
     exclude_paths: str = "",
     opt_in_paths: str = "",
+    path_prefix: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess, Path]:
     template_copy = child / "_template"
     if template_copy.exists():
         subprocess.run(["rm", "-rf", str(template_copy)], check=True)
     subprocess.run(["cp", "-a", str(template), str(template_copy)], check=True)
+    declare_sync_paths(template_copy, sync_paths)
 
     output_file = child.parent / f"github_output_{child.name}.txt"
-    output_file.write_text("")
+    output_file.write_text("", encoding="utf-8")
     work = child.parent / f"work_{child.name}"
     work.mkdir(exist_ok=True)
 
     env = {
         **os.environ,
         **GIT_IDENTITY_ENV,
-        "SYNC_PATHS": sync_paths,
         "EXCLUDE_PATHS": exclude_paths,
         "OPT_IN_PATHS": opt_in_paths,
         "GITHUB_OUTPUT": str(output_file),
         "TEMPLATE_SYNC_WORK_DIR": str(work),
     }
+    if path_prefix is not None:
+        env["PATH"] = f"{path_prefix}:{env['PATH']}"
     result = subprocess.run(
         ["bash", str(SCRIPT)], cwd=child, env=env, capture_output=True, text=True
     )
@@ -137,7 +150,7 @@ def test_3way_merge_outcomes(
     write(template / "config" / "a.txt", base)
     prev_sha = commit_all(template)
     write(child / "config" / "a.txt", local)
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
     write(template / "config" / "a.txt", template_after)
     commit_all(template)
@@ -147,7 +160,7 @@ def test_3way_merge_outcomes(
 
     outputs = parse_outputs(output_file)
     assert outputs["has_conflicts"] == expect_conflicts
-    body = (child / "config" / "a.txt").read_text()
+    body = (child / "config" / "a.txt").read_text(encoding="utf-8")
     if expect_local_after is not None:
         assert body == expect_local_after
     else:
@@ -164,11 +177,47 @@ def test_adds_new_file_from_template(workdir: Path) -> None:
     result, output_file = run_sync(child, template, sync_paths="config")
     assert result.returncode == 0, result.stderr
 
-    assert (child / "config" / "hello.txt").read_text() == "from template\n"
+    assert (child / "config" / "hello.txt").read_text(
+        encoding="utf-8"
+    ) == "from template\n"
     outputs = parse_outputs(output_file)
     assert outputs["has_changes"] == "true"
     assert outputs["has_conflicts"] == "false"
     assert outputs["has_deletions"] == "false"
+
+
+def test_adds_a_single_file_sync_path_entry(workdir: Path) -> None:
+    """SYNC_PATHS carries `.github/tool-versions.sh`, a FILE that no directory
+    entry covers. `.github/scripts` syncs install-mergiraf.sh, which sources that
+    pin, so the entry that brings it must work on its own."""
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / ".github" / "tool-versions.sh", "MERGIRAF_VERSION=v0.0.1\n")
+    commit_all(template)
+
+    result, output_file = run_sync(
+        child, template, sync_paths=".github/tool-versions.sh"
+    )
+    assert result.returncode == 0, result.stderr
+
+    synced = child / ".github" / "tool-versions.sh"
+    assert synced.read_text(encoding="utf-8") == "MERGIRAF_VERSION=v0.0.1\n"
+    assert parse_outputs(output_file)["has_changes"] == "true"
+
+
+def test_a_file_sync_path_absent_from_the_template_is_skipped(workdir: Path) -> None:
+    """A template that has not added the file yet must leave the rest of the sync
+    running, not abort it."""
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / "config" / "a.txt", "same\n")
+    commit_all(template)
+
+    result, _ = run_sync(child, template, sync_paths="config .github/tool-versions.sh")
+    assert result.returncode == 0, result.stderr
+    assert "not found in template, skipping" in result.stdout
+    assert (child / "config" / "a.txt").read_text(encoding="utf-8") == "same\n"
+    assert not (child / ".github" / "tool-versions.sh").exists()
 
 
 def test_no_changes_when_files_identical(workdir: Path) -> None:
@@ -179,7 +228,7 @@ def test_no_changes_when_files_identical(workdir: Path) -> None:
     write(child / "config" / "a.txt", "same\n")
     # The sync script writes the SHA with a trailing newline; match it here so
     # rewriting the file doesn't itself count as a change.
-    (child / ".template-version").write_text(f"{sha}\n")
+    (child / ".template-version").write_text(f"{sha}\n", encoding="utf-8")
     commit_all(child)
 
     result, output_file = run_sync(child, template, sync_paths="config")
@@ -197,7 +246,7 @@ def test_keeps_local_when_only_local_changed(workdir: Path) -> None:
     write(template / "config" / "a.txt", "shared\n")
     prev_sha = commit_all(template)
     write(child / "config" / "a.txt", "local-customized\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
     # Template advances with an unrelated commit so the SHA differs.
     write(template / "other.txt", "noop\n")
@@ -208,7 +257,9 @@ def test_keeps_local_when_only_local_changed(workdir: Path) -> None:
 
     outputs = parse_outputs(output_file)
     assert outputs["has_conflicts"] == "false"
-    assert (child / "config" / "a.txt").read_text() == "local-customized\n"
+    assert (child / "config" / "a.txt").read_text(
+        encoding="utf-8"
+    ) == "local-customized\n"
 
 
 def test_no_base_conflict_when_local_differs_without_prev_sha(workdir: Path) -> None:
@@ -281,7 +332,7 @@ def test_detects_deleted_files(workdir: Path) -> None:
     prev_sha = commit_all(template)
     write(child / "config" / "a.txt", "x\n")
     write(child / "config" / "b.txt", "y\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
     (template / "config" / "b.txt").unlink()
     commit_all(template)
@@ -328,7 +379,7 @@ def test_per_file_excludes_within_synced_directory(workdir: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
 
-    assert (child / "config" / "keep.txt").read_text() == "keep this\n"
+    assert (child / "config" / "keep.txt").read_text(encoding="utf-8") == "keep this\n"
     assert not (child / "config" / "skip.txt").exists()
 
 
@@ -393,7 +444,7 @@ def test_a_file_the_adopter_deleted_is_not_re_added(workdir: Path) -> None:
     # commit is the evidence the sync reads.
     write(child / "config" / "kept.txt", "x\n")
     write(child / "config" / "unwanted.txt", "y\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
     (child / "config" / "unwanted.txt").unlink()
     commit_all(child)
@@ -499,7 +550,9 @@ def test_opt_in_path_present_locally_is_updated(workdir: Path) -> None:
         opt_in_paths="config/opt-in.txt",
     )
     assert result.returncode == 0, result.stderr
-    assert (child / "config" / "opt-in.txt").read_text() == "v2 from template\n"
+    assert (child / "config" / "opt-in.txt").read_text(
+        encoding="utf-8"
+    ) == "v2 from template\n"
 
 
 def test_per_file_exclude_suppresses_deletion_report(workdir: Path) -> None:
@@ -511,7 +564,7 @@ def test_per_file_exclude_suppresses_deletion_report(workdir: Path) -> None:
     prev_sha = commit_all(template)
     write(child / "config" / "a.txt", "x\n")
     write(child / "config" / "b.txt", "y\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
     (template / "config" / "b.txt").unlink()
     commit_all(template)
@@ -538,7 +591,7 @@ def test_writes_template_version_with_trailing_newline(workdir: Path) -> None:
 
     result, _ = run_sync(child, template, sync_paths="config")
     assert result.returncode == 0, result.stderr
-    assert (child / ".template-version").read_text() == f"{sha}\n"
+    assert (child / ".template-version").read_text(encoding="utf-8") == f"{sha}\n"
 
 
 def test_symlink_in_child_is_left_untouched(workdir: Path) -> None:
@@ -598,11 +651,11 @@ def test_fails_loudly_without_github_output(workdir: Path) -> None:
     commit_all(template)
     template_copy = workdir / "child" / "_template"
     subprocess.run(["cp", "-a", str(template), str(template_copy)], check=True)
+    declare_sync_paths(template_copy, "config")
 
     env = {
         **os.environ,
         **GIT_IDENTITY_ENV,
-        "SYNC_PATHS": "config",
         # No GITHUB_OUTPUT set
     }
     env.pop("GITHUB_OUTPUT", None)
@@ -633,13 +686,21 @@ def test_survives_self_overwrite_with_longer_file(workdir: Path) -> None:
     child = workdir / "child"
     template = workdir / "template"
     script_rel = ".github/scripts/template-sync.sh"
-    script_bytes = SCRIPT.read_text()
+    script_bytes = SCRIPT.read_text(encoding="utf-8")
 
-    # Base == the current script; child adopts it verbatim (Case 5 later).
+    # Base == the current script; child adopts it verbatim (Case 5 later). The
+    # script runs the wrapper beside it, which sources the pin file, so a real
+    # child carries both.
+    deps = {
+        rel: (REPO_ROOT / rel).read_text(encoding="utf-8")
+        for rel in (".github/scripts/run-with-pyyaml.sh", ".github/tool-versions.sh")
+    }
     write(template / script_rel, script_bytes)
     prev_sha = commit_all(template)
     write(child / script_rel, script_bytes)
-    (child / ".template-version").write_text(prev_sha)
+    for rel, text in deps.items():
+        write(child / rel, text)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
 
     # Template advances to an identical prefix + a longer, broken tail. Because
@@ -651,14 +712,14 @@ def test_survives_self_overwrite_with_longer_file(workdir: Path) -> None:
 
     template_copy = child / "_template"
     subprocess.run(["cp", "-a", str(template), str(template_copy)], check=True)
+    declare_sync_paths(template_copy, ".github/scripts")
     output_file = child.parent / "github_output_selfoverwrite.txt"
-    output_file.write_text("")
+    output_file.write_text("", encoding="utf-8")
     work = child.parent / "work_selfoverwrite"
     work.mkdir(exist_ok=True)
     env = {
         **os.environ,
         **GIT_IDENTITY_ENV,
-        "SYNC_PATHS": ".github/scripts",
         "EXCLUDE_PATHS": "",
         "GITHUB_OUTPUT": str(output_file),
         "TEMPLATE_SYNC_WORK_DIR": str(work),
@@ -669,7 +730,7 @@ def test_survives_self_overwrite_with_longer_file(workdir: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     # The child's on-disk copy was overwritten with the longer template version.
-    assert (child / script_rel).read_text().endswith(broken_tail)
+    assert (child / script_rel).read_text(encoding="utf-8").endswith(broken_tail)
 
 
 def test_silent_downgrade_is_surfaced_loudly(workdir: Path) -> None:
@@ -695,7 +756,7 @@ def test_silent_downgrade_is_surfaced_loudly(workdir: Path) -> None:
     # Local diverged from base by appending a line far from ADOPTER-OWNED, while
     # keeping ADOPTER-OWNED (both-sides-changed merge path, not adopt-template).
     write(child / "config" / "a.txt", "ADOPTER-OWNED\nA\nB\nC\nD\nE\nLOCAL-ADD\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
 
     # Template advanced by REMOVING ADOPTER-OWNED at the top.
@@ -706,7 +767,7 @@ def test_silent_downgrade_is_surfaced_loudly(workdir: Path) -> None:
     assert result.returncode == 0, result.stderr
 
     outputs = parse_outputs(output_file)
-    merged = (child / "config" / "a.txt").read_text()
+    merged = (child / "config" / "a.txt").read_text(encoding="utf-8")
     # The merge was clean (no conflict markers) and did drop the adopter line...
     assert "<<<<<<<" not in merged
     assert "ADOPTER-OWNED" not in merged
@@ -728,7 +789,7 @@ def test_benign_auto_merge_reports_no_downgrade(workdir: Path) -> None:
     prev_sha = commit_all(template)
 
     write(child / "config" / "a.txt", "common\nLOCAL-ADD\n")
-    (child / ".template-version").write_text(prev_sha)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
     commit_all(child)
 
     write(template / "config" / "a.txt", "common\nTEMPLATE-ADD\n")
@@ -738,7 +799,7 @@ def test_benign_auto_merge_reports_no_downgrade(workdir: Path) -> None:
     assert result.returncode == 0, result.stderr
 
     outputs = parse_outputs(output_file)
-    merged = (child / "config" / "a.txt").read_text()
+    merged = (child / "config" / "a.txt").read_text(encoding="utf-8")
     assert "LOCAL-ADD" in merged and "TEMPLATE-ADD" in merged
     assert outputs["has_downgrades"] == "false"
 
@@ -819,8 +880,8 @@ def test_a_file_no_commit_in_range_explains_is_listed_apart(workdir: Path) -> No
 
 def test_bookkeeping_paths_stay_out_of_the_unexplained_list(workdir: Path) -> None:
     """`.template-version` is rewritten by this script and the template ships
-    none, so no commit can ever explain it; `_template` is the script's own
-    untracked checkout. Both would sit under "no commit in that range" on every
+    none, so no commit can ever explain it; `_template` is the template checkout,
+    untracked in the child. Both would sit under "no commit in that range" on every
     single sync, which is the noise the attributed changelog exists to remove."""
     child = workdir / "child"
     template = workdir / "template"
@@ -845,6 +906,37 @@ def test_bookkeeping_paths_stay_out_of_the_unexplained_list(workdir: Path) -> No
     assert ".template-version" not in outputs["changelog"]
     assert "_template" not in outputs["changelog"]
     assert outputs["changed_files"].split() == ["config/a.txt"]
+
+
+def test_the_template_checkout_outlives_the_sync_but_never_reaches_its_commit(
+    workdir: Path,
+) -> None:
+    """Every step after the sync runs its script from `_template`, so the sync
+    must leave that checkout in place. create-pull-request then stages with
+    `git add -A`, so the child's git must not see it, or the sync PR would commit
+    the whole template under `_template/`."""
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / "config" / "a.txt", "a\n")
+    commit_all(template)
+    commit_all(child)
+
+    result, output_file = run_sync(child, template, sync_paths="config")
+    assert result.returncode == 0, result.stderr
+
+    assert (child / "_template" / "config" / "a.txt").is_file()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=child,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert sorted(line[3:] for line in status) == [".template-version", "config/a.txt"]
+    assert parse_outputs(output_file)["changed_paths"].split() == [
+        ".template-version",
+        "config/a.txt",
+    ]
 
 
 def test_a_merge_commit_is_not_counted_as_touching_nothing(workdir: Path) -> None:
@@ -1118,3 +1210,203 @@ def test_a_markerless_entry_survives_the_report_cap(workdir: Path) -> None:
     # The entry's own heading and its diff line, not a phrase the cap note also carries.
     assert "### `.github/workflows/ci.yaml`" in report
     assert "+template-side" in report
+    # The marker-bearing section must start after a blank line, or the kept-local section's
+    # closing </details> swallows its first heading into the HTML block.
+    first_marked = report.index("### `config/")
+    assert report[first_marked - 2 : first_marked] == "\n\n"
+
+
+def test_kept_local_entries_take_the_report_cap_before_marked_ones(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept-local entries that alone exceed the cap are cut with a note naming the template SHA
+    to diff against, and no marker-bearing entry survives in their place."""
+    monkeypatch.setenv("CONFLICT_REPORT_MAX_BYTES", "3000")
+    child = workdir / "child"
+    template = workdir / "template"
+    filler = "x" * 100
+    for n in range(4):
+        write(
+            child / ".github" / "workflows" / f"w{n}.yaml", f"local {n} {filler}\n" * 10
+        )
+        write(
+            template / ".github" / "workflows" / f"w{n}.yaml",
+            f"tmpl {n} {filler}\n" * 10,
+        )
+    write(child / "config" / "a.txt", "local a\n")
+    write(template / "config" / "a.txt", "template a\n")
+    commit_all(child)
+    commit_all(template)
+    template_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=template,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result, output_file = run_sync(child, template, sync_paths="config .github")
+    assert result.returncode == 0, result.stderr
+
+    outputs = parse_outputs(output_file)
+    report = outputs["conflict_report"]
+    assert len(outputs["markerless_files"].split()) == 4
+    assert "Kept-local entries truncated" in report
+    assert template_sha in report
+    # The kept-local entries took the cap, so the template side of one is still here.
+    assert "+tmpl " in report
+    assert "### `config/a.txt`" not in report
+    assert len(report.encode()) <= 3000 + 600
+
+
+def test_the_template_declares_which_paths_sync(workdir: Path) -> None:
+    """A path the template renames must arrive on the FIRST sync after the rename.
+
+    The child's own SYNC_PATHS still names the old path until a sync delivers the
+    new workflow, so reading the child's copy ships the renamed file one cycle
+    late, and the first sync carries a reader without the data it reads.
+    """
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / "config" / "a.txt", "a\n")
+    write(template / "renamed" / "pin.txt", "pin\n")
+    commit_all(template)
+    commit_all(child)
+
+    template_copy = child / "_template"
+    subprocess.run(["cp", "-a", str(template), str(template_copy)], check=True)
+    declare_sync_paths(template_copy, "config renamed")
+    output_file = workdir / "github_output_declared.txt"
+    output_file.write_text("", encoding="utf-8")
+    work = workdir / "work_declared"
+    work.mkdir()
+    env = {
+        **os.environ,
+        **GIT_IDENTITY_ENV,
+        # The child's stale list, which names only the pre-rename path.
+        "SYNC_PATHS": "config",
+        "GITHUB_OUTPUT": str(output_file),
+        "TEMPLATE_SYNC_WORK_DIR": str(work),
+    }
+    result = subprocess.run(
+        ["bash", str(SCRIPT)], cwd=child, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert (child / "renamed" / "pin.txt").read_text(encoding="utf-8") == "pin\n"
+    assert (child / "config" / "a.txt").read_text(encoding="utf-8") == "a\n"
+
+
+def test_the_sync_paths_reader_needs_no_pyyaml_on_the_system_python(
+    workdir: Path,
+) -> None:
+    """A runner whose python3 lacks PyYAML (a container job, a self-hosted runner)
+    must still read the template's SYNC_PATHS: uv supplies PyYAML at the pin."""
+    shim = workdir / "bin"
+    shim.mkdir()
+    # -S drops site-packages, so this python3 imports the stdlib and nothing else.
+    write(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n')
+    (shim / "python3").chmod(0o755)
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / "config" / "a.txt", "a\n")
+    commit_all(template)
+    commit_all(child)
+
+    result, _ = run_sync(child, template, sync_paths="config", path_prefix=shim)
+
+    assert result.returncode == 0, result.stderr
+    assert (child / "config" / "a.txt").read_text(encoding="utf-8") == "a\n"
+
+
+def test_a_clean_json_merge_with_a_duplicate_member_is_a_conflict(
+    workdir: Path,
+) -> None:
+    """Both sides adding the same top-level key merges "cleanly" into two keys.
+
+    jq, Python and JavaScript keep the LAST one, so the repo's own block silently
+    stops taking effect. The sync must keep the local file and report it.
+    """
+    child = workdir / "child"
+    template = workdir / "template"
+    base = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    local = '{\n  "a": 1,\n  "enabledPlugins": {"local": true},\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    template_after = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "enabledPlugins": {"tmpl": true},\n  "d": 4\n}\n'
+    write(template / "config" / "settings.json", base)
+    prev_sha = commit_all(template)
+    write(child / "config" / "settings.json", local)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
+    commit_all(child)
+    write(template / "config" / "settings.json", template_after)
+    commit_all(template)
+
+    result, output_file = run_sync(child, template, sync_paths="config")
+    assert result.returncode == 0, result.stderr
+
+    outputs = parse_outputs(output_file)
+    assert outputs["has_conflicts"] == "true"
+    assert outputs["markerless_files"].split() == ["config/settings.json"]
+    assert "enabledPlugins" in outputs["conflict_report"]
+    assert (child / "config" / "settings.json").read_text(encoding="utf-8") == local
+
+
+def test_a_clean_json_merge_that_does_not_parse_keeps_local(workdir: Path) -> None:
+    """A merged .json that json.load refuses keeps the local file and is reported.
+
+    JSONC is the common case: a comment both sides keep rides a clean line merge
+    into a file json.load refuses. The sync must not abort with no pull request,
+    and the report names the repository path, never the temporary merge file.
+    """
+    base = '{\n  // pinned\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    local = '{\n  // pinned\n  "a": 10,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    template_after = '{\n  // pinned\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 40\n}\n'
+    child = workdir / "child"
+    template = workdir / "template"
+    write(template / "config" / "settings.json", base)
+    prev_sha = commit_all(template)
+    write(child / "config" / "settings.json", local)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
+    commit_all(child)
+    write(template / "config" / "settings.json", template_after)
+    commit_all(template)
+
+    result, output_file = run_sync(child, template, sync_paths="config")
+    assert result.returncode == 0, result.stderr
+
+    outputs = parse_outputs(output_file)
+    assert outputs["has_conflicts"] == "true"
+    assert outputs["markerless_files"].split() == ["config/settings.json"]
+    assert "not valid JSON" in outputs["conflict_report"]
+    assert (
+        "merge_result_"
+        not in outputs["conflict_report"] + result.stdout + result.stderr
+    )
+    assert (
+        "CONFLICT (clean merge is not valid JSON, local kept): config/settings.json"
+        in result.stdout
+    )
+    assert (child / "config" / "settings.json").read_text(encoding="utf-8") == local
+
+
+def test_a_clean_json_merge_without_duplicates_still_merges(workdir: Path) -> None:
+    child = workdir / "child"
+    template = workdir / "template"
+    base = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    local = '{\n  "a": 1,\n  "local": true,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n'
+    template_after = (
+        '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "tmpl": true,\n  "d": 4\n}\n'
+    )
+    merged = '{\n  "a": 1,\n  "local": true,\n  "b": 2,\n  "c": 3,\n  "tmpl": true,\n  "d": 4\n}\n'
+    write(template / "config" / "settings.json", base)
+    prev_sha = commit_all(template)
+    write(child / "config" / "settings.json", local)
+    (child / ".template-version").write_text(prev_sha, encoding="utf-8")
+    commit_all(child)
+    write(template / "config" / "settings.json", template_after)
+    commit_all(template)
+
+    result, output_file = run_sync(child, template, sync_paths="config")
+    assert result.returncode == 0, result.stderr
+
+    outputs = parse_outputs(output_file)
+    assert outputs["has_conflicts"] == "false"
+    assert (child / "config" / "settings.json").read_text(encoding="utf-8") == merged
