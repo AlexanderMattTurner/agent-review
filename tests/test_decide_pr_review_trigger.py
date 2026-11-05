@@ -1281,7 +1281,7 @@ def test_the_workflow_owns_the_accumulated_read_budget() -> None:
     workflow, and every script refuses to run without it. A decide step and a
     re-check step on different budgets would cancel each other's reads."""
     budget = _workflow()[True]["workflow_call"]["inputs"]["max-delta-reviews-per-pr"]
-    assert budget["default"] == 1, "one accumulated read per PR is the shipped budget"
+    assert budget["default"] == 0, "the accumulated read ships off: it did not settle"
     assert budget["type"] == "number"
     steps = [
         *_workflow()["jobs"]["decide"]["steps"],

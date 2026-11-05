@@ -455,9 +455,25 @@ def test_with_no_budget_passed_the_severity_config_supplies_it(
 ) -> None:
     """The sweep and the event dispatcher pass no budget: they read the same
     config key both gate legs read, so the read they ask for is one the gate is
-    waiting for."""
-    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], max_delta_reviews=None)
+    waiting for. The shipped config turns the read off, so a copy grants one."""
+    config = json.loads(SEVERITIES.read_text(encoding="utf-8"))
+    config["max_delta_reviews_per_pr"] = 1
+    granting = tmp_path / "granting.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    granting.write_text(json.dumps(config), encoding="utf-8")
+    _, calls = dispatch(
+        tmp_path,
+        reviews=[_review(COVERED)],
+        max_delta_reviews=None,
+        severity_config=granting,
+    )
     assert len(_dispatched(calls)) == 1, calls
+
+
+def test_the_shipped_config_asks_for_no_accumulated_read(tmp_path: Path) -> None:
+    """The pair: the same call against the shipped config, whose budget is 0."""
+    _, calls = dispatch(tmp_path, reviews=[_review(COVERED)], max_delta_reviews=None)
+    assert _dispatched(calls) == [], calls
 
 
 def test_with_no_budget_anywhere_the_dispatcher_refuses(tmp_path: Path) -> None:

@@ -77,7 +77,7 @@ on:
       max-delta-reviews-per-pr:
         description: "How many ACCUMULATED reads one pull request may spend, from 0 to 999. An accumulated read covers the pushes that landed after the last review, and only once the pull request is otherwise ready to merge. It is a separate budget because the automatic first-read arms fire on `synchronize`, which is what an accumulated read must not do. 0 turns the accumulated read off, and the pushes after a review then stay unread — the merge gate says so rather than claiming coverage."
         required: false
-        default: 1
+        default: 0
         type: number
       pr-number:
         description: "The pull request to read on a `workflow_dispatch` run, which carries no pull request payload. Empty (the default) is every other trigger, where the event names the pull request. `dispatch-delta-review.sh` passes it when it asks for the accumulated read."
