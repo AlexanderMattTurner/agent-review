@@ -73,6 +73,7 @@ def _fake_gh(
     review_states: tuple[str, ...] = (),
     fail: bool = False,
     commits_fail: bool = False,
+    association: str = "OWNER",
 ) -> None:
     """A `gh` stub that records each call's argv (appended to $GH_ARGV_FILE) and
     answers the API reads the script makes by branching on the request path:
@@ -86,7 +87,10 @@ def _fake_gh(
     `commits_fail` refuses the commit read ALONE, the way the real gh refuses one:
     the HTTP error body goes to STDOUT and the exit status is non-zero. That
     combination is what a caller can get wrong — the body is a string, so a reader
-    that keeps it on failure searches the error text for the opt-in keyword."""
+    that keeps it on failure searches the error text for the opt-in keyword.
+
+    `.../pulls/<n>` puts a canned REST payload naming `association` as the PR
+    author's `author_association` through the script's own `--jq`, run by real jq."""
     gh = tmp_path / "gh"
     msg = message.replace("\\", "\\\\").replace('"', '\\"')
     # One line per state, dated in order, so the script's latest-by-submittedAt
@@ -108,6 +112,11 @@ def _fake_gh(
             'case "$*" in\n'
             f"*graphql*) {nodes} ;;\n"
             f'*/commits/*) printf "%s" "{msg}" ; exit {7 if commits_fail else 0} ;;\n'
+            "*/pulls/*)\n"
+            '  q=.; prev=""\n'
+            '  for a in "$@"; do [[ "$prev" == --jq ]] && q="$a"; prev="$a"; done\n'
+            f'  printf \'%s\' \'{{"author_association":"{association}","labels":[]}}\''
+            ' | jq -r "$q" ;;\n'
             "*) ;;\n"
             "esac\n"
         )
@@ -134,6 +143,7 @@ def _run(
     review_label: str | None = None,
     max_reviews: str = "1",
     max_delta_reviews: str = "1",
+    association: str = "OWNER",
 ) -> tuple[subprocess.CompletedProcess, str, str]:
     """Run the script with the fake gh on PATH; return (proc, run, argv).
     `expect_recheck` pins the emitted `recheck` — the flag that asks the review
@@ -146,6 +156,7 @@ def _run(
         review_states=review_states,
         fail=fail,
         commits_fail=commits_fail,
+        association=association,
     )
     out_file = tmp_path / "github_output"
     out_file.write_text("", encoding="utf-8")
@@ -611,6 +622,7 @@ case "$*" in
   done
   ;;
 */commits/*) printf "%s" "${HEAD_MSG:-}" ;;
+*/pulls/*) printf '%s' '{"author_association":"OWNER","labels":[]}' | jq -r "$jq_prog" ;;
 *) ;;
 esac
 """
@@ -810,6 +822,48 @@ def test_the_head_commit_opt_in_outranks_a_spent_budget(tmp_path: Path) -> None:
         max_reviews="0",
     )
     assert run == "true"
+
+
+@pytest.mark.parametrize(
+    ("association", "expected"),
+    [
+        ("OWNER", "true"),
+        ("MEMBER", "true"),
+        ("COLLABORATOR", "true"),
+        ("CONTRIBUTOR", "false"),
+        ("FIRST_TIME_CONTRIBUTOR", "false"),
+        ("NONE", "false"),
+    ],
+)
+def test_only_a_trusted_author_s_head_commit_opt_in_buys_a_read(
+    tmp_path: Path, association: str, expected: str
+) -> None:
+    """The author writes the commit title, so an untrusted author could buy one
+    paid read per push. Only OWNER, MEMBER or COLLABORATOR count; the review
+    label, which needs triage access, stays everyone else's way in."""
+    proc, run, argv = _run(
+        tmp_path,
+        "synchronize",
+        message="[opus-review] another read please",
+        review_states=("APPROVED",),
+        association=association,
+    )
+    assert run == expected, proc.stdout
+    assert "repos/owner/repo/pulls/42" in argv
+    if expected == "false":
+        assert f"association is {association}" in proc.stdout
+
+
+def test_an_unreadable_association_buys_no_read(tmp_path: Path) -> None:
+    """A read that fails is not a trusted author: the opt-in is ignored."""
+    proc, run, _ = _run(
+        tmp_path,
+        "synchronize",
+        message="[opus-review] x",
+        review_states=("APPROVED",),
+        association='"',
+    )
+    assert run == "false", proc.stdout
 
 
 def test_the_review_label_outranks_a_spent_budget(tmp_path: Path) -> None:

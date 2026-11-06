@@ -226,7 +226,7 @@ def dismissed(calls: str) -> bool:
     return "dismissals" in calls
 
 
-CLEARED = dict(threads=[thread(resolved=True)], reviews=[review("CHANGES_REQUESTED")])
+CLEARED = {"threads": [thread(resolved=True)], "reviews": [review("CHANGES_REQUESTED")]}
 SELF_APPROVAL = "GraphQL: Can not approve your own pull request (addPullRequestReview)"
 ACTIONS_BARRED = "GitHub Actions is not permitted to approve pull requests"
 
@@ -431,7 +431,7 @@ def test_a_needs_a_human_hold_the_author_resolved_still_holds(tmp_path: Path):
     res, calls = run(
         tmp_path,
         threads=[
-            thread(resolved_by=AUTHOR, body=f"too large to read\n{marker}"),
+            thread(resolved_by=AUTHOR, body=f"files went unread\n{marker}"),
             thread(resolved_by=OTHER),
         ],
         reviews=[review("CHANGES_REQUESTED")],
@@ -528,10 +528,10 @@ def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Pa
 def test_a_hold_thread_posted_before_its_notice_review_belongs_to_that_hold(
     tmp_path: Path, earlier: list[str]
 ):
-    """The oversized and degraded paths open their hold thread FIRST, as a
-    standalone comment, and post the notice review after it. GitHub wraps that
-    comment in a body-less review that is OLDER than the notice. Timing alone
-    would put the hold thread outside its own hold, and nothing could clear it."""
+    """The degraded path opens its finding threads FIRST, as standalone
+    comments, and posts the summary review after them. GitHub wraps each comment
+    in a body-less review that is OLDER than the summary. Timing alone would put
+    the thread outside its own hold, and nothing could clear it."""
     thread_at, notice_at = "2026-03-01T00:00:00Z", "2026-03-01T00:00:05Z"
     res, calls = run(
         tmp_path,

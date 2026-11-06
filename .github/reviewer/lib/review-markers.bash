@@ -23,14 +23,15 @@ _review_marker() {
 # shellcheck disable=SC2034 # read by the sourcing scripts
 {
   WHOLE_DIFF_READ_MARKER="$(_review_marker whole_diff_read)"
-  OVERSIZED_REVIEW_MARKER="$(_review_marker oversized_review)"
   DEGRADED_REVIEW_MARKER="$(_review_marker degraded_review)"
   INCOMPLETE_READ_MARKER="$(_review_marker incomplete_read)"
+  UNPOSTED_FINDINGS_MARKER="$(_review_marker unposted_findings)"
+  READ_WITHHELD_MARKER="$(_review_marker read_withheld)"
+  HUMAN_HOLD_MARKER="$(_review_marker human_hold)"
   AUTO_APPROVAL_MARKER="$(_review_marker automated_approval)"
   COVERAGE_MARKER_PREFIX="$(_review_marker coverage_prefix)"
   DELTA_READ_FINDING_MARKER="$(_review_marker delta_read_finding)"
   SEVERITY_MARKER_FORMAT="$(_review_marker severity_marker)"
-  HUMAN_HOLD_MARKER="$(_review_marker human_hold)"
 }
 
 # severity_marker <severity> — the marker line a finding of that severity carries.

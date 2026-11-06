@@ -121,8 +121,8 @@ fi
 # trailing reduce sums them.
 # A thread belongs to the current hold when the review that opened its root
 # comment came AFTER the previous real review. Comparing with the hold itself is
-# wrong: the oversized and degraded paths open their hold thread first and post the
-# review after it, so that thread is older than its own hold. The root comment's
+# wrong: the degraded path posts its finding comments first and the review after
+# them, so those threads are older than their own hold. The root comment's
 # createdAt cannot answer either: a comment drafted into a pending review is created
 # BEFORE that review is submitted.
 thread_in_hold='((.comments.nodes[0].pullRequestReview.submittedAt // "") > env.CYCLE_START)'

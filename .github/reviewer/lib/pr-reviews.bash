@@ -12,8 +12,8 @@
 # one — nor a fold that picks by array order instead of submittedAt.
 #
 # Consumers: decide-pr-review-trigger.sh, recheck-pr-review-owed.sh,
-# review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh,
-# post-oversized-review.sh, and .github/scripts/auto-approve-skipped-pr.sh.
+# review-findings-gate.sh, dispatch-delta-review.sh, post-pr-review.sh, and
+# .github/scripts/auto-approve-skipped-pr.sh.
 
 # retry_stdout: sourced here rather than assumed, so a consumer gets the retry
 # ladder by sourcing this file alone. lib-ci-retry.sh guards against double-source.
@@ -69,9 +69,7 @@ reviewer_reviews_ndjson() {
 
 # The markers that say a review SPENT this PR's read budget come from
 # review-markers.bash. WHOLE_DIFF_READ_MARKER goes on the summary review
-# post-pr-review.sh posts once the agent has read the diff. OVERSIZED_REVIEW_MARKER
-# goes on the notice post-oversized-review.sh posts for a diff too large to read;
-# that run still spent a job, so it still spends budget. AUTO_APPROVAL_MARKER is on
+# post-pr-review.sh posts once the agent has read the diff. AUTO_APPROVAL_MARKER is on
 # the stand-in approval auto-approve-skipped-pr.sh posts, the one non-read this
 # library can name.
 #
@@ -138,6 +136,40 @@ coverage_of_reviews() {
                    scope: \"whole\", submittedAt: (.submittedAt // \"\")}
              else empty end]
      | if length == 0 then empty else (sort_by(.submittedAt) | last) end"
+}
+
+# review_shortfalls — stdin is `reviewer_reviews_ndjson` output; prints the reads
+# that fell short and that no later complete read has made up for, as ONE JSON
+# object {kinds, since, latest}, or NOTHING when there are none. `kinds` names how
+# each fell short (incomplete, unposted, withheld), `since` is the oldest such
+# review's submittedAt and `latest` the newest.
+#
+# PROBLEM CLASS — a pull request merging with code the reviewer never read, or
+# with findings that hold nothing because GitHub refused to post them as threads.
+# The summary review of such a read carries INCOMPLETE_READ_MARKER,
+# UNPOSTED_FINDINGS_MARKER or READ_WITHHELD_MARKER, and the gate holds on this.
+#
+# A later read CLEARS a shortfall only when its own review carries the read
+# marker, no shortfall marker, and either a whole-diff scope or a shortfall review
+# with no coverage stamp. An unstamped shortfall advanced no coverage, so the next
+# read starts at the older covered head and reads what it missed. A stamped one
+# (findings refused) did advance it, so only a whole read sees those findings
+# again. The abandoned-read notice carries no read marker, so it clears nothing.
+review_shortfalls() {
+  jq -rsc --arg read "$WHOLE_DIFF_READ_MARKER" --arg abandoned "$ABANDONED_COVERAGE_SCOPE" \
+    --arg incomplete "$INCOMPLETE_READ_MARKER" --arg unposted "$UNPOSTED_FINDINGS_MARKER" \
+    --arg withheld "$READ_WITHHELD_MARKER" \
+    "[.[] | (.body // \"\") as \$b | ([\$b | $_COVERAGE_CAPTURE] | first) as \$stamp
+          | {at: (.submittedAt // \"\"), stamped: (\$stamp != null),
+             scope: (\$stamp.scope // \"whole\"), read: (\$b | contains(\$read)),
+             kinds: [(if (\$b | contains(\$incomplete)) then \"incomplete\" else empty end),
+                     (if (\$b | contains(\$unposted)) then \"unposted\" else empty end),
+                     (if (\$b | contains(\$withheld)) then \"withheld\" else empty end)]}]
+     | [.[] | select(.read and (.kinds | length) == 0 and .scope != \$abandoned)] as \$clean
+     | [.[] | select((.kinds | length) > 0) | . as \$s
+            | select(any(\$clean[]; .at > \$s.at and (.scope == \"whole\" or (\$s.stamped | not))) | not)]
+     | if length == 0 then empty
+       else {kinds: ([.[].kinds[]] | unique), since: (map(.at) | min), latest: (map(.at) | max)} end"
 }
 
 # delta_reviews_count — stdin is `reviewer_reviews_ndjson` output; how many
@@ -224,11 +256,11 @@ require_delta_review_budget() {
 # first pass.
 real_reviewer_reviews() {
   reviewer_reviews_ndjson "$@" |
-    jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" --arg oversized "$OVERSIZED_REVIEW_MARKER" \
+    jq -rc --arg read "$WHOLE_DIFF_READ_MARKER" \
       --arg marked_from "${READS_MARKED_FROM:-}" --arg approval "$AUTO_APPROVAL_MARKER" \
       "select((.body // \"\") as \$b
               | ([\$b | $_COVERAGE_CAPTURE | select(.read == \"delta\")] | length == 0)
-              and ((\$b | contains(\$read)) or (\$b | contains(\$oversized))
+              and ((\$b | contains(\$read))
                 or (\$marked_from != \"\" and ((\$b | contains(\$approval)) | not)
                     and ((.submittedAt // \"\") < \$marked_from))))"
 }
@@ -270,6 +302,22 @@ require_reads_marked_from() {
     echo "reads-marked-from must be an RFC3339 UTC timestamp like 2026-09-10T00:00:00Z, not '$READS_MARKED_FROM'" >&2
     exit 1
   }
+}
+
+# pr_author_facts <owner/name> <pr> — one REST read of the PR, as JSON {association,
+# trusted, labels}. `trusted` is true only for an `author_association` of OWNER,
+# MEMBER or COLLABORATOR. Non-zero once the retry ladder is exhausted.
+#
+# PROBLEM CLASS — deciding in more than one place which pull request author may
+# spend the caller's credentials. prepare-pr-review-input.sh caps an untrusted
+# author's read legs, and decide-pr-review-trigger.sh ignores an untrusted
+# author's `[opus-review]` commit title. Both ask here, so the two cannot disagree.
+pr_author_facts() {
+  # shellcheck disable=SC2016 # `$a` is a jq variable
+  retry_stdout gh api "repos/${1}/pulls/${2}" \
+    --jq '(.author_association // "") as $a
+          | {association: $a, trusted: ($a | IN("OWNER", "MEMBER", "COLLABORATOR")),
+             labels: [.labels[]?.name]}'
 }
 
 # latest_of_reviews — the newest of the NDJSON reviews on stdin as one JSON

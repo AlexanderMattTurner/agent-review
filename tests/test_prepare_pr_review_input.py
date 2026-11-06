@@ -4,12 +4,10 @@ reviewer, and routes the review by diff size.
 
 Contract:
   * EVERY diff is sanitized — diff.txt/meta.txt are always written.
-  * At or under MAX_DIFF_LINES: sharded=false, unreviewable=false, no shards.
+  * At or under MAX_DIFF_LINES: sharded=false, no shards.
   * Over MAX_DIFF_LINES: the sanitized diff is split per file into shards/ and
-    sharded=true, so the largest PRs are read in a fan-out instead of being
-    skipped for a human who may never look.
-  * Over MAX_SHARDS shards, or a PR aimed at a branch other than the default:
-    unreviewable=true and the human-review notice.
+    sharded=true, however large it is, so every PR gets an automated read.
+  * A diff GitHub will not serve is built by git from the merge base and head.
 
 The tests drive the REAL script with a fake `gh` (emits an N-file unified diff /
 PR metadata) and a fake `node` (stands in for the sanitizer, passing stdin
@@ -156,6 +154,8 @@ def _fake_bins(
     added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
+    association: str = "OWNER",
+    labels: tuple[str, ...] = (),
 ) -> None:
     """Put a fake `gh` and a fake `node` (the sanitizer stand-in: cats stdin) on PATH.
 
@@ -167,7 +167,8 @@ def _fake_bins(
     `escape_byte` adds one hunk holding a literal ESC byte, mirroring the
     payload `gh pr diff` would otherwise refuse to print. `added_line` adds
     a hunk adding that one line, and `pr_body` is the PR description. `node_script` replaces the fake
-    `node`'s body.
+    `node`'s body. `association` and `labels` are what the REST read of the PR
+    answers: GitHub's `author_association` for its author, and its label names.
     """
     flaky = ""
     if flaky_budget:
@@ -229,10 +230,15 @@ def _fake_bins(
         'if [[ -n "${FAKE_PATCH_PAD:-}" ]]; then pad="$(cat "$FAKE_PATCH_PAD")"; fi\n'
         # The compare read a delta run makes, routed before the files API: it
         # is the authority on which files landed after the covered head.
+        'q=.; prev=""\n'
+        'for a in "$@"; do if [[ "$prev" == --jq ]]; then q="$a"; fi; prev="$a"; done\n'
         'if [[ "$*" == *"/compare/"* ]]; then\n'
-        f'  cat "{tmp_path}/compare.json"\n'
+        f'  jq -r "$q" "{tmp_path}/compare.json"\n'
         # The review-thread read: one GraphQL page, put through the caller's own
         # `--jq` by the real jq, as `gh --jq` does per page.
+        # The REST read of the PR itself, for its author's association and labels.
+        'elif [[ "$1" == "api" && "$2" =~ /pulls/[0-9]+$ ]]; then\n'
+        f'  jq -r "$q" "{tmp_path}/pr-rest.json"\n'
         'elif [[ "$2" == "graphql" ]]; then\n'
         '  while [[ $# -gt 0 && "$1" != "--jq" ]]; do shift; done\n'
         f'  jq -c "$2" "{tmp_path}/threads.json"\n'
@@ -277,10 +283,10 @@ def _fake_bins(
         # Two different `pr view` reads, told apart by the fields they ask for:
         # the metadata the sanitizer renders, and the live head the staleness
         # check compares against the head this run was dispatched for.
-        '  if [[ "$*" == *headRefOid* ]]; then\n'
-        f'    printf \'{{"headRefOid":"{live_head}","baseRefOid":"{BASE_SHA}","baseRefName":"{base_ref}"}}\'\n'
+        '  if [[ "$*" == *RefOid* ]]; then\n'
+        f'    printf \'{{"headRefOid":"{live_head}","baseRefOid":"{BASE_SHA}","baseRefName":"{base_ref}"}}\' | jq -r "$q"\n'
         "  else\n"
-        f"    cat {tmp_path}/pr-view.json\n"
+        f'    jq -r "$q" {tmp_path}/pr-view.json\n'
         "  fi\n"
         "fi\n",
         encoding="utf-8",
@@ -293,6 +299,15 @@ def _fake_bins(
         encoding="utf-8",
     )
     (tmp_path / "threads.json").write_text(json.dumps(THREADS_PAGE), encoding="utf-8")
+    (tmp_path / "pr-rest.json").write_text(
+        json.dumps(
+            {
+                "author_association": association,
+                "labels": [{"name": name} for name in labels],
+            }
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "compare.json").write_text(
         json.dumps(compare or {"status": "identical", "files": []}), encoding="utf-8"
     )
@@ -328,6 +343,9 @@ def _run(
     added_line: str = "",
     pr_body: str = "b",
     node_script: str = 'tee -a "$SANITIZE_INPUT"',
+    association: str = "OWNER",
+    labels: tuple[str, ...] = (),
+    max_untrusted_read_legs: int = 4,
     cwd: Path = REPO_ROOT,
 ) -> tuple[subprocess.CompletedProcess, dict[str, str], Path]:
     """Run the script with fakes on PATH; return (proc, GITHUB_OUTPUT map, input dir).
@@ -351,6 +369,8 @@ def _run(
         added_line=added_line,
         pr_body=pr_body,
         node_script=node_script,
+        association=association,
+        labels=labels,
     )
     extra_env = {}
     if flaky_budget:
@@ -401,6 +421,7 @@ def _run(
             # the commit it covered must not post one.
             "HEAD_SHA": HEAD_SHA,
             "PR_INPUT_DIR": str(input_dir),
+            "MAX_UNTRUSTED_READ_LEGS": str(max_untrusted_read_legs),
             **{k: str(v) for k, v in bounds.items() if v is not None},
             **extra_env,
             **(env or {}),
@@ -417,11 +438,9 @@ def _run(
 def test_normal_diff_is_sanitized_and_read(tmp_path: Path) -> None:
     proc, outputs, input_dir = _run(tmp_path, files=2, max_diff_lines=100)
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
     assert outputs["diff_lines"] == str(2 * LINES_PER_FILE)
     assert (input_dir / "diff.txt").is_file(), "the sanitized diff must be written"
     assert (input_dir / "meta.txt").is_file()
-    assert not (input_dir / "oversized-notice.txt").exists()
     assert (tmp_path / "sanitizer_input").exists(), "the sanitizer must run"
 
 
@@ -432,10 +451,9 @@ def test_a_diff_with_a_raw_escape_byte_still_reaches_the_sanitizer(
     unless --allow-escape-sequences is passed, so a PR carrying one (observed on
     agent-sanitizer#320) would die before the sanitizer ever ran. Safe to pass
     always: the bytes reach only the sanitizer below, never a real terminal."""
-    proc, outputs, _ = _run(tmp_path, files=2, max_diff_lines=100, escape_byte=True)
+    proc, _, _ = _run(tmp_path, files=2, max_diff_lines=100, escape_byte=True)
     assert proc.returncode == 0, proc.stderr
     assert ESCAPE_SEQUENCE_STDERR not in proc.stderr
-    assert outputs["unreviewable"] == "false"
     sanitizer_saw = (tmp_path / "sanitizer_input").read_text(encoding="utf-8")
     assert "\x1b[31m" in sanitizer_saw, "the raw byte must reach the sanitizer intact"
 
@@ -445,7 +463,7 @@ def test_a_broken_sanitizer_reds_the_job_with_its_reason(tmp_path: Path) -> None
     job goes red, and the log carries the reason rather than a report file nobody
     prints."""
     reason = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'agent-sanitizer'"
-    proc, outputs, _ = _run(
+    proc, _, _ = _run(
         tmp_path,
         files=2,
         max_diff_lines=100,
@@ -454,7 +472,6 @@ def test_a_broken_sanitizer_reds_the_job_with_its_reason(tmp_path: Path) -> None
     assert proc.returncode == 1
     assert "::error::the sanitizer crashed on the diff" in proc.stderr
     assert reason in _commands_off_block(proc.stderr)
-    assert "unreviewable" not in outputs
 
 
 UNSANITIZED = (
@@ -501,7 +518,7 @@ def test_a_sanitizer_that_throws_on_the_pr_still_reviews_it(
     crashing input, first in its fixtures and then in its description. The report
     tells the model what was skipped without quoting the input, and the stack goes
     to the job log with workflow commands off."""
-    proc, outputs, input_dir = _run(
+    proc, _, input_dir = _run(
         tmp_path,
         files=2,
         max_diff_lines=100,
@@ -509,7 +526,6 @@ def test_a_sanitizer_that_throws_on_the_pr_still_reviews_it(
         **where,
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
     tag = where.get("added_line", TEMPLATE_TAG)
     assert tag in (input_dir / f"{out}.txt").read_text(encoding="utf-8")
     assert (input_dir / f"{out}.report.txt").read_text(encoding="utf-8") == report
@@ -605,7 +621,6 @@ def test_oversized_diff_is_sharded_rather_than_skipped(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert outputs["sharded"] == "true"
-    assert outputs["unreviewable"] == "false"
     assert (input_dir / "diff.txt").is_file()
     assert (tmp_path / "sanitizer_input").exists(), "the sanitizer must still run"
 
@@ -616,79 +631,200 @@ def test_oversized_diff_is_sharded_rather_than_skipped(tmp_path: Path) -> None:
         (input_dir / "shards" / name).read_text(encoding="utf-8") for name in shards
     )
     assert body == (input_dir / "diff.txt").read_text(encoding="utf-8")
-    assert not (input_dir / "oversized-notice.txt").exists()
 
 
-def test_a_diff_needing_too_many_shards_asks_for_a_human(tmp_path: Path) -> None:
-    """The size path's one no-read ending, reached only by the sharder's own
-    budget refusal."""
+# ── The read-leg cap for an author outside the repository ─────────────────────
+#
+# Six files at ten lines a shard are three legs, over a cap of two. A fork's
+# pull request runs under pull_request_target on the caller's credentials, so
+# the cap is what bounds the spend one stranger's pull request can start.
+
+
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"]
+)
+def test_an_untrusted_author_over_the_leg_cap_is_withheld(
+    tmp_path: Path, association: str
+) -> None:
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=6,
+        max_diff_lines=10,
+        shard_max_lines=10,
+        association=association,
+        max_untrusted_read_legs=2,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "true"
+    reason = (input_dir / "withheld.txt").read_text(encoding="utf-8")
+    assert (
+        f"needs 3 read legs, and an author whose association is {association}" in reason
+    )
+    assert "may start at most 2" in reason
+    assert "`needs-auto-review` label" in reason
+
+
+@pytest.mark.parametrize(
+    ("association", "labels", "legs_cap"),
+    [
+        # A trusted author keeps the full fan-out.
+        ("OWNER", (), 2),
+        ("MEMBER", (), 2),
+        ("COLLABORATOR", (), 2),
+        # A person with triage access opted the pull request in.
+        ("CONTRIBUTOR", ("needs-auto-review",), 2),
+        # The diff fits the cap.
+        ("CONTRIBUTOR", (), 3),
+    ],
+)
+def test_the_leg_cap_withholds_nothing_else(
+    tmp_path: Path, association: str, labels: tuple[str, ...], legs_cap: int
+) -> None:
+    proc, outputs, input_dir = _run(
+        tmp_path,
+        files=6,
+        max_diff_lines=10,
+        shard_max_lines=10,
+        association=association,
+        labels=labels,
+        max_untrusted_read_legs=legs_cap,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "false"
+    assert int(outputs["shard_count"]) == 3
+    assert not (input_dir / "withheld.txt").exists()
+
+
+def test_a_whole_read_is_one_leg_against_the_cap(tmp_path: Path) -> None:
+    """An unsharded diff is one leg, so only a cap of 0 withholds it."""
+    (tmp_path / "one").mkdir()
+    (tmp_path / "zero").mkdir()
+    proc, outputs, _ = _run(
+        tmp_path / "one",
+        files=2,
+        max_diff_lines=100,
+        association="NONE",
+        max_untrusted_read_legs=1,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "false"
+    proc, outputs, _ = _run(
+        tmp_path / "zero",
+        files=2,
+        max_diff_lines=100,
+        association="NONE",
+        max_untrusted_read_legs=0,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert outputs["withheld"] == "true"
+
+
+@pytest.mark.parametrize("cap", ["08", "-1", "1000", ""])
+def test_a_malformed_leg_cap_fails_loud(tmp_path: Path, cap: str) -> None:
+    proc, _, _ = _run(
+        tmp_path, files=2, max_diff_lines=100, env={"MAX_UNTRUSTED_READ_LEGS": cap}
+    )
+    assert proc.returncode != 0
+    assert (
+        "MAX_UNTRUSTED_READ_LEGS" in proc.stderr
+        or "max-untrusted-read-legs" in proc.stderr
+    )
+
+
+def test_a_diff_needing_more_than_max_shards_is_still_read_whole(
+    tmp_path: Path,
+) -> None:
+    """GitHub runs at most MAX_SHARDS legs, so the shards grow instead of the
+    read stopping: every line of the diff still reaches a leg."""
     proc, outputs, input_dir = _run(
         tmp_path, files=6, max_diff_lines=10, shard_max_lines=10, max_shards=2
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "true"
-    assert outputs["sharded"] == "false"
-    assert "30" in (input_dir / "oversized-notice.txt").read_text(encoding="utf-8")
-    assert not (input_dir / "shards").exists(), (
-        "no partial shard set on the give-up path"
+    assert outputs["sharded"] == "true"
+    shards = json.loads(outputs["shards"])
+    assert len(shards) == 2
+    body = "".join(
+        (input_dir / "shards" / name).read_text(encoding="utf-8") for name in shards
     )
+    assert body == (input_dir / "diff.txt").read_text(encoding="utf-8")
 
 
 def test_a_pr_aimed_at_another_branch_is_read(tmp_path: Path) -> None:
     """A stacked PR's base is a feature branch, and it is read like any other.
     The read job pins the action's config restore to the default branch, so the
     PR's base never supplies the reviewer's instructions."""
-    proc, outputs, input_dir = _run(
+    proc, _, input_dir = _run(
         tmp_path, files=2, max_diff_lines=100, base_ref="claude/stacked-parent"
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
     assert (input_dir / "diff.txt").exists()
-    assert not (input_dir / "oversized-notice.txt").exists()
 
 
-def test_over_300_files_is_rebuilt_from_the_files_api(tmp_path: Path) -> None:
+def _run_wide(tmp_path: Path, server: str = "", **kwargs):
+    """A PR GitHub refuses to diff, served by a local bare repository standing in
+    for GitHub's git endpoint: a base commit, and a head that adds three files.
+    The fake compare names the base as the merge base."""
+    work = tmp_path / "work"
+    init_test_repo(work)
+    base = commit_files(work, {"keep.py": "kept\n"}, "base")
+    head = commit_files(work, {f"w{i}.py": f"wide {i}\n" for i in range(3)}, "head")
+    root = tmp_path / "server"
+    (root / "owner").mkdir(parents=True)
+    git_out(tmp_path, "clone", "-q", "--bare", str(work), str(root / "owner/repo.git"))
+    return _run(
+        tmp_path,
+        files=3,
+        diff_failure="too_large",
+        live_head=head,
+        compare={"merge_base_commit": {"sha": base}},
+        env={"HEAD_SHA": head, "GITHUB_SERVER_URL": server or f"file://{root}"},
+        **kwargs,
+    )
+
+
+def test_a_diff_github_refuses_is_built_with_git(tmp_path: Path) -> None:
     """A PR wide enough for GitHub to refuse the diff media type (HTTP 406 above
-    300 changed files) is still reviewed: the diff is rebuilt from the files API,
-    sanitized, and routed by size like any other. Without this the widest PRs get
-    no automated read at all — the size routing never sees a diff to route."""
-    proc, outputs, input_dir = _run(
-        tmp_path, files=3, max_diff_lines=100, diff_failure="too_large"
-    )
+    300 changed files) is still read: git fetches the merge base and the head as
+    data, and their diff is sanitized and routed like any other."""
+    proc, outputs, input_dir = _run_wide(tmp_path, max_diff_lines=100)
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
-    # Two pages of 3 files each, reassembled into one diff.
-    assert outputs["diff_lines"] == str(6 * LINES_PER_FILE)
     body = (input_dir / "diff.txt").read_text(encoding="utf-8")
-    assert body.count("diff --git ") == 6, body
-    assert "+added line 2" in body
-    assert (tmp_path / "sanitizer_input").exists(), "the rebuilt diff is sanitized too"
-    assert not (input_dir / "oversized-notice.txt").exists()
+    assert body.count("diff --git ") == 3, body
+    assert "+wide 2" in body
+    assert "keep.py" not in body, "the base's own content is not the PR's change"
+    assert outputs["sharded"] == "false"
+    assert (tmp_path / "sanitizer_input").exists(), "the git diff is sanitized too"
 
 
-def test_a_rebuilt_wide_diff_is_still_routed_by_size(tmp_path: Path) -> None:
+def test_a_git_built_diff_is_still_routed_by_size(tmp_path: Path) -> None:
     """The fallback feeds the normal size routing rather than bypassing it."""
-    _, outputs, input_dir = _run(
-        tmp_path, files=3, max_diff_lines=10, diff_failure="too_large"
-    )
+    _, outputs, input_dir = _run_wide(tmp_path, max_diff_lines=10)
     assert outputs["sharded"] == "true"
-    assert outputs["unreviewable"] == "false"
     assert (input_dir / "shards").is_dir()
 
 
+def test_a_git_fetch_that_fails_stays_red(tmp_path: Path) -> None:
+    """No diff is not an empty diff: a fetch that fails reds the job rather than
+    handing the reader nothing and calling it a review."""
+    proc, _, input_dir = _run_wide(
+        tmp_path, server=f"file://{tmp_path}/nowhere", max_diff_lines=100, retry_max=1
+    )
+    assert proc.returncode != 0
+    assert not (input_dir / "diff.txt").exists()
+
+
 def test_an_unrelated_gh_failure_stays_red(tmp_path: Path) -> None:
-    """Only the 300-file refusal routes to the rebuild. Any other `gh pr diff`
+    """Only GitHub's refusal routes to the git fallback. Any other `gh pr diff`
     failure is a broken job, not a quiet degradation to a partial review."""
     # retry_max=1 keeps the run off the backoff: a 404 is not transient, but the
     # retry cannot read that off gh's exit code, so in production it costs the
     # full ladder before the same red. Only the verdict is under test here.
-    proc, outputs, input_dir = _run(
+    proc, _, input_dir = _run(
         tmp_path, files=3, max_diff_lines=100, diff_failure="other", retry_max=1
     )
     assert proc.returncode != 0
     assert "404" in proc.stderr
     assert not (input_dir / "diff.txt").exists()
-    assert "unreviewable" not in outputs
 
 
 def test_a_transient_api_fault_is_retried_rather_than_reddening_the_gate(
@@ -698,11 +834,8 @@ def test_a_transient_api_fault_is_retried_rather_than_reddening_the_gate(
     this script, so the required `Review findings resolved` gate stayed red and
     PR #3941 could not merge until a human re-ran the workflow. Every `gh` read
     here is retried, so the review still gets its input."""
-    proc, outputs, input_dir = _run(
-        tmp_path, files=3, max_diff_lines=100, flaky_budget=2
-    )
+    proc, _, input_dir = _run(tmp_path, files=3, max_diff_lines=100, flaky_budget=2)
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
     assert (input_dir / "diff.txt").read_text(encoding="utf-8").count("diff --git") == 3
     assert json.loads((input_dir / "meta.txt").read_text(encoding="utf-8"))["title"]
     assert "504" in proc.stderr, "the retried fault stays visible in the job log"
@@ -712,34 +845,29 @@ def test_a_persistent_api_fault_still_reds_the_job(tmp_path: Path) -> None:
     """The retry is a blip absorber, never a failure swallower: a fault that
     outlasts the ladder exhausts it and the job goes red, so a real outage is
     never reported as a completed review input."""
-    proc, outputs, input_dir = _run(
+    proc, _, input_dir = _run(
         tmp_path, files=3, max_diff_lines=100, flaky_budget=99, retry_max=2
     )
     assert proc.returncode != 0
     assert "still failing after 2 attempts" in proc.stderr
     assert not (input_dir / "diff.txt").exists()
-    assert "unreviewable" not in outputs
 
 
-def test_the_300_file_refusal_is_not_re_run_before_the_rebuild(
+def test_the_300_file_refusal_is_not_re_run_before_the_git_fallback(
     tmp_path: Path,
 ) -> None:
     """GitHub's 406 is its ANSWER about this PR's width, so the retry must reach
-    the files-API rebuild on the first refusal rather than spending the whole
-    ladder reproducing it."""
-    proc, outputs, _ = _run(
-        tmp_path, files=3, max_diff_lines=100, diff_failure="too_large"
-    )
+    the git fallback on the first refusal rather than spending the whole ladder
+    reproducing it."""
+    proc, _, _ = _run_wide(tmp_path, max_diff_lines=100)
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
     assert "ci-retry" not in proc.stderr
 
 
 def test_diff_exactly_at_limit_is_reviewed_whole(tmp_path: Path) -> None:
-    """The limit is inclusive — a diff AT MAX_DIFF_LINES is read, only a
-    strictly larger one gets the human-review notice."""
-    _, outputs, input_dir = _run(tmp_path, files=2, max_diff_lines=2 * LINES_PER_FILE)
-    assert outputs["unreviewable"] == "false"
+    """The limit is inclusive — a diff AT MAX_DIFF_LINES is read whole, only a
+    strictly larger one is sharded."""
+    _, _, input_dir = _run(tmp_path, files=2, max_diff_lines=2 * LINES_PER_FILE)
     assert (input_dir / "diff.txt").is_file()
 
 
@@ -756,8 +884,7 @@ LARGEST_PR_DIFF_LINES = 81_731
 
 def test_the_shipped_bounds_still_shard_a_very_large_pr(tmp_path: Path) -> None:
     """Drive the real script with NO size bounds in the environment, so its own
-    defaults route the diff: SHARD_MAX_LINES times MAX_SHARDS is the largest diff
-    that gets a read at all."""
+    defaults route the diff."""
     files = -(-LARGEST_PR_DIFF_LINES // LINES_PER_FILE)  # ceil
     _, outputs, input_dir = _run(
         tmp_path,
@@ -767,7 +894,6 @@ def test_the_shipped_bounds_still_shard_a_very_large_pr(tmp_path: Path) -> None:
         max_shards=None,
     )
     assert int(outputs["diff_lines"]) >= LARGEST_PR_DIFF_LINES
-    assert outputs["unreviewable"] == "false"
     assert outputs["sharded"] == "true"
     assert (input_dir / "shards" / "manifest.json").is_file()
 
@@ -790,7 +916,6 @@ def test_a_reproducible_artifact_is_elided_before_the_diff_is_counted(
     assert "lines of generated output elided" in diff
     # Counted AFTER the elision: 2 ordinary files plus the bundle's header + notice.
     assert outputs["diff_lines"] == str(2 * LINES_PER_FILE + 2)
-    assert outputs["unreviewable"] == "false"
 
 
 def test_the_sanitizer_never_reads_an_elided_artifact_body(tmp_path: Path) -> None:
@@ -976,7 +1101,7 @@ def test_root_cause_evidence_is_written_through_the_sanitizer_only_when_asked(
         tmp_path, files=1, max_diff_lines=100, env=env, cwd=_checkout(tmp_path)
     )
     assert proc.returncode == 0, proc.stderr
-    assert outputs["unreviewable"] == "false"
+    assert outputs["sharded"] == "false"
     sanitized = (tmp_path / "sanitizer_input").read_text(encoding="utf-8")
     assert ("# Root-cause evidence for PR #123" in sanitized) is asked
     assert (input_dir / "evidence.md").is_file() is asked

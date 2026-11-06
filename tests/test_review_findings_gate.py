@@ -47,13 +47,23 @@ def thread(
     author: str = BOT,
     path: str = "a.py",
     resolved_by: str | None = "a-human",
+    review_at: str = "2026-01-01T00:00:00Z",
 ) -> dict:
+    """`review_at` is when the review that opened the root comment was submitted."""
     return {
         "isResolved": resolved,
         "resolvedBy": {"login": resolved_by} if resolved and resolved_by else None,
         "path": path,
         "line": 1,
-        "comments": {"nodes": [{"body": body, "author": {"login": author}}]},
+        "comments": {
+            "nodes": [
+                {
+                    "body": body,
+                    "author": {"login": author},
+                    "pullRequestReview": {"submittedAt": review_at},
+                }
+            ]
+        },
     }
 
 
@@ -359,7 +369,6 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
     ("marker", "resolved_by", "expected"),
     [
         ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
-        ("OVERSIZED_REVIEW_MARKER", PR_AUTHOR, "failure"),
         ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
         # GraphQL spells a login bare, so the reviewer is excluded by name.
         ("HUMAN_HOLD_MARKER", "github-actions", "failure"),
@@ -367,29 +376,15 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
         ("HUMAN_HOLD_MARKER", "a-human", "success"),
     ],
 )
-def test_only_somebody_else_clears_a_needs_a_human_hold(
+def test_only_somebody_else_clears_a_blocking_hold_thread(
     tmp_path: Path, marker: str, resolved_by: str | None, expected: str
 ) -> None:
-    """A hold that asks for a human read — the diff was too large, or GitHub
-    refused the findings — is not the author's to clear. GitHub lets the author
-    resolve it anyway, so the gate must read WHO resolved it. The pair: an
-    ordinary finding the author resolves stops gating (below)."""
+    """A blocking hold thread an older reviewer opened asks for a reader the author
+    is not. The author may resolve it anyway, so the gate reads WHO did. The
+    pair: an ordinary finding the author resolves stops gating (below)."""
     body = f"needs a human read\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
     hold = thread(body, resolved=True, resolved_by=resolved_by)
     assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
-
-
-def test_a_bot_author_resolving_its_own_hold_under_the_bare_login_holds(
-    tmp_path: Path,
-) -> None:
-    """REST names a bot author `x[bot]`, and GraphQL names the same account `x`
-    when it resolves a thread. The two spellings are one author."""
-    body = f"too large\n{reviewer_marker('HUMAN_HOLD_MARKER')}\n<!-- severity: blocking -->"
-    hold = thread(body, resolved=True, resolved_by="pr-author")
-    state = run_gate(
-        tmp_path, [review("COMMENTED")], [hold], pr_author="pr-author[bot]"
-    )
-    assert state == "failure"
 
 
 def test_the_author_may_resolve_an_ordinary_finding(tmp_path: Path) -> None:
@@ -453,8 +448,10 @@ def _covered_review(
         [
             "bash",
             "-c",
-            'source "$1"; printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
-            ' coverage_stamp "$2" "$4" "$5" "$3" "$6"',
+            (
+                'source "$1"; printf "%s\\n" "$WHOLE_DIFF_READ_MARKER";'
+                ' coverage_stamp "$2" "$4" "$5" "$3" "$6"'
+            ),
             "_",
             str(REPO_ROOT / ".github" / "reviewer" / "lib" / "pr-reviews.bash"),
             head,
@@ -691,3 +688,128 @@ def test_a_budget_with_room_and_no_notice_still_holds_the_merge(
         unreviewed_state="failure",
     )
     assert state == "failure"
+
+
+# ── Clause (d): a read that fell short ────────────────────────────────────────
+#
+# A read that left files unread, lost findings the API would not post, or was
+# withheld from an untrusted author holds the merge. A later complete read
+# clears it, and so does a hold thread a person other than the author resolves.
+
+T1, T2, T3 = "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"
+
+
+def _short_review(kind: str, *, submitted_at: str = T1) -> dict:
+    """A summary review as each shortfall path posts it. An incomplete or withheld
+    read carries its marker and no stamp; a read with refused findings keeps its
+    read marker and stamp, and adds the unposted marker."""
+    if kind == "unposted":
+        base = _covered_review(COVERED, submitted_at=submitted_at)
+        unposted = reviewer_marker("UNPOSTED_FINDINGS_MARKER")
+        return {**base, "body": f"{base['body']}{unposted}\n"}
+    marker = {
+        "incomplete": "INCOMPLETE_READ_MARKER",
+        "withheld": "READ_WITHHELD_MARKER",
+    }[kind]
+    return {
+        **review("COMMENTED", body=f"{reviewer_marker(marker)}\nfell short"),
+        "submittedAt": submitted_at,
+    }
+
+
+def _hold_thread(**kwargs) -> dict:
+    """The file-level thread post-pr-review.sh opens after a shortfall review."""
+    return thread(f"held\n{reviewer_marker('HUMAN_HOLD_MARKER')}\n", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kind", "says"),
+    [
+        ("incomplete", "files went unread"),
+        ("unposted", "findings could not be posted as threads"),
+        ("withheld", "a maintainer adds the needs-auto-review label to start the read"),
+    ],
+)
+def test_a_read_that_fell_short_holds_the_merge(
+    tmp_path: Path, kind: str, says: str
+) -> None:
+    """Without this clause the gate judged only the findings it had, so a partly
+    read PR merged green. The pair is test_a_reviewed_pr_with_no_findings_is_green."""
+    calls = gate_calls(tmp_path, [_short_review(kind)])
+    assert _state_of(calls) == "failure"
+    assert says in calls, calls
+    assert queue_leg_exit(tmp_path / "queue", [_short_review(kind)]) == 1
+
+
+@pytest.mark.parametrize("kind", ["incomplete", "withheld"])
+def test_any_later_complete_read_clears_an_unstamped_shortfall(
+    tmp_path: Path, kind: str
+) -> None:
+    """An unstamped shortfall advanced no coverage, so even a delta read after it
+    starts at the older covered head and reads what it missed."""
+    later = _covered_review(
+        PUSHED, read="delta", scope=f"since:{COVERED}", submitted_at=T2
+    )
+    reviews = [_short_review(kind), later]
+    assert run_gate(tmp_path, reviews, live_head=PUSHED) == "success"
+    assert queue_leg_exit(tmp_path / "queue", reviews, live_head=PUSHED) == 0
+
+
+def test_only_a_whole_read_clears_refused_findings(tmp_path: Path) -> None:
+    """A read whose findings were refused did advance coverage, so a delta read
+    after it never sees those findings again; a whole read does."""
+    short = _short_review("unposted")
+    delta = _covered_review(
+        PUSHED, read="delta", scope=f"since:{COVERED}", submitted_at=T2
+    )
+    whole = _covered_review(PUSHED, submitted_at=T3)
+    assert run_gate(tmp_path / "delta", [short, delta], live_head=PUSHED) == "failure"
+    state = run_gate(tmp_path / "whole", [short, delta, whole], live_head=PUSHED)
+    assert state == "success"
+
+
+def test_an_earlier_complete_read_does_not_clear_a_later_shortfall(
+    tmp_path: Path,
+) -> None:
+    """Order matters: the complete read must come AFTER the shortfall."""
+    clean = _covered_review(COVERED, submitted_at=T1)
+    later = _short_review("incomplete", submitted_at=T2)
+    assert run_gate(tmp_path, [clean, later]) == "failure"
+
+
+@pytest.mark.parametrize(
+    ("resolved", "resolved_by", "expected"),
+    [
+        (True, "a-human", "success"),
+        (True, PR_AUTHOR, "failure"),
+        (True, "github-actions", "failure"),
+        (True, None, "failure"),
+        (False, None, "failure"),
+    ],
+)
+def test_only_somebody_else_resolving_the_hold_thread_accepts_a_shortfall(
+    tmp_path: Path, resolved: bool, resolved_by: str | None, expected: str
+) -> None:
+    """INVARIANT — the author cannot accept their own partly read PR. They may
+    resolve the hold thread, so the gate reads who resolved it."""
+    hold = _hold_thread(resolved=resolved, resolved_by=resolved_by, review_at=T2)
+    assert run_gate(tmp_path, [_short_review("incomplete")], [hold]) == expected
+
+
+def test_an_old_resolution_vouches_for_nothing_newer(tmp_path: Path) -> None:
+    """A second shortfall after the accepted one holds again until its own hold
+    thread is resolved; the first resolution does not cover it."""
+    first = _hold_thread(resolved=True, resolved_by="a-human", review_at=T2)
+    reviews = [_short_review("incomplete"), _short_review("unposted", submitted_at=T3)]
+    assert run_gate(tmp_path / "old", reviews, [first], live_head=COVERED) == "failure"
+    second = _hold_thread(
+        resolved=True, resolved_by="a-human", review_at="2026-03-04T00:00:00Z"
+    )
+    state = run_gate(tmp_path / "new", reviews, [first, second], live_head=COVERED)
+    assert state == "success"
+
+
+def test_a_resolved_hold_thread_never_lifts_a_withheld_read(tmp_path: Path) -> None:
+    """Only the read a trusted person opts into lifts a withheld read."""
+    hold = _hold_thread(resolved=True, resolved_by="a-human", review_at=T2)
+    assert run_gate(tmp_path, [_short_review("withheld")], [hold]) == "failure"

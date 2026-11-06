@@ -6,8 +6,9 @@ read that cost tens of dollars and half an hour of fan-out. The degraded path
 must (1) post each finding as its own review comment, so one bad anchor costs
 one finding, (2) record the read as a real COMMENT review, which is what stops
 decide-pr-review-trigger.sh buying the whole read again on the next push, and
-(3) raise a human-review hold when a finding was still lost, so
-review-findings-gate.sh cannot green on findings nobody can resolve.
+(3) report a finding that was still lost as a reviewer shortfall, with
+a link to its salvaged text, and (4) mark the summary so the merge gate holds,
+then open the hold thread a person other than the author may resolve.
 
 Nothing here is stubbed: the real `post-pr-review.sh` runs the real
 `post-pr-review.mjs` over a real review.json and diff, and the real `gh` posts
@@ -104,6 +105,7 @@ def _run(
         "PR": str(github.pr),
         "PR_INPUT_DIR": str(pr_dir),
         "RETRY_BASE_DELAY": "0",  # a refused POST must not sleep out the backoff
+        "REVIEWER_SHORTFALL_FILE": str(pr_dir / "shortfalls.txt"),
     }
     if salvage_body_limit is not None:
         env["SALVAGE_BODY_LIMIT"] = str(salvage_body_limit)
@@ -123,9 +125,33 @@ def _run(
 READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
 
 
+#: What review-findings-gate.sh reads as a read whose findings went unposted.
+UNPOSTED_MARKER = reviewer_marker("UNPOSTED_FINDINGS_MARKER")
+#: What marks the thread a person resolves to accept a read that fell short.
+HOLD_MARKER = reviewer_marker("HUMAN_HOLD_MARKER")
+
+
 def _holds(github: FakeReviewPoster) -> list[dict]:
-    """The needs-a-human finding threads — file-level, so no line can refuse them."""
+    """File-level threads: the hold a read that fell short opens."""
     return [c for c in github.of_kind("comment") if c.get("subject_type") == "file"]
+
+
+def _assert_one_hold(github: FakeReviewPoster) -> dict:
+    """Exactly one hold thread, posted AFTER the review that carries the shortfall
+    marker, and carrying no severity, so the gate holds on the marker alone."""
+    [hold] = _holds(github)
+    assert HOLD_MARKER in hold["body"]
+    assert "<!-- severity:" not in hold["body"]
+    assert hold["commit_id"] == HEAD_SHA
+    kinds = [k for k, body in github.posted if body is hold or k == "review"]
+    assert kinds[-2:] == ["review", "comment"], kinds
+    return hold
+
+
+def _shortfall(pr_dir: Path) -> str:
+    """What post-pr-review.sh handed report-reviewer-shortfall.sh."""
+    path = pr_dir / "shortfalls.txt"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 def test_an_accepted_review_posts_once_and_degrades_to_nothing(tmp_path):
@@ -188,38 +214,50 @@ def test_a_refused_review_still_records_the_read_as_a_review(tmp_path):
         assert DEGRADED_MARKER in reviews[0]["body"]
 
 
-def test_no_finding_lost_means_no_human_hold(tmp_path):
+def test_no_finding_lost_means_no_shortfall(tmp_path):
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
-        _run(github, _pr_input(tmp_path))
+        pr_dir = _pr_input(tmp_path)
+        _run(github, pr_dir)
+        assert _shortfall(pr_dir) == ""
+
+
+def test_a_lost_finding_holds_the_merge_and_opens_a_hold(tmp_path):
+    """A refused finding has no thread to hold the merge, so the summary carries
+    the marker the gate holds on, and a hold thread follows it."""
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        github.refuse_comment_paths = ("src/b.py",)
+        pr_dir = _pr_input(tmp_path)
+        proc = _run(github, pr_dir)
+        assert proc.returncode == 0, proc.stderr
+        [review] = github.of_kind("review")
+        assert UNPOSTED_MARKER in review["body"]
+        assert "1 finding(s) could not be posted" in _assert_one_hold(github)["body"]
+        assert "1 of 2 findings could not be posted" in _shortfall(pr_dir)
+
+
+def test_a_degraded_review_that_lost_nothing_holds_nothing(tmp_path):
+    """The pair: every finding posted as its own thread, so no marker and no hold."""
+    with FakeReviewPoster(tmp_path) as github:
+        github.refuse_structured = True
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        [review] = github.of_kind("review")
+        assert UNPOSTED_MARKER not in review["body"]
         assert _holds(github) == []
 
 
-def test_a_lost_finding_raises_a_human_review_hold(tmp_path):
-    with FakeReviewPoster(tmp_path) as github:
-        github.refuse_structured = True
-        github.refuse_comment_paths = ("src/b.py",)
-        proc = _run(github, _pr_input(tmp_path))
-        assert proc.returncode == 0, proc.stderr
-        holds = _holds(github)
-        assert len(holds) == 1
-        assert holds[0]["commit_id"] == HEAD_SHA
-        assert holds[0]["path"] == "src/first.py"
-        body = holds[0]["body"]
-        assert "1 of this review's 2 findings could not be posted" in body
-        assert "🔴" in body  # the gate's pre-marker icon fallback
-        assert "<!-- severity: blocking -->" in body  # what reds the gate on it
-
-
-def test_the_hold_lands_before_the_review_that_greens_the_gate(tmp_path):
+def test_the_findings_land_before_the_review_that_greens_the_gate(tmp_path):
     # The summary review satisfies the gate's reviewed-at-all leg, so a crash
     # between the two must leave the PR unreviewed (red, another read) rather
-    # than reviewed with a lost finding holding nothing.
+    # than reviewed with its findings missing.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
         _run(github, _pr_input(tmp_path))
-        kinds = [k for k, _ in github.posted]
+        hold = _assert_one_hold(github)
+        kinds = [k for k, body in github.posted if body is not hold]
         assert kinds[-1] == "review", kinds
         assert "comment" in kinds[:-1]
 
@@ -244,8 +282,8 @@ def test_the_rejection_reason_reaches_the_log(tmp_path):
 
 
 def test_a_refused_findings_own_text_reaches_the_log(tmp_path):
-    # A refused finding has no thread and no artifact, and the hold sends a human
-    # to the run log for it. gh spells the refusal as a bare "HTTP 422", which
+    # A refused finding has no thread and no artifact, and the shortfall report
+    # names the run log for it. gh spells the refusal as a bare "HTTP 422", which
     # names neither the finding nor its body, so the script must echo the payload.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
@@ -258,8 +296,8 @@ def test_a_refused_findings_own_text_reaches_the_log(tmp_path):
 
 def test_the_summary_review_reports_the_posted_count_not_the_attempted_one(tmp_path):
     # On the exact run this line exists for — a refusal that lost findings — a
-    # count of what was attempted tells the reader all N landed while the hold
-    # says N-k did.
+    # count of what was attempted tells the reader all N landed while the
+    # shortfall report says N-k did.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
@@ -288,7 +326,7 @@ def _salvaged(github: FakeReviewPoster) -> list[dict]:
 
 
 def test_a_refused_findings_text_reaches_the_pr_not_only_the_log(tmp_path):
-    # The run log ages out and needs an Actions reader, so a hold that points
+    # The run log ages out and needs an Actions reader, so a report that points
     # only there loses the finding on the day someone comes to read it.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
@@ -303,12 +341,13 @@ def test_a_refused_findings_text_reaches_the_pr_not_only_the_log(tmp_path):
         assert "src/a.py" not in body  # the finding that DID get a thread
 
 
-def test_the_hold_links_the_salvaged_text(tmp_path):
+def test_the_shortfall_links_the_salvaged_text(tmp_path):
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
-        _run(github, _pr_input(tmp_path))
-        assert "#issuecomment-" in _holds(github)[0]["body"]
+        pr_dir = _pr_input(tmp_path)
+        _run(github, pr_dir)
+        assert "#issuecomment-" in _shortfall(pr_dir)
 
 
 def test_no_lost_finding_salvages_nothing(tmp_path):
@@ -325,11 +364,11 @@ def test_a_refused_salvage_still_records_the_read(tmp_path):
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/b.py",)
         github.refuse_salvage = True
-        proc = _run(github, _pr_input(tmp_path))
+        pr_dir = _pr_input(tmp_path)
+        proc = _run(github, pr_dir)
         assert proc.returncode == 0, proc.stderr
         assert len(github.of_kind("review")) == 1
-        hold = _holds(github)[0]["body"]
-        assert "run log" in hold  # no link to offer, so say where to look
+        assert "run log" in _shortfall(pr_dir)  # no link to offer, so say where to look
 
 
 def test_the_salvage_packs_into_parts_when_one_comment_would_overflow(tmp_path):
@@ -339,7 +378,8 @@ def test_the_salvage_packs_into_parts_when_one_comment_would_overflow(tmp_path):
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/a.py", "src/b.py")
-        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        pr_dir = _pr_input(tmp_path)
+        proc = _run(github, pr_dir, salvage_body_limit=120)
         assert proc.returncode == 0, proc.stderr
         bodies = [c["body"] for c in _salvaged(github)]
         assert len(bodies) == 2, bodies
@@ -347,13 +387,13 @@ def test_the_salvage_packs_into_parts_when_one_comment_would_overflow(tmp_path):
         assert [i for i, b in enumerate(bodies) if "close it" in b] == [0]
         assert [i for i, b in enumerate(bodies) if "lock it" in b] == [1]
         assert "[truncated" not in "".join(bodies)  # neither finding is over the limit
-        hold = _holds(github)[0]["body"]
+        shortfall = _shortfall(pr_dir)
         for part in range(1, len(bodies) + 1):
-            assert f"#issuecomment-{part}" in hold
+            assert f"#issuecomment-{part}" in shortfall
 
 
 def test_a_refused_part_says_so_rather_than_passing_for_posted(tmp_path):
-    # The hold links what landed. A part GitHub refuses must be loud where it
+    # The shortfall links what landed. A part GitHub refuses must be loud where it
     # happens, or the reader gets a list that looks complete and is not.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
@@ -398,19 +438,22 @@ def test_a_finding_over_the_limit_is_marked_where_it_was_cut(tmp_path):
 
 
 def test_a_partly_refused_salvage_keeps_the_run_log_fallback(tmp_path):
-    # The links read as the complete set. When one part was refused, the hold has
-    # to say so, or the human it stops reads a list that looks whole and is not.
+    # The links read as the complete set. When one part was refused, the report
+    # has to say so, or its reader gets a list that looks whole and is not.
     with FakeReviewPoster(tmp_path) as github:
         github.refuse_structured = True
         github.refuse_comment_paths = ("src/a.py", "src/b.py")
         github.refuse_salvage_parts = (1,)
-        proc = _run(github, _pr_input(tmp_path), salvage_body_limit=120)
+        pr_dir = _pr_input(tmp_path)
+        proc = _run(github, pr_dir, salvage_body_limit=120)
         assert proc.returncode == 0, proc.stderr
         salvaged = _salvaged(github)
         assert len(salvaged) == 1  # part 2; part 1 was refused
-        hold = _holds(github)[0]["body"]
-        assert "#issuecomment-" in hold  # the part that landed is still linked
-        assert "run log only" in hold  # and the refused one is not passed off as posted
+        shortfall = _shortfall(pr_dir)
+        assert "#issuecomment-" in shortfall  # the part that landed is still linked
+        assert (
+            "and the run log" in shortfall
+        )  # the refused one is not passed off as posted
 
 
 # ── The coverage stamp on the posted review ──────────────────────────────────
@@ -470,9 +513,10 @@ def test_a_read_that_cannot_say_what_it_covered_posts_nothing(tmp_path):
 INCOMPLETE_MARKER = reviewer_marker("INCOMPLETE_READ_MARKER")
 
 
-def test_an_incomplete_read_claims_no_read_and_holds_first(tmp_path):
+def test_an_incomplete_read_claims_no_read_and_opens_a_hold(tmp_path):
     """A sharded read that lost a leg must not spend the budget or claim the head,
-    on either posting path, and its hold lands before the review greens the gate."""
+    on either posting path. Its marker holds the merge, and the hold thread after
+    it is what a person other than the author may resolve to accept it."""
     for refuse in (False, True):
         server_dir = tmp_path / f"refuse-{refuse}"
         input_dir = tmp_path / f"in-{refuse}"
@@ -488,8 +532,13 @@ def test_an_incomplete_read_claims_no_read_and_holds_first(tmp_path):
             assert INCOMPLETE_MARKER in review["body"]
             assert READ_MARKER not in review["body"]
             assert "<!-- review-coverage " not in review["body"]
-            holds = [h for h in _holds(github) if "src/c.py" in h["body"]]
-            assert len(holds) == 1, _holds(github)
-            assert "INCOMPLETE" in holds[0]["body"]
-            kinds = [k for k, _ in github.posted]
-            assert kinds[-1] == "review", kinds
+            assert "Some files went unread." in _assert_one_hold(github)["body"]
+
+
+def test_a_complete_read_opens_no_hold(tmp_path):
+    """The pair: a whole read on the structured path posts its review alone."""
+    with FakeReviewPoster(tmp_path) as github:
+        proc = _run(github, _pr_input(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        assert len(github.of_kind("review")) == 1
+        assert _holds(github) == []

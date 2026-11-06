@@ -6,7 +6,10 @@
 #       all, AND
 #   (b) no reviewer-rooted review thread that still holds (REVIEW_THREAD_CLEARED
 #       in lib/review-threads.bash) carries a merge-gating finding, AND
-#   (c) no push after the covered head is still owed an accumulated read.
+#   (c) no push after the covered head is still owed an accumulated read, AND
+#   (d) no read fell short — files went unread, findings could not be posted as
+#       threads, or the read was withheld — unless a later complete read made up
+#       for it, or a person other than the PR's author resolved the hold thread.
 # Resolving the last gating thread is what flips the gate — there is no approval
 # to mint, no sticky verdict to supersede, and no state beyond what the pull
 # request itself shows.
@@ -47,6 +50,13 @@
 # one definition of that set. Clause (b) still runs: the review label takes a
 # pull request back out of the set, and any finding it then collects gates as
 # usual.
+#
+# Clause (d) is what keeps a partly read pull request from merging. A shortfall
+# is a reviewer defect, so the post job also reports it on reviewer-defect-issue,
+# but the merge waits either way: a gate that judged only the findings it has
+# would green code nobody read. review_shortfalls (lib/pr-reviews.bash) derives
+# it from the summary review's markers, never from the hold thread, so a hold
+# thread that failed to post leaves the merge held rather than clear.
 #
 # WHICH THREADS GATE comes from the SEVERITY_CONFIG the CONSUMER passes — the
 # same file its reviewer stamps each finding from. A thread holds the merge when
@@ -200,12 +210,37 @@ uncovered_verdict() {
   fi
 }
 
+# Clause (d): prints why a read that fell short still holds the merge, or nothing.
+# INVARIANT — this is the refusal that keeps unread code from merging. Only a
+# later complete read or shortfall_hold_overridden lifts it. A withheld read has
+# no hold thread, so only the read a trusted person opts it into lifts that one.
+shortfall_hold_reason() {
+  local shortfall kinds since latest overridden what=""
+  # Each read states its own status: a command substitution clears `set -e`, and a
+  # failure read as "no shortfall" would green the gate over unread code.
+  shortfall="$(review_shortfalls <<<"$reviews")" || return 1
+  [[ -n "$shortfall" ]] || return 0
+  kinds="$(jq -r '.kinds | join(" ")' <<<"$shortfall")" || return 1
+  if [[ "$kinds" == "withheld" ]]; then
+    echo "read withheld: too many read legs for an author outside the repo; a maintainer adds the ${REVIEW_LABEL} label to start the read"
+    return 0
+  fi
+  since="$(jq -r .since <<<"$shortfall")" || return 1
+  latest="$(jq -r .latest <<<"$shortfall")" || return 1
+  overridden="$(shortfall_hold_overridden "$owner" "$name" "$PR" "$since" "$latest")" || return 1
+  [[ "$overridden" != true ]] || return 0
+  [[ " $kinds " != *" incomplete "* ]] || what+="files went unread; "
+  [[ " $kinds " != *" unposted "* ]] || what+="findings could not be posted as threads; "
+  [[ " $kinds " != *" withheld "* ]] || what+="a read was withheld; "
+  echo "reviewer fell short (${what%; }): a complete read, or a non-author resolving the hold thread, clears it"
+}
+
 reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
 # Clause (a): has the reviewer read this, or does it owe no read? `read_owed`
 # false means clause (b) still decides — a pull request in the skip set can
-# carry a finding thread anyway, because the oversized and degraded review paths
-# open one without posting a review, so greening on the waiver alone would
-# publish success over an open hold.
+# carry a finding thread anyway, because the degraded review path posts its
+# finding comments before its review, so greening on the waiver alone could
+# publish success over an open finding.
 read_owed=false
 if [[ -z "$reviews" ]] && ! pr_review_is_skipped "$owner" "$name" "$PR"; then
   read_owed=true
@@ -219,7 +254,12 @@ else
   # question through the same code rather than a second copy of the predicate.
   gating="$(unresolved_gating_findings "$owner" "$name" "$PR" "$SEVERITY_CONFIG")"
   count="$(jq 'length' <<<"$gating")"
-  if [[ "$count" -eq 0 ]]; then
+  shortfall="$(shortfall_hold_reason)"
+  if [[ -n "$shortfall" ]]; then
+    verdict=red
+    reason="$shortfall"
+    [[ "$count" -eq 0 ]] || reason+="; ${count} unresolved reviewer finding(s) also gate the merge"
+  elif [[ "$count" -eq 0 ]]; then
     verdict=green
     if [[ -z "$reviews" ]]; then
       reason="the reviewer owes this pull request no review, and no unresolved thread carries a gating finding"
