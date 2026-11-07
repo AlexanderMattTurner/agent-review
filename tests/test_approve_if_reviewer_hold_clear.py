@@ -50,7 +50,8 @@ def thread(
     token cannot see. `opened_by_review_at` is the `submittedAt` of the review
     that opened the thread, which is what ties the thread to one hold cycle.
     `replies` counts the comments after the root, which GitHub reports in
-    `comments.totalCount` whatever page size the query asked for."""
+    `comments.totalCount` whatever page size the query asked for. It defaults
+    to one, so a resolved thread is settled unless a test says otherwise."""
     by = {"login": resolved_by} if resolved and resolved_by else None
     return {
         "isResolved": resolved,
@@ -380,7 +381,7 @@ def test_a_reviewer_not_holding_dismisses_nothing(tmp_path: Path, state: str):
     assert "no live hold to clear" in res.stderr
 
 
-NOT_SETTLED = "was resolved after a reply"
+NOT_SETTLED = "was both resolved and replied to"
 
 
 @pytest.mark.parametrize("resolver", [AUTHOR, OTHER, None])
@@ -416,11 +417,13 @@ def test_a_resolve_after_a_reply_clears_whoever_resolved(
     assert dismissed(calls)
 
 
-@pytest.mark.parametrize("resolver", [BOT, "GitHub-Actions", "github-actions[bot]"])
+@pytest.mark.parametrize("resolver", [BOT, "GitHub-Actions"])
 def test_the_reviewer_resolving_its_own_thread_clears_nothing(
     tmp_path: Path, resolver: str
 ):
-    # The reviewer may not settle its own hold, in any spelling of its login.
+    # The reviewer may not settle its own hold, whatever case GitHub spells its
+    # login in. This binds only a reviewer that is a user account: GraphQL types
+    # `resolvedBy` as a User, so a bot's resolution comes back null.
     res, calls = run(
         tmp_path,
         threads=[thread(resolved_by=resolver, replies=1)],
@@ -503,7 +506,7 @@ def test_an_earlier_cycles_settled_thread_cannot_clear_a_later_hold(
 
 def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Path):
     # The reviewer held again in a review body alone. Cycle 1's threads are all
-    # resolved after a reply, but none of them answers the new finding.
+    # resolved and replied to, but none of them answers the new finding.
     res, calls = run(
         tmp_path,
         threads=[thread(resolved_by=OTHER, opened_by_review_at=CYCLE_1)],

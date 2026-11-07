@@ -74,7 +74,14 @@ raise_hold_if_short() {
     if ((refused > 0)); then
       printf -- '- %d finding(s) could not be posted as review threads; their text is in a comment on this pull request or the run log.\n' "$refused"
     fi
-    printf "\nA complete read clears this hold. A maintainer asks for one with the review label, or a commit titled \`[opus-review]\` from a trusted author.\n\nTo merge without it, the agent or person driving this pull request may settle this thread:\n\n1. Read the parts of the diff the reviewer did not read.\n2. Reply to this thread with a verdict and the evidence for it.\n3. Resolve this thread.\n\nA resolve with no reply leaves the hold in place.\n"
+    printf "\nA complete read clears this hold. A maintainer asks for one with the review label, or a commit titled \`[opus-review]\` from a trusted author.\n\nTo merge without it, the agent or person driving this pull request may settle this thread:\n\n"
+    if [[ -f "$INCOMPLETE_FILE" ]]; then
+      printf -- '- Read the parts of the diff the reviewer did not read.\n'
+    fi
+    if ((refused > 0)); then
+      printf -- '- Read the findings that could not be posted, and fix each real one.\n'
+    fi
+    printf -- '- Reply to this thread with a verdict and the evidence for it.\n- Resolve this thread.\n\nA resolve with no reply leaves the hold in place.\n'
   } >"$prose"
   raise_shortfall_hold "$prose"
   rm -f "$prose"

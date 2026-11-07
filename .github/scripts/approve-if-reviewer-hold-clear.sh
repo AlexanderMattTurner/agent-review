@@ -15,10 +15,9 @@
 # thread-resolved event mints no approval — AND all three thread conditions hold:
 # no reviewer thread still holds (REVIEW_THREAD_CLEARED, the predicate the merge
 # gate also reads), that latest hold opened at least one thread, and one of those
-# is REVIEW_THREAD_SETTLED: resolved after a reply, by anybody but the reviewer. A
-# hold whose concern
-# lived only in the review body opens no thread, so it clears on the reviewer's
-# own re-review instead.
+# is REVIEW_THREAD_SETTLED: resolved and replied to. A hold whose concern lived
+# only in the review body opens no thread, so it clears on the reviewer's own
+# re-review instead.
 #
 # Env: the GH_TOKEN_* ladder rungs (see lib/github-token-ladder.bash), GH_REPO
 # (owner/name), PR; REVIEWER_LOGIN optional.
@@ -135,7 +134,7 @@ if [[ "${unresolved:-0}" -ne 0 ]]; then
   exit 0
 fi
 
-# INVARIANT — an approval needs a resolved thread FROM THIS HOLD to rest on. A
+# INVARIANT — an approval needs a settled thread FROM THIS HOLD to rest on. A
 # hold whose concern lived only in the review body opens no thread, so nothing
 # here can clear it: the reviewer's own re-check on the next push supersedes it.
 if [[ "${in_hold:-0}" -eq 0 ]]; then
@@ -145,14 +144,14 @@ fi
 
 # INVARIANT — this refusal is what keeps a silent Resolve click from clearing the
 # hold. The agent or person driving the pull request may settle a thread, the PR
-# author included, but only by replying with a verdict before resolving it. A
+# author included, but only by replying with a verdict and resolving it. A
 # thread from an earlier review cycle vouches for nothing the latest hold raised.
 if [[ "${settled_in_hold:-0}" -eq 0 ]]; then
-  echo "no thread from the reviewer's latest hold on PR #${PR} was resolved after a reply; the hold stays until somebody replies with a verdict and resolves one, or the reviewer re-reviews" >&2
+  echo "no thread from the reviewer's latest hold on PR #${PR} was both resolved and replied to; the hold stays until somebody replies with a verdict and resolves one, or the reviewer re-reviews" >&2
   exit 0
 fi
 
-cleared_by="every review conversation from the automated reviewer has been resolved, and one that its latest hold opened was resolved after a written reply"
+cleared_by="every review conversation from the automated reviewer has been resolved, and one that its latest hold opened carries a written reply"
 
 # Dismiss the REVIEWER'S OWN stale CHANGES_REQUESTED. Reached only when the hold
 # is already proven clear above and the approval was structurally refused, so it

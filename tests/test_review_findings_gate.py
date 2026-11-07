@@ -652,7 +652,7 @@ def test_an_unread_push_never_outranks_an_open_gating_finding(tmp_path: Path) ->
         unreviewed_state="failure",
     )
     assert _state_of(calls) == "failure"
-    assert "unresolved reviewer finding" in calls, calls
+    assert "reviewer finding(s) still gate the merge" in calls, calls
 
 
 def test_an_abandoned_accumulated_read_stops_the_gate_waiting_at_any_budget(
@@ -828,3 +828,25 @@ def test_a_resolved_hold_thread_never_lifts_a_withheld_read(tmp_path: Path) -> N
     """Only the read a trusted person opts into lifts a withheld read."""
     hold = _hold_thread(resolved=True, resolved_by=PR_AUTHOR, review_at=T2, replies=1)
     assert run_gate(tmp_path, [_short_review("withheld")], [hold]) == "failure"
+
+
+@pytest.mark.parametrize(
+    ("reviewer", "settled"), [("github-actions", True), ("", False)]
+)
+def test_an_unknown_reviewer_login_settles_no_hold(
+    tmp_path: Path, reviewer: str, settled: bool
+) -> None:
+    """Every entry point exports a reviewer login, so this drives the shared
+    predicate itself: with no login to exclude, the reviewer's own resolve could
+    pass, so nothing settles. The pair: the same thread settles once it is known."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "review-threads.bash"
+    hold = _hold_thread(resolved=True, resolved_by=PR_AUTHOR, replies=1)
+    program = 'source "$1"; jq -n --argjson t "$2" "\\$t | $REVIEW_THREAD_SETTLED"'
+    proc = subprocess.run(
+        ["bash", "-c", program, "_", str(lib), json.dumps(hold)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "REVIEWER_LOGIN_BARE": reviewer},
+    )
+    assert proc.stdout.strip() == ("true" if settled else "false")

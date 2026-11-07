@@ -258,7 +258,7 @@ else
   if [[ -n "$shortfall" ]]; then
     verdict=red
     reason="$shortfall"
-    [[ "$count" -eq 0 ]] || reason+="; ${count} unresolved reviewer finding(s) also gate the merge"
+    [[ "$count" -eq 0 ]] || reason+="; ${count} reviewer finding(s) also gate the merge"
   elif [[ "$count" -eq 0 ]]; then
     verdict=green
     if [[ -z "$reviews" ]]; then
@@ -270,7 +270,7 @@ else
   else
     verdict=red
     where="$(jq -r '[.[] | (.path // "(general)") + (if .line then ":" + (.line|tostring) else "" end)] | join(", ")' <<<"$gating")"
-    reason="${count} unresolved reviewer finding(s) still gate the merge: ${where} — fix each one, reply, then resolve its thread"
+    reason="${count} reviewer finding(s) still gate the merge: ${where} — fix each one or reply with a verdict, then resolve its thread"
   fi
 fi
 

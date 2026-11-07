@@ -8,7 +8,7 @@
 #
 # API:
 #   fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walk EVERY page, applying <jq> to each page's nodes ARRAY. Non-zero once retries exhaust.
-#   REVIEW_THREAD_SETTLED — jq predicate: resolved, answered by at least one reply, and not resolved by the reviewer.
+#   REVIEW_THREAD_SETTLED — jq predicate: resolved, answered by at least one reply, and not resolved by the reviewer. Reads an exported REVIEWER_LOGIN_BARE.
 #   REVIEW_THREAD_CLEARED — jq predicate: this thread holds nothing any more. Reads an exported REVIEWER_LOGIN_BARE.
 #   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's threads that still HOLD a merge, as a JSON array of {path, line}.
 #   raise_shortfall_hold <prose-file> — open ONE file-level hold thread for a read that fell short. Requires GH_REPO, PR and HEAD_SHA.
@@ -63,11 +63,11 @@ _HOLD_THREAD_MARKERS_JSON="$(jq -cn --arg a "$HOLD_THREAD_MARKER" --arg b "$DEGR
 # writing. The merge gate and the hold-clear approver both ask "does this thread still hold?"
 # through these predicates, so the two cannot disagree.
 #
-# REVIEW_THREAD_SETTLED: the thread is resolved, has at least one reply after its root comment,
-# and the reviewer did not resolve it. Anybody may reply and resolve, the PR author and the agent
-# that drives the PR included. INVARIANT — the reply is the written verdict, so a silent resolve
-# settles nothing. A resolution GitHub attributes to nobody still counts. An unknown reviewer
-# login settles nothing, because the reviewer could not be excluded.
+# REVIEW_THREAD_SETTLED: the thread is resolved, has a reply after its root comment, and GitHub
+# does not attribute the resolve to the reviewer. Anybody may reply and resolve, the PR author
+# included. INVARIANT — a silent resolve settles nothing. GraphQL types `resolvedBy` as a User, so
+# a bot's resolve reads as nobody and counts. An unset REVIEWER_LOGIN_BARE settles nothing. The
+# login fold copies login_bare_jq, which lives outside the gate jobs' sparse checkout.
 # shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$r` and `$v` belong to jq
 REVIEW_THREAD_SETTLED='(.isResolved == true
   and (.comments.totalCount // 0) > 1
@@ -144,8 +144,9 @@ unresolved_gating_findings() {
 # raise_shortfall_hold <prose-file> — the thread whoever drives the PR answers and resolves to
 # accept a read that fell short. The gate holds on the summary review's shortfall marker, never
 # on this thread, so the thread carries no severity: a failed raise leaves the merge held, and a
-# later complete read clears the hold with no resolution at all. It anchors to the PR's first changed file with
-# subject_type=file, because the concern is PR-wide and the reader needs only a RESOLVABLE thread.
+# later complete read clears the hold with no resolution at all. It anchors to the PR's first
+# changed file with subject_type=file, because the concern is PR-wide and the reader needs only a
+# RESOLVABLE thread.
 raise_shortfall_hold() {
   local prose="$1" anchor_path body
   : "${HEAD_SHA:?HEAD_SHA required to anchor the hold thread}"
