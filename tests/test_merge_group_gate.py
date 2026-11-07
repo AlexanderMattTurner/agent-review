@@ -43,7 +43,6 @@ done
 case "$path" in
   */compare/*) jq -r "$filter" "$D/compare.json"; exit ;;
   */commits/*/pulls) sha="${path#*/commits/}"; jq -r "$filter" "$D/pulls-${sha%/pulls}.json"; exit ;;
-  */pulls/*) jq -r "$filter" <<<'{"user": {"login": "pr-author"}}'; exit ;;
 esac
 if [[ "$path" == graphql ]]; then
   case "$filter" in

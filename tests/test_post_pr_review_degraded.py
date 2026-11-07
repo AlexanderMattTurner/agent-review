@@ -8,7 +8,7 @@ one finding, (2) record the read as a real COMMENT review, which is what stops
 decide-pr-review-trigger.sh buying the whole read again on the next push, and
 (3) report a finding that was still lost as a reviewer shortfall, with
 a link to its salvaged text, and (4) mark the summary so the merge gate holds,
-then open the hold thread a person other than the author may resolve.
+then open the hold thread whoever drives the PR may answer and resolve.
 
 Nothing here is stubbed: the real `post-pr-review.sh` runs the real
 `post-pr-review.mjs` over a real review.json and diff, and the real `gh` posts
@@ -127,8 +127,8 @@ READ_MARKER = reviewer_marker("WHOLE_DIFF_READ_MARKER")
 
 #: What review-findings-gate.sh reads as a read whose findings went unposted.
 UNPOSTED_MARKER = reviewer_marker("UNPOSTED_FINDINGS_MARKER")
-#: What marks the thread a person resolves to accept a read that fell short.
-HOLD_MARKER = reviewer_marker("HUMAN_HOLD_MARKER")
+#: What marks the thread somebody answers and resolves to accept a read that fell short.
+HOLD_MARKER = reviewer_marker("HOLD_THREAD_MARKER")
 
 
 def _holds(github: FakeReviewPoster) -> list[dict]:
@@ -516,7 +516,7 @@ INCOMPLETE_MARKER = reviewer_marker("INCOMPLETE_READ_MARKER")
 def test_an_incomplete_read_claims_no_read_and_opens_a_hold(tmp_path):
     """A sharded read that lost a leg must not spend the budget or claim the head,
     on either posting path. Its marker holds the merge, and the hold thread after
-    it is what a person other than the author may resolve to accept it."""
+    it is what whoever drives the PR may answer and resolve to accept it."""
     for refuse in (False, True):
         server_dir = tmp_path / f"refuse-{refuse}"
         input_dir = tmp_path / f"in-{refuse}"
@@ -532,7 +532,13 @@ def test_an_incomplete_read_claims_no_read_and_opens_a_hold(tmp_path):
             assert INCOMPLETE_MARKER in review["body"]
             assert READ_MARKER not in review["body"]
             assert "<!-- review-coverage " not in review["body"]
-            assert "Some files went unread." in _assert_one_hold(github)["body"]
+            hold = _assert_one_hold(github)["body"]
+            assert "Some files went unread." in hold
+            # The driver of the PR may settle the hold, so the body names no
+            # human or non-author requirement and asks for a written verdict.
+            assert "the agent or person driving this pull request may" in hold
+            assert "Reply to this thread with a verdict" in hold
+            assert "other than the author" not in hold
 
 
 def test_a_complete_read_opens_no_hold(tmp_path):

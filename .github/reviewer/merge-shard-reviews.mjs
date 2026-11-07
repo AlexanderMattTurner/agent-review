@@ -10,7 +10,7 @@
 // INVARIANT — a fold never claims a read the legs did not deliver. When a leg left no review, the
 // review says which shards went unread and how many lines that leaves, the cost is dropped (a
 // partial sum renders exactly like a whole one), and INCOMPLETE_FILE tells post-pr-review.sh to
-// post it with no read marker and no coverage stamp, under a hold a human resolves. A fold with no
+// post it with no read marker and no coverage stamp, under a hold thread. A fold with no
 // leg at all throws: there is nothing to post.
 //
 // Env: PR_INPUT_DIR (holds shards/manifest.json when the diff was sharded; review.json, cost.json

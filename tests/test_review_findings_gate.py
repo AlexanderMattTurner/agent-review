@@ -48,21 +48,24 @@ def thread(
     path: str = "a.py",
     resolved_by: str | None = "a-human",
     review_at: str = "2026-01-01T00:00:00Z",
+    replies: int = 0,
 ) -> dict:
-    """`review_at` is when the review that opened the root comment was submitted."""
+    """`review_at` is when the review that opened the root comment was submitted.
+    `replies` counts the comments after the root, as `comments.totalCount` does."""
     return {
         "isResolved": resolved,
         "resolvedBy": {"login": resolved_by} if resolved and resolved_by else None,
         "path": path,
         "line": 1,
         "comments": {
+            "totalCount": 1 + replies,
             "nodes": [
                 {
                     "body": body,
                     "author": {"login": author},
                     "pullRequestReview": {"submittedAt": review_at},
                 }
-            ]
+            ],
         },
     }
 
@@ -78,7 +81,6 @@ def _gate_proc(
     live_head: str = HEAD_SHA,
     severity_config: Path = SEVERITIES,
     report_sha: str | None = HEAD_SHA,
-    pr_author: str = PR_AUTHOR,
 ) -> tuple[subprocess.CompletedProcess, Path]:
     """Run the gate against a `gh` stub; return the process and its call log.
 
@@ -127,7 +129,6 @@ case "$filter" in
     exit 0 ;;
   *reviews.nodes*)       jq -r "$filter" "{tmp_path}/reviews.json"; exit 0 ;;
   .headRefOid)           printf '%s\\n' "{live_head}"; exit 0 ;;
-  .user.login*)          printf '%s\\n' "{pr_author}"; exit 0 ;;
 esac
 exit 0
 """
@@ -366,30 +367,37 @@ def test_a_resolved_gating_thread_stops_gating(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("marker", "resolved_by", "expected"),
+    ("marker", "resolved_by", "replies", "expected"),
     [
-        ("HUMAN_HOLD_MARKER", PR_AUTHOR, "failure"),
-        ("DEGRADED_REVIEW_MARKER", "PR-Author", "failure"),
-        # GraphQL spells a login bare, so the reviewer is excluded by name.
-        ("HUMAN_HOLD_MARKER", "github-actions", "failure"),
-        ("HUMAN_HOLD_MARKER", None, "failure"),
-        ("HUMAN_HOLD_MARKER", "a-human", "success"),
+        # The agent that drives the PR posts as its author, so the author settles.
+        ("HOLD_THREAD_MARKER", PR_AUTHOR, 1, "success"),
+        ("DEGRADED_REVIEW_MARKER", "PR-Author", 1, "success"),
+        ("HOLD_THREAD_MARKER", "a-human", 2, "success"),
+        # GitHub names no resolver when the token cannot see it; the reply is the record.
+        ("HOLD_THREAD_MARKER", None, 1, "success"),
+        # A silent resolve leaves no written verdict, whoever clicked it.
+        ("HOLD_THREAD_MARKER", PR_AUTHOR, 0, "failure"),
+        ("DEGRADED_REVIEW_MARKER", "a-human", 0, "failure"),
+        ("HOLD_THREAD_MARKER", None, 0, "failure"),
+        # The reviewer may not settle its own hold, in any spelling of its login.
+        ("HOLD_THREAD_MARKER", "github-actions", 1, "failure"),
+        ("HOLD_THREAD_MARKER", "GitHub-Actions", 1, "failure"),
     ],
 )
-def test_only_somebody_else_clears_a_blocking_hold_thread(
-    tmp_path: Path, marker: str, resolved_by: str | None, expected: str
+def test_a_blocking_hold_thread_clears_on_a_resolve_after_a_reply(
+    tmp_path: Path, marker: str, resolved_by: str | None, replies: int, expected: str
 ) -> None:
-    """A blocking hold thread an older reviewer opened asks for a reader the author
-    is not. The author may resolve it anyway, so the gate reads WHO did. The
-    pair: an ordinary finding the author resolves stops gating (below)."""
-    body = f"needs a human read\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
-    hold = thread(body, resolved=True, resolved_by=resolved_by)
+    """A hold thread stands in for a read, so it clears only once somebody
+    answered it in writing and resolved it. The pair: an ordinary finding clears
+    on any resolution, with no reply (below)."""
+    body = f"held\n{reviewer_marker(marker)}\n<!-- severity: blocking -->"
+    hold = thread(body, resolved=True, resolved_by=resolved_by, replies=replies)
     assert run_gate(tmp_path, [review("COMMENTED")], [hold]) == expected
 
 
 def test_the_author_may_resolve_an_ordinary_finding(tmp_path: Path) -> None:
     """The pair for the hold case: a finding with no hold marker clears on any
-    resolution, the author's included."""
+    resolution, the author's silent one included."""
     body = "<!-- severity: blocking -->\nthis breaks"
     finding = thread(body, resolved=True, resolved_by=PR_AUTHOR)
     assert run_gate(tmp_path, [review("COMMENTED")], [finding]) == "success"
@@ -644,7 +652,7 @@ def test_an_unread_push_never_outranks_an_open_gating_finding(tmp_path: Path) ->
         unreviewed_state="failure",
     )
     assert _state_of(calls) == "failure"
-    assert "unresolved reviewer finding" in calls, calls
+    assert "reviewer finding(s) still gate the merge" in calls, calls
 
 
 def test_an_abandoned_accumulated_read_stops_the_gate_waiting_at_any_budget(
@@ -694,7 +702,7 @@ def test_a_budget_with_room_and_no_notice_still_holds_the_merge(
 #
 # A read that left files unread, lost findings the API would not post, or was
 # withheld from an untrusted author holds the merge. A later complete read
-# clears it, and so does a hold thread a person other than the author resolves.
+# clears it, and so does a hold thread somebody answers and resolves.
 
 T1, T2, T3 = "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"
 
@@ -719,7 +727,7 @@ def _short_review(kind: str, *, submitted_at: str = T1) -> dict:
 
 def _hold_thread(**kwargs) -> dict:
     """The file-level thread post-pr-review.sh opens after a shortfall review."""
-    return thread(f"held\n{reviewer_marker('HUMAN_HOLD_MARKER')}\n", **kwargs)
+    return thread(f"held\n{reviewer_marker('HOLD_THREAD_MARKER')}\n", **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -778,32 +786,39 @@ def test_an_earlier_complete_read_does_not_clear_a_later_shortfall(
 
 
 @pytest.mark.parametrize(
-    ("resolved", "resolved_by", "expected"),
+    ("resolved", "resolved_by", "replies", "expected"),
     [
-        (True, "a-human", "success"),
-        (True, PR_AUTHOR, "failure"),
-        (True, "github-actions", "failure"),
-        (True, None, "failure"),
-        (False, None, "failure"),
+        (True, PR_AUTHOR, 1, "success"),
+        (True, "a-human", 1, "success"),
+        (True, None, 1, "success"),
+        (True, PR_AUTHOR, 0, "failure"),
+        (True, "a-human", 0, "failure"),
+        (True, "github-actions", 1, "failure"),
+        (False, None, 1, "failure"),
     ],
 )
-def test_only_somebody_else_resolving_the_hold_thread_accepts_a_shortfall(
-    tmp_path: Path, resolved: bool, resolved_by: str | None, expected: str
+def test_a_reply_and_a_resolve_on_the_hold_thread_accept_a_shortfall(
+    tmp_path: Path, resolved: bool, resolved_by: str | None, replies: int, expected: str
 ) -> None:
-    """INVARIANT — the author cannot accept their own partly read PR. They may
-    resolve the hold thread, so the gate reads who resolved it."""
-    hold = _hold_thread(resolved=resolved, resolved_by=resolved_by, review_at=T2)
+    """INVARIANT — a partly read PR merges only with a written verdict on its hold
+    thread. Whoever drives the PR may write it, the author included."""
+    hold = _hold_thread(
+        resolved=resolved, resolved_by=resolved_by, review_at=T2, replies=replies
+    )
     assert run_gate(tmp_path, [_short_review("incomplete")], [hold]) == expected
 
 
 def test_an_old_resolution_vouches_for_nothing_newer(tmp_path: Path) -> None:
     """A second shortfall after the accepted one holds again until its own hold
     thread is resolved; the first resolution does not cover it."""
-    first = _hold_thread(resolved=True, resolved_by="a-human", review_at=T2)
+    first = _hold_thread(resolved=True, resolved_by=PR_AUTHOR, review_at=T2, replies=1)
     reviews = [_short_review("incomplete"), _short_review("unposted", submitted_at=T3)]
     assert run_gate(tmp_path / "old", reviews, [first], live_head=COVERED) == "failure"
     second = _hold_thread(
-        resolved=True, resolved_by="a-human", review_at="2026-03-04T00:00:00Z"
+        resolved=True,
+        resolved_by=PR_AUTHOR,
+        review_at="2026-03-04T00:00:00Z",
+        replies=1,
     )
     state = run_gate(tmp_path / "new", reviews, [first, second], live_head=COVERED)
     assert state == "success"
@@ -811,5 +826,27 @@ def test_an_old_resolution_vouches_for_nothing_newer(tmp_path: Path) -> None:
 
 def test_a_resolved_hold_thread_never_lifts_a_withheld_read(tmp_path: Path) -> None:
     """Only the read a trusted person opts into lifts a withheld read."""
-    hold = _hold_thread(resolved=True, resolved_by="a-human", review_at=T2)
+    hold = _hold_thread(resolved=True, resolved_by=PR_AUTHOR, review_at=T2, replies=1)
     assert run_gate(tmp_path, [_short_review("withheld")], [hold]) == "failure"
+
+
+@pytest.mark.parametrize(
+    ("reviewer", "settled"), [("github-actions", True), ("", False)]
+)
+def test_an_unknown_reviewer_login_settles_no_hold(
+    tmp_path: Path, reviewer: str, settled: bool
+) -> None:
+    """Every entry point exports a reviewer login, so this drives the shared
+    predicate itself: with no login to exclude, the reviewer's own resolve could
+    pass, so nothing settles. The pair: the same thread settles once it is known."""
+    lib = REPO_ROOT / ".github" / "reviewer" / "lib" / "review-threads.bash"
+    hold = _hold_thread(resolved=True, resolved_by=PR_AUTHOR, replies=1)
+    program = 'source "$1"; jq -n --argjson t "$2" "\\$t | $REVIEW_THREAD_SETTLED"'
+    proc = subprocess.run(
+        ["bash", "-c", program, "_", str(lib), json.dumps(hold)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "REVIEWER_LOGIN_BARE": reviewer},
+    )
+    assert proc.stdout.strip() == ("true" if settled else "false")

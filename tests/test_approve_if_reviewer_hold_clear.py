@@ -4,7 +4,7 @@ lifted without a human, so its refusals matter more than its successes.
 The `gh` stub here RUNS the script's own `--jq` filters over canned GraphQL
 responses rather than returning pre-filtered output. That is deliberate: both
 safety properties — never dismiss a review this bot did not write, and never
-count the pull request author's own Resolve click as a clearing signal — live
+count a Resolve click with no written reply as a clearing signal — live
 entirely inside those filters — as does the scoping that keeps an earlier hold
 cycle's resolution from vouching for the current one — and a stub that ignored
 `--jq` would report them working while testing nothing.
@@ -43,23 +43,28 @@ def thread(
     resolved_by: str | None = OTHER,
     opened_by_review_at: str = CYCLE_1,
     body: str = "a finding",
+    replies: int = 1,
 ) -> dict:
     """One review thread. `resolved_by` is the login GitHub records on Resolve;
     it is null on an unresolved thread, and on a resolved one whose resolver the
     token cannot see. `opened_by_review_at` is the `submittedAt` of the review
-    that opened the thread, which is what ties the thread to one hold cycle."""
+    that opened the thread, which is what ties the thread to one hold cycle.
+    `replies` counts the comments after the root, which GitHub reports in
+    `comments.totalCount` whatever page size the query asked for. It defaults
+    to one, so a resolved thread is settled unless a test says otherwise."""
     by = {"login": resolved_by} if resolved and resolved_by else None
     return {
         "isResolved": resolved,
         "resolvedBy": by,
         "comments": {
+            "totalCount": 1 + replies,
             "nodes": [
                 {
                     "author": {"login": author},
                     "body": body,
                     "pullRequestReview": {"submittedAt": opened_by_review_at},
                 }
-            ]
+            ],
         },
     }
 
@@ -109,7 +114,6 @@ def run(
     *,
     threads: list[dict],
     reviews: list[dict],
-    pr_author: str = AUTHOR,
     approve_error: str | None = None,
     dismiss_error: str | None = None,
     rungs: dict[str, str] | None = None,
@@ -127,7 +131,6 @@ def run(
     (tmp_path / "threads.json").write_text(threads_json)
     (tmp_path / "reviews.json").write_text(reviews_json)
     (tmp_path / "quotas.json").write_text(json.dumps(quotas))
-    (tmp_path / "pr.json").write_text(json.dumps({"user": {"login": pr_author}}))
     log = tmp_path / "gh-calls.txt"
 
     def arm(err: str | None) -> str:
@@ -164,20 +167,6 @@ left="$(jq -r --arg t "${{GH_TOKEN:-}}" '.[$t] // 0' "{tmp_path}/quotas.json")"
 if [[ "$left" -le 0 ]]; then
   echo "gh: API rate limit already exceeded for user ID 3458070." >&2
   exit 1
-fi
-# The PR read the script uses to learn who may NOT clear the hold. REST spells a
-# bot author `x[bot]` where GraphQL spells it `x`, so the fixture is served
-# verbatim and the script's own filter reads it.
-if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
-  filter=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --jq) filter="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  jq -r "$filter" "{tmp_path}/pr.json"
-  exit 0
 fi
 if [[ "$1" == "api" && "$2" == "graphql" ]]; then
   query=""; filter=""
@@ -392,29 +381,35 @@ def test_a_reviewer_not_holding_dismisses_nothing(tmp_path: Path, state: str):
     assert "no live hold to clear" in res.stderr
 
 
-def test_the_pr_author_resolving_alone_clears_nothing(tmp_path: Path):
-    """THE author-exclusion case. GitHub lets a pull request's author resolve the
-    conversations on their own pull request, so an author who clicks Resolve on
-    every reviewer thread — changing no code — would otherwise clear the gate
-    that constrains them."""
+NOT_SETTLED = "was both resolved and replied to"
+
+
+@pytest.mark.parametrize("resolver", [AUTHOR, OTHER, None])
+def test_a_silent_resolve_clears_nothing(tmp_path: Path, resolver: str | None):
+    """THE written-record case. A Resolve click with no reply leaves no record of
+    who read the diff or what they found, whoever clicked it."""
     res, calls = run(
         tmp_path,
-        threads=[thread(resolved_by=AUTHOR), thread(resolved_by=AUTHOR)],
+        threads=[thread(resolved_by=resolver, replies=0)],
         reviews=[review("CHANGES_REQUESTED")],
         approve_error=SELF_APPROVAL,
     )
     assert res.returncode == 0, res.stderr
     assert not dismissed(calls)
-    assert "pr review" not in calls, "the author's own clicks must mint no approval"
-    assert "names a resolver other than its author" in res.stderr
+    assert "pr review" not in calls, "a silent resolve must mint no approval"
+    assert NOT_SETTLED in res.stderr
 
 
-def test_one_thread_resolved_by_somebody_else_still_clears(tmp_path: Path):
-    # The author may resolve threads too; the hold clears as long as one
-    # resolution came from a party the hold does not constrain.
+@pytest.mark.parametrize("resolver", [AUTHOR, OTHER, None])
+def test_a_resolve_after_a_reply_clears_whoever_resolved(
+    tmp_path: Path, resolver: str | None
+):
+    """The pair. The agent that drives the PR posts under the author's account,
+    so the author's resolve after a reply must clear. GitHub records no resolver
+    when the token cannot see it; the reply is the record, so that clears too."""
     res, calls = run(
         tmp_path,
-        threads=[thread(resolved_by=AUTHOR), thread(resolved_by=OTHER)],
+        threads=[thread(resolved_by=resolver, replies=1)],
         reviews=[review("CHANGES_REQUESTED")],
         approve_error=SELF_APPROVAL,
     )
@@ -422,78 +417,80 @@ def test_one_thread_resolved_by_somebody_else_still_clears(tmp_path: Path):
     assert dismissed(calls)
 
 
-def test_a_needs_a_human_hold_the_author_resolved_still_holds(tmp_path: Path):
-    # A hold thread asks for a reader other than the author. The author's own
-    # Resolve on it leaves it holding, so another thread resolved by somebody
-    # else does not make the whole hold clear. The merge gate reads the same
-    # predicate, so the two agree.
-    marker = reviewer_marker("HUMAN_HOLD_MARKER")
+@pytest.mark.parametrize("resolver", [BOT, "GitHub-Actions"])
+def test_the_reviewer_resolving_its_own_thread_clears_nothing(
+    tmp_path: Path, resolver: str
+):
+    # The reviewer may not settle its own hold, whatever case GitHub spells its
+    # login in. This binds only a reviewer that is a user account: GraphQL types
+    # `resolvedBy` as a User, so a bot's resolution comes back null.
+    res, calls = run(
+        tmp_path,
+        threads=[thread(resolved_by=resolver, replies=1)],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not dismissed(calls)
+    assert NOT_SETTLED in res.stderr
+
+
+def test_one_settled_thread_clears_the_hold(tmp_path: Path):
+    # The other threads may be resolved in silence; one written verdict on a
+    # thread of this hold is the record the approval rests on.
     res, calls = run(
         tmp_path,
         threads=[
-            thread(resolved_by=AUTHOR, body=f"files went unread\n{marker}"),
-            thread(resolved_by=OTHER),
+            thread(resolved_by=AUTHOR, replies=0),
+            thread(resolved_by=AUTHOR, replies=2),
         ],
         reviews=[review("CHANGES_REQUESTED")],
         approve_error=SELF_APPROVAL,
     )
     assert res.returncode == 0, res.stderr
-    assert not dismissed(calls)
-    assert "pr review" not in calls
-    assert "1 reviewer thread(s) still hold" in res.stderr
+    assert dismissed(calls)
 
 
-def test_the_two_api_spellings_of_one_login_are_one_author(tmp_path: Path):
-    # REST returns the author as `x[bot]`, GraphQL returns the resolver as `x`,
-    # and GitHub logins are case-insensitive. A comparison that missed either
-    # would read the author's own resolution as somebody else's and clear.
-    res, calls = run(
-        tmp_path,
-        pr_author="Renovate[bot]",
-        threads=[thread(resolved_by="renovate")],
-        reviews=[review("CHANGES_REQUESTED")],
-        approve_error=SELF_APPROVAL,
-    )
-    assert res.returncode == 0, res.stderr
-    assert not dismissed(calls)
-    assert "names a resolver other than its author" in res.stderr
-
-
-def test_a_resolved_thread_with_no_recorded_resolver_clears_nothing(tmp_path: Path):
-    # `resolvedBy` is null when the token cannot attribute the resolution. An
-    # unattributable click cannot be shown to come from anyone but the author.
-    res, calls = run(
-        tmp_path,
-        threads=[thread(resolved_by=None)],
-        reviews=[review("CHANGES_REQUESTED")],
-        approve_error=SELF_APPROVAL,
-    )
-    assert res.returncode == 0, res.stderr
-    assert not dismissed(calls)
-    assert "names a resolver other than its author" in res.stderr
-
-
-def test_an_unreadable_pr_author_fails_loudly(tmp_path: Path):
-    # With no author to exclude, every resolution would look like somebody
-    # else's. That is the fail-open this exclusion exists to prevent.
-    res, calls = run(tmp_path, pr_author="", **CLEARED)
-    assert res.returncode == 1
-    assert not dismissed(calls)
-    assert "could not read the author" in res.stderr
-
-
-def test_an_earlier_cycles_non_author_resolution_cannot_clear_a_later_hold(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("replies", "holds"), [(0, True), (1, False)], ids=["silent", "answered"]
+)
+def test_a_hold_thread_the_author_resolved_holds_until_answered(
+    tmp_path: Path, replies: int, holds: bool
 ):
-    """Threads outlive the review that opened them. A human resolved one thread
-    in cycle 1; the reviewer then held again and the author resolved every
-    cycle-2 thread alone. Counting cycle 1's resolution would clear a hold no
-    second party ever read."""
+    # A hold thread stands in for a read, so even beside a settled finding it
+    # holds until somebody replies to it. The merge gate reads the same
+    # predicate, so the two agree.
+    marker = reviewer_marker("HOLD_THREAD_MARKER")
     res, calls = run(
         tmp_path,
         threads=[
-            thread(resolved_by=OTHER, opened_by_review_at=CYCLE_1),
-            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_2),
+            thread(
+                resolved_by=AUTHOR,
+                body=f"files went unread\n{marker}",
+                replies=replies,
+            ),
+            thread(resolved_by=AUTHOR, replies=1),
+        ],
+        reviews=[review("CHANGES_REQUESTED")],
+        approve_error=SELF_APPROVAL,
+    )
+    assert res.returncode == 0, res.stderr
+    assert dismissed(calls) is not holds
+    assert ("1 reviewer thread(s) still hold" in res.stderr) is holds
+
+
+def test_an_earlier_cycles_settled_thread_cannot_clear_a_later_hold(
+    tmp_path: Path,
+):
+    """Threads outlive the review that opened them. Somebody answered and resolved
+    a cycle-1 thread; the reviewer then held again and every cycle-2 thread was
+    resolved in silence. Counting cycle 1's answer would clear a hold nobody
+    answered."""
+    res, calls = run(
+        tmp_path,
+        threads=[
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_1, replies=1),
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_2, replies=0),
         ],
         reviews=[
             review("CHANGES_REQUESTED", at=CYCLE_1, rid=1),
@@ -503,13 +500,13 @@ def test_an_earlier_cycles_non_author_resolution_cannot_clear_a_later_hold(
     )
     assert res.returncode == 0, res.stderr
     assert not dismissed(calls)
-    assert "pr review" not in calls, "a stale resolution must mint no approval"
-    assert "names a resolver other than its author" in res.stderr
+    assert "pr review" not in calls, "a stale answer must mint no approval"
+    assert NOT_SETTLED in res.stderr
 
 
 def test_a_later_hold_that_opened_no_thread_clears_on_no_old_thread(tmp_path: Path):
     # The reviewer held again in a review body alone. Cycle 1's threads are all
-    # resolved, one by a human, but none of them answers the new finding.
+    # resolved and replied to, but none of them answers the new finding.
     res, calls = run(
         tmp_path,
         threads=[thread(resolved_by=OTHER, opened_by_review_at=CYCLE_1)],
@@ -550,12 +547,12 @@ def test_a_hold_thread_posted_before_its_notice_review_belongs_to_that_hold(
 
 def test_the_current_holds_own_thread_still_clears(tmp_path: Path):
     # Non-vacuity for the two refusals above: the same two-cycle shape clears as
-    # soon as the resolution a human made belongs to the LATEST hold.
+    # soon as the answered thread belongs to the LATEST hold.
     res, calls = run(
         tmp_path,
         threads=[
-            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_1),
-            thread(resolved_by=OTHER, opened_by_review_at=CYCLE_2),
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_1, replies=0),
+            thread(resolved_by=AUTHOR, opened_by_review_at=CYCLE_2, replies=1),
         ],
         reviews=[
             review("CHANGES_REQUESTED", at=CYCLE_1, rid=1),

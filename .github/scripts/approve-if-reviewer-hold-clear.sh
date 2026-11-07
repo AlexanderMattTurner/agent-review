@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Approve the PR when the automated reviewer's hold is fully cleared. This is the
 # single source of truth for "the reviewer requested changes (or commented),
-# every one of its threads is resolved, and somebody other than the pull
-# request's author resolved one of THIS hold's threads, so post the APPROVE that
-# supersedes the hold and satisfies a review-required ruleset."
+# every one of its threads is resolved, and somebody answered and resolved one of
+# THIS hold's threads, so post the APPROVE that supersedes the hold and satisfies
+# a review-required ruleset."
 #
 # It is state-based and idempotent: it reads the CURRENT thread and review state
 # through the API and decides from that alone. A periodic sweep of open PRs
@@ -14,10 +14,10 @@
 # or COMMENTED; any other latest state means nothing to clear, so an unrelated
 # thread-resolved event mints no approval — AND all three thread conditions hold:
 # no reviewer thread still holds (REVIEW_THREAD_CLEARED, the predicate the merge
-# gate also reads), that latest hold opened at least one thread, and somebody other
-# than the author resolved one of those. A hold whose concern
-# lived only in the review body opens no thread, so it clears on the reviewer's
-# own re-review instead.
+# gate also reads), that latest hold opened at least one thread, and one of those
+# is REVIEW_THREAD_SETTLED: resolved and replied to. A hold whose concern lived
+# only in the review body opens no thread, so it clears on the reviewer's own
+# re-review instead.
 #
 # Env: the GH_TOKEN_* ladder rungs (see lib/github-token-ladder.bash), GH_REPO
 # (owner/name), PR; REVIEWER_LOGIN optional.
@@ -49,27 +49,14 @@ export GH_TOKEN
 # shellcheck source=lib/reviewer-login.bash disable=SC1091
 source "$SCRIPT_DIR/lib/reviewer-login.bash"
 reviewer_login_init
-# fetch_review_threads and REVIEW_THREAD_CLEARED: the thread read and the "does this
-# thread still hold?" predicate the merge gate uses, so the two cannot disagree.
+# fetch_review_threads, REVIEW_THREAD_CLEARED and REVIEW_THREAD_SETTLED: the thread read
+# and the "does this thread still hold?" predicates the merge gate uses, so the two
+# cannot disagree.
 # shellcheck source=../reviewer/lib/review-threads.bash disable=SC1091
 source "$SCRIPT_DIR/../reviewer/lib/review-threads.bash"
 
 owner="${GH_REPO%%/*}"
 name="${GH_REPO##*/}"
-
-# WHO resolved a thread decides whether that resolution counts, so the author's
-# login has to be known before any thread is counted. Empty is fatal rather than
-# permissive: an unknown author matches nobody, which would credit the author's
-# own resolutions to somebody else and clear the hold this script guards.
-PR_AUTHOR="$(gh api "repos/${GH_REPO}/pulls/${PR}" --jq '.user.login // ""')"
-if [[ -z "$PR_AUTHOR" ]]; then
-  echo "could not read the author of PR #${PR}; no resolution can be attributed, so the reviewer's hold stays in place." >&2
-  exit 1
-fi
-# jq reads it from the environment, and login_bare_jq folds both spellings the
-# two API dialects use (REST returns `x[bot]` where GraphQL returns `x`).
-export PR_AUTHOR
-resolver_is_not_author="$(login_bare_jq .resolvedBy.login) != $(login_bare_jq env.PR_AUTHOR)"
 
 # What is the reviewer's latest review, when did it land, and when did the one
 # before it land? Paginated (a long-lived PR can accrue >100 reviews, and an
@@ -117,7 +104,7 @@ if [[ -z "$HOLD_SINCE" || "$HOLD_SINCE" == "null" ]]; then
 fi
 
 # Count the reviewer's threads three ways, through the shared paginated walk. The
-# per-page projection emits one {unresolved, in_hold, cleared_by_other} object; the
+# per-page projection emits one {unresolved, in_hold, settled_in_hold} object; the
 # trailing reduce sums them.
 # A thread belongs to the current hold when the review that opened its root
 # comment came AFTER the previous real review. Comparing with the hold itself is
@@ -134,23 +121,20 @@ counts="$(fetch_review_threads "$owner" "$name" "$PR" \
   "[.[] | ${REVIEWER_MATCH_THREAD_ROOT}]
         | {unresolved: (map(select(${REVIEW_THREAD_CLEARED} | not)) | length),
            in_hold: (map(select(${thread_in_hold})) | length),
-           cleared_by_other: (map(select(${thread_in_hold}
-                                         and .isResolved == true
-                                         and .resolvedBy != null
-                                         and ${resolver_is_not_author})) | length)}" |
-  jq -s 'reduce .[] as $p ({unresolved: 0, in_hold: 0, cleared_by_other: 0};
+           settled_in_hold: (map(select(${thread_in_hold} and ${REVIEW_THREAD_SETTLED})) | length)}" |
+  jq -s 'reduce .[] as $p ({unresolved: 0, in_hold: 0, settled_in_hold: 0};
            {unresolved: (.unresolved + $p.unresolved), in_hold: (.in_hold + $p.in_hold),
-            cleared_by_other: (.cleared_by_other + $p.cleared_by_other)})')"
+            settled_in_hold: (.settled_in_hold + $p.settled_in_hold)})')"
 unresolved="$(jq -r '.unresolved' <<<"$counts")"
 in_hold="$(jq -r '.in_hold' <<<"$counts")"
-cleared_by_other="$(jq -r '.cleared_by_other' <<<"$counts")"
+settled_in_hold="$(jq -r '.settled_in_hold' <<<"$counts")"
 
 if [[ "${unresolved:-0}" -ne 0 ]]; then
   echo "${unresolved} reviewer thread(s) still hold; not approving" >&2
   exit 0
 fi
 
-# INVARIANT — an approval needs a resolved thread FROM THIS HOLD to rest on. A
+# INVARIANT — an approval needs a settled thread FROM THIS HOLD to rest on. A
 # hold whose concern lived only in the review body opens no thread, so nothing
 # here can clear it: the reviewer's own re-check on the next push supersedes it.
 if [[ "${in_hold:-0}" -eq 0 ]]; then
@@ -158,17 +142,16 @@ if [[ "${in_hold:-0}" -eq 0 ]]; then
   exit 0
 fi
 
-# INVARIANT — this refusal is what stops a pull request's author from clearing
-# the reviewer's hold alone. GitHub lets the author resolve any conversation on
-# their pull request, so the hold clears only on a resolution by somebody else,
-# of a thread THIS hold opened: a resolution attributed to nobody, or one from an
-# earlier review cycle, vouches for nothing the latest hold raised.
-if [[ "${cleared_by_other:-0}" -eq 0 ]]; then
-  echo "no thread from the reviewer's latest hold on PR #${PR} names a resolver other than its author (${PR_AUTHOR}); the hold stays until somebody else resolves one or the reviewer re-reviews" >&2
+# INVARIANT — this refusal is what keeps a silent Resolve click from clearing the
+# hold. The agent or person driving the pull request may settle a thread, the PR
+# author included, but only by replying with a verdict and resolving it. A
+# thread from an earlier review cycle vouches for nothing the latest hold raised.
+if [[ "${settled_in_hold:-0}" -eq 0 ]]; then
+  echo "no thread from the reviewer's latest hold on PR #${PR} was both resolved and replied to; the hold stays until somebody replies with a verdict and resolves one, or the reviewer re-reviews" >&2
   exit 0
 fi
 
-cleared_by="every review conversation from the automated reviewer has been resolved, and somebody other than the pull request's author resolved one that its latest hold opened"
+cleared_by="every review conversation from the automated reviewer has been resolved, and one that its latest hold opened carries a written reply"
 
 # Dismiss the REVIEWER'S OWN stale CHANGES_REQUESTED. Reached only when the hold
 # is already proven clear above and the approval was structurally refused, so it

@@ -9,7 +9,7 @@
 #   (c) no push after the covered head is still owed an accumulated read, AND
 #   (d) no read fell short — files went unread, findings could not be posted as
 #       threads, or the read was withheld — unless a later complete read made up
-#       for it, or a person other than the PR's author resolved the hold thread.
+#       for it, or somebody replied to the hold thread and resolved it.
 # Resolving the last gating thread is what flips the gate — there is no approval
 # to mint, no sticky verdict to supersede, and no state beyond what the pull
 # request itself shows.
@@ -232,7 +232,7 @@ shortfall_hold_reason() {
   [[ " $kinds " != *" incomplete "* ]] || what+="files went unread; "
   [[ " $kinds " != *" unposted "* ]] || what+="findings could not be posted as threads; "
   [[ " $kinds " != *" withheld "* ]] || what+="a read was withheld; "
-  echo "reviewer fell short (${what%; }): a complete read, or a non-author resolving the hold thread, clears it"
+  echo "reviewer fell short (${what%; }): a complete read, or a reply with a verdict and then a resolve on the hold thread, clears it"
 }
 
 reviews="$(reviewer_reviews_ndjson "$owner" "$name" "$PR")"
@@ -258,7 +258,7 @@ else
   if [[ -n "$shortfall" ]]; then
     verdict=red
     reason="$shortfall"
-    [[ "$count" -eq 0 ]] || reason+="; ${count} unresolved reviewer finding(s) also gate the merge"
+    [[ "$count" -eq 0 ]] || reason+="; ${count} reviewer finding(s) also gate the merge"
   elif [[ "$count" -eq 0 ]]; then
     verdict=green
     if [[ -z "$reviews" ]]; then
@@ -270,7 +270,7 @@ else
   else
     verdict=red
     where="$(jq -r '[.[] | (.path // "(general)") + (if .line then ":" + (.line|tostring) else "" end)] | join(", ")' <<<"$gating")"
-    reason="${count} unresolved reviewer finding(s) still gate the merge: ${where} — fix each one, reply, then resolve its thread"
+    reason="${count} reviewer finding(s) still gate the merge: ${where} — fix each one or reply with a verdict, then resolve its thread"
   fi
 fi
 

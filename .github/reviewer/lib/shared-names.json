@@ -20,6 +20,6 @@
     "severity_marker": "<!-- severity: %s -->",
     "unposted_findings": "<!-- unposted-findings -->",
     "read_withheld": "<!-- read-withheld -->",
-    "human_hold": "<!-- needs-human-resolver -->"
+    "hold_thread": "<!-- needs-human-resolver -->"
   }
 }
