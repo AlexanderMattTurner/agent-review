@@ -139,7 +139,7 @@ on:
         default: 4
         type: number
       reviewer-defect-issue:
-        description: "Number of an issue in the CALLING repository. When the reviewer falls short on a pull request — a read leg failed after its retries, findings could not be posted, or files went unread — the `post` job comments there once, naming the pull request, the head, what fell short and the run. Empty writes the same text to the job summary and a warning instead. Either way the review-findings gate holds the merge until a complete read, or until a person other than the author resolves the reviewer's hold thread."
+        description: "Number of an issue in the CALLING repository. When the reviewer falls short on a pull request — a read leg failed after its retries, findings could not be posted, or files went unread — the `post` job comments there once, naming the pull request, the head, what fell short and the run. Empty writes the same text to the job summary and a warning instead. Either way the review-findings gate holds the merge until a complete read, or until the agent or person driving the pull request replies to the reviewer's hold thread with a verdict and resolves it."
         required: false
         default: ""
         type: string

@@ -8,11 +8,11 @@
 #
 # API:
 #   fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walk EVERY page, applying <jq> to each page's nodes ARRAY. Non-zero once retries exhaust.
-#   REVIEW_THREAD_CLEARED — jq predicate: this thread holds nothing any more. Reads an exported PR_AUTHOR.
+#   REVIEW_THREAD_SETTLED — jq predicate: resolved, answered by at least one reply, and not resolved by the reviewer.
+#   REVIEW_THREAD_CLEARED — jq predicate: this thread holds nothing any more. Reads an exported REVIEWER_LOGIN_BARE.
 #   unresolved_gating_findings <owner> <name> <pr> <severity-config> — the reviewer's threads that still HOLD a merge, as a JSON array of {path, line}.
 #   raise_shortfall_hold <prose-file> — open ONE file-level hold thread for a read that fell short. Requires GH_REPO, PR and HEAD_SHA.
-#   shortfall_hold_overridden <owner> <name> <pr> <since> <latest> — `true` when a person other than the author cleared the hold threads raised from <since> on.
-#   pr_author_login <owner> <name> <pr> — the PR author's login, which REVIEW_THREAD_CLEARED reads as PR_AUTHOR.
+#   shortfall_hold_overridden <owner> <name> <pr> <since> <latest> — `true` when the hold threads raised from <since> on are all settled.
 
 # retry_stdout, sourced here rather than assumed, so a consumer gets the retry ladder by
 # sourcing this file alone. lib-ci-retry.sh guards against a double source.
@@ -22,7 +22,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib-ci-retry.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-markers.bash"
 
 # `$endCursor` and `pageInfo` are what let `gh api graphql --paginate` walk: gh feeds endCursor back in and stops on hasNextPage=false, so drop either and it has no cursor to advance and returns page one forever, reporting a truncated thread set as the whole one. That set feeds the review-findings merge gate, so an under-read greens a gate that should be red.
-# The node selection is the UNION of what the consumers project, because one shared document is the point. `resolvedBy` is what tells a hold cleared by somebody else from one its author cleared. The root comment's `pullRequestReview.submittedAt` ties a thread to the review that opened it. `comments` is the one field whose per-page cost grows with its size, so it is a variable: a caller keying on who OPENED each thread takes the root comment alone.
+# The node selection is the UNION of what the consumers project, because one shared document is the point. `resolvedBy` keeps the reviewer from settling its own hold, and `comments.totalCount` tells a hold somebody answered from one resolved in silence. The root comment's `pullRequestReview.submittedAt` ties a thread to the review that opened it. `comments` is the one field whose per-page cost grows with its size, so it is a variable: a caller keying on who OPENED each thread takes the root comment alone.
 REVIEW_THREADS_QUERY=$(
   cat <<'GRAPHQL'
 query($owner: String!, $name: String!, $pr: Int!, $comments: Int!, $endCursor: String) {
@@ -36,7 +36,7 @@ query($owner: String!, $name: String!, $pr: Int!, $comments: Int!, $endCursor: S
           resolvedBy { login }
           path
           line
-          comments(first: $comments) { nodes { author { login } body pullRequestReview { submittedAt } } }
+          comments(first: $comments) { totalCount nodes { author { login } body pullRequestReview { submittedAt } } }
         }
       }
     }
@@ -53,29 +53,35 @@ REVIEW_THREAD_ROOT_LOGIN='(.comments.nodes[0].author.login // "" | sub("\\[bot\\
 # shellcheck disable=SC2034 # spliced into the sourcing scripts' projections
 REVIEW_THREAD_ROOT_IS_REVIEWER="select($REVIEW_THREAD_ROOT_LOGIN == env.REVIEWER_LOGIN_BARE)"
 
-# The hidden markers a needs-a-human hold thread carries. HUMAN_HOLD_MARKER is on every hold
+# The hidden markers a hold thread carries. HOLD_THREAD_MARKER is on every hold
 # raise_shortfall_hold opens; DEGRADED_REVIEW_MARKER covers a hold opened before it existed.
-_HUMAN_HOLD_MARKERS_JSON="$(jq -cn --arg a "$HUMAN_HOLD_MARKER" --arg b "$DEGRADED_REVIEW_MARKER" '[$a, $b]')"
+_HOLD_THREAD_MARKERS_JSON="$(jq -cn --arg a "$HOLD_THREAD_MARKER" --arg b "$DEGRADED_REVIEW_MARKER" '[$a, $b]')"
 
-# PROBLEM CLASS — a pull request's author clearing a hold that needs somebody else. GitHub lets
-# the author resolve any thread on their own pull request. A finding thread is theirs to settle,
-# but a hold thread (files went unread, or GitHub refused the findings) asks for a reader the
-# author is not. The merge gate and the hold-clear approver both ask "does this thread still
-# hold?" through this one predicate, so the two cannot disagree.
+# PROBLEM CLASS — a hold thread cleared with no record of who read the unread diff. A finding
+# thread is settled by its fix, so any resolution clears it. A hold thread (files went unread, or
+# GitHub refused the findings) stands in for a read, so it clears only once somebody answers it in
+# writing. The merge gate and the hold-clear approver both ask "does this thread still hold?"
+# through these predicates, so the two cannot disagree.
 #
-# jq predicate over one thread: it is resolved, and when its root comment carries a hold marker,
-# the resolver is somebody other than the PR's author or the reviewer. INVARIANT — this is what
-# stops the author from greening the gate on a hold alone. It reads PR_AUTHOR from `env`; an
-# empty one, or a resolution GitHub attributes to nobody, leaves the hold in place. GraphQL types
-# `resolvedBy` as a User and spells every login bare, so no field here can tell a bot apart.
-# shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$b`, `$r` and `$a` belong to jq
+# REVIEW_THREAD_SETTLED: the thread is resolved, has at least one reply after its root comment,
+# and the reviewer did not resolve it. Anybody may reply and resolve, the PR author and the agent
+# that drives the PR included. INVARIANT — the reply is the written verdict, so a silent resolve
+# settles nothing. A resolution GitHub attributes to nobody still counts. An unknown reviewer
+# login settles nothing, because the reviewer could not be excluded.
+# shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$r` and `$v` belong to jq
+REVIEW_THREAD_SETTLED='(.isResolved == true
+  and (.comments.totalCount // 0) > 1
+  and ((.resolvedBy.login // "" | ascii_downcase | sub("\\[bot\\]$"; "")) as $r
+       | (env.REVIEWER_LOGIN_BARE // "" | ascii_downcase | sub("\\[bot\\]$"; "")) as $v
+       | $v != "" and $r != $v))'
+
+# REVIEW_THREAD_CLEARED: the thread is resolved, and when its root comment carries a hold marker,
+# it is also REVIEW_THREAD_SETTLED.
+# shellcheck disable=SC2034,SC2016 # spliced into jq programs; `$b` and `$m` belong to jq
 REVIEW_THREAD_CLEARED='(.isResolved == true
-  and ((((.comments.nodes[0].body // "") as $b | '"$_HUMAN_HOLD_MARKERS_JSON"'
+  and ((((.comments.nodes[0].body // "") as $b | '"$_HOLD_THREAD_MARKERS_JSON"'
           | any(.[]; . as $m | $b | contains($m))) | not)
-       or ((.resolvedBy.login // "" | ascii_downcase) as $r
-           | (env.PR_AUTHOR // "" | ascii_downcase | sub("\\[bot\\]$"; "")) as $a
-           | $r != "" and $a != ""
-             and $r != $a and $r != (env.REVIEWER_LOGIN_BARE // "" | ascii_downcase))))'
+       or '"$REVIEW_THREAD_SETTLED"'))'
 
 # Which severities HOLD a merge, as a jq predicate over `$body`. <list> is the jq
 # path in the consumer's config that names them (`.gating` by default). Each
@@ -119,14 +125,12 @@ gating_severity_predicate() {
 # read runs when the pull request is otherwise ready to merge, so a severity it
 # leaves out posts a thread that informs and does not hold the merge a second time.
 #
-# The caller must have EXPORTED REVIEWER_LOGIN_BARE. The PR's author is read here, for
-# REVIEW_THREAD_CLEARED; a read that returns nobody leaves every hold thread holding.
+# The caller must have EXPORTED REVIEWER_LOGIN_BARE.
 unresolved_gating_findings() {
-  local owner="$1" name="$2" pr="$3" config="$4" predicate delta_predicate author
+  local owner="$1" name="$2" pr="$3" config="$4" predicate delta_predicate
   predicate="$(gating_severity_predicate "$config")"
   delta_predicate="$(gating_severity_predicate "$config" '(.delta_gating // .gating)')"
-  author="$(pr_author_login "$owner" "$name" "$pr")"
-  PR_AUTHOR="$author" fetch_review_threads "$owner" "$name" "$pr" \
+  fetch_review_threads "$owner" "$name" "$pr" \
     "[.[] | select($REVIEW_THREAD_CLEARED | not)
           | $REVIEW_THREAD_ROOT_IS_REVIEWER
           | . + {rootBody: (.comments.nodes[0].body // \"\")}
@@ -137,11 +141,11 @@ unresolved_gating_findings() {
     jq -s 'add // []'
 }
 
-# raise_shortfall_hold <prose-file> — the thread a person resolves to accept a read that fell
-# short. The gate holds on the shortfall marker of the summary review, never on this thread, so
-# the thread carries no severity: a failed raise leaves the merge held, and a later complete read
-# clears the hold with no resolution at all. It anchors to the PR's first changed file with
-# subject_type=file, because the concern is PR-wide and a person needs only a RESOLVABLE thread.
+# raise_shortfall_hold <prose-file> — the thread whoever drives the PR answers and resolves to
+# accept a read that fell short. The gate holds on the summary review's shortfall marker, never
+# on this thread, so the thread carries no severity: a failed raise leaves the merge held, and a
+# later complete read clears the hold with no resolution at all. It anchors to the PR's first changed file with
+# subject_type=file, because the concern is PR-wide and the reader needs only a RESOLVABLE thread.
 raise_shortfall_hold() {
   local prose="$1" anchor_path body
   : "${HEAD_SHA:?HEAD_SHA required to anchor the hold thread}"
@@ -149,7 +153,7 @@ raise_shortfall_hold() {
   body="$(mktemp)"
   {
     cat "$prose"
-    printf '\n<sub>PR-wide hold: anchored to this file only to open a resolvable thread.</sub>\n\n%s\n' "$HUMAN_HOLD_MARKER"
+    printf '\n<sub>PR-wide hold: anchored to this file only to open a resolvable thread.</sub>\n\n%s\n' "$HOLD_THREAD_MARKER"
   } >"$body"
   retry gh api -X POST "repos/${GH_REPO}/pulls/${PR}/comments" \
     -f "commit_id=${HEAD_SHA}" -f "path=${anchor_path}" -f "subject_type=file" \
@@ -158,29 +162,23 @@ raise_shortfall_hold() {
   echo "raised the reviewer's hold thread on ${anchor_path} (head ${HEAD_SHA})" >&2
 }
 
-# shortfall_hold_overridden <owner> <name> <pr> <since> <latest> — prints `true` when a person
-# accepted the shortfall, else `false`. INVARIANT — the override needs one hold thread raised at
+# shortfall_hold_overridden <owner> <name> <pr> <since> <latest> — prints `true` when somebody
+# answered and resolved the shortfall's hold threads, else `false`. INVARIANT — the override needs one hold thread raised at
 # or after <latest>, the newest shortfall review, which its own thread follows. Every hold thread
 # raised from <since> on must also be REVIEW_THREAD_CLEARED. So a newer shortfall whose raise
 # failed holds until a complete read, and an old resolution vouches for nothing newer. The
 # caller must have EXPORTED REVIEWER_LOGIN_BARE.
 shortfall_hold_overridden() {
-  local owner="$1" name="$2" pr="$3" since="$4" latest="$5" author
-  author="$(pr_author_login "$owner" "$name" "$pr")"
-  PR_AUTHOR="$author" SHORTFALL_SINCE="$since" HUMAN_HOLD_MARKER="$HUMAN_HOLD_MARKER" \
+  local owner="$1" name="$2" pr="$3" since="$4" latest="$5"
+  SHORTFALL_SINCE="$since" HOLD_THREAD_MARKER="$HOLD_THREAD_MARKER" \
     fetch_review_threads "$owner" "$name" "$pr" \
     "[.[] | $REVIEW_THREAD_ROOT_IS_REVIEWER
           | (.comments.nodes[0].pullRequestReview.submittedAt // \"\") as \$at
-          | select((.comments.nodes[0].body // \"\") | contains(env.HUMAN_HOLD_MARKER))
+          | select((.comments.nodes[0].body // \"\") | contains(env.HOLD_THREAD_MARKER))
           | select(\$at >= env.SHORTFALL_SINCE)
           | {at: \$at, holds: ($REVIEW_THREAD_CLEARED | not)}]" |
     jq -rs --arg latest "$latest" \
       'add // [] | length > 0 and (map(.at) | max) >= $latest and all(.[]; .holds | not)'
-}
-
-# pr_author_login <owner> <name> <pr> — the PR author's login, `""` when GitHub names nobody.
-pr_author_login() {
-  retry_stdout gh api "repos/${1}/${2}/pulls/${3}" --jq '.user.login // ""'
 }
 
 # fetch_review_threads <owner> <name> <pr> <jq> [comments-per-thread] — walks every page, applying <jq> to each page's nodes ARRAY.

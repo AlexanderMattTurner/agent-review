@@ -61,7 +61,7 @@ REVIEW_READ="$(jq -r '.read // "first"' "$COVERAGE_FILE")"
 # raise_hold_if_short <refused-findings> — open the hold thread for a read that fell short,
 # AFTER the review that carries its shortfall marker: shortfall_hold_overridden accepts only
 # a thread at least as new as that review. A failed raise is a red step, and the merge stays
-# held on the marker, because only a person resolving a thread can stand in for the read.
+# held on the marker, because only a written answer on a thread can stand in for the read.
 raise_hold_if_short() {
   local refused="$1" prose
   [[ -f "$INCOMPLETE_FILE" ]] || ((refused > 0)) || return 0
@@ -74,7 +74,7 @@ raise_hold_if_short() {
     if ((refused > 0)); then
       printf -- '- %d finding(s) could not be posted as review threads; their text is in a comment on this pull request or the run log.\n' "$refused"
     fi
-    printf "\nA complete read clears this hold. A maintainer asks for one with the review label, or a commit titled \`[opus-review]\` from a trusted author. To merge without it, a person other than the author of this pull request resolves this thread.\n"
+    printf "\nA complete read clears this hold. A maintainer asks for one with the review label, or a commit titled \`[opus-review]\` from a trusted author.\n\nTo merge without it, the agent or person driving this pull request may settle this thread:\n\n1. Read the parts of the diff the reviewer did not read.\n2. Reply to this thread with a verdict and the evidence for it.\n3. Resolve this thread.\n\nA resolve with no reply leaves the hold in place.\n"
   } >"$prose"
   raise_shortfall_hold "$prose"
   rm -f "$prose"

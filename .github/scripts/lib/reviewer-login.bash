@@ -34,13 +34,9 @@ _REVIEWER_LOGIN_SOURCED=1
 # login comparison in these scripts is built from this, so no call site can
 # normalize one side of a comparison and not the other.
 #
-# `// ""` covers a null login (a deleted account, an unresolved thread's
-# `resolvedBy`, or a GraphQL node the token cannot see): it becomes the empty
-# string, which never equals a real login, so an unattributable review is never
-# credited to the reviewer. It does NOT make an unattributable RESOLUTION safe:
-# "" does not equal the author either, so a `!=` comparison against the author
-# PASSES for a null `resolvedBy`. The caller's separate `.resolvedBy != null`
-# conjunct is the check that blocks that one; neither is redundant.
+# `// ""` covers a null login (a deleted account, or a GraphQL node the token
+# cannot see): it becomes the empty string, which never equals a real login, so
+# an unattributable review is never credited to the reviewer.
 login_bare_jq() {
   local login_path="${1:?login_bare_jq: a jq path to the login is required}"
   printf '%s' "(((${login_path}) // \"\") | ascii_downcase | sub(\"\\\\[bot\\\\]\$\"; \"\"))"

@@ -11,7 +11,7 @@ No size skips the read. GitHub runs at most 256 parts of one read, so a diff tha
 
 A stranger's pull request could still start 256 parts on your credentials. So an author GitHub does not name `OWNER`, `MEMBER` or `COLLABORATOR` may start at most `max-untrusted-read-legs` parts, 4 by default. A larger diff from such an author gets no read until a person with triage access adds the `review-label` label. Until then the merge gate holds the pull request and says why.
 
-When the reviewer falls short — a part fails after its retries, a finding cannot be posted, or files go unread — it says so once, as a comment on the issue you name in `reviewer-defect-issue`, or in the job summary and a warning when you name none. The merge gate also holds the pull request, because code nobody read must not merge. A later complete read lifts the hold. So does a person other than the pull request's author, by resolving the hold thread the reviewer opens. The author can resolve that thread too, but the gate ignores the author's resolution.
+When the reviewer falls short — a part fails after its retries, a finding cannot be posted, or files go unread — it says so once, as a comment on the issue you name in `reviewer-defect-issue`, or in the job summary and a warning when you name none. The merge gate also holds the pull request, because code nobody read must not merge. A later complete read lifts the hold. So does whoever drives the pull request, the author or their agent included: they read the unread diff, reply to the hold thread the reviewer opens with a verdict and the evidence, and resolve it. The gate ignores a resolve with no reply.
 
 You call it from your own repository by `uses:`, pinned to a commit with the release version in a trailing comment.
 

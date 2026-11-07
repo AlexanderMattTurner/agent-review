@@ -57,7 +57,7 @@ fi
 {
   printf "The automated reviewer fell short on %s#%s at head \`%s\`:\n\n" "$GH_REPO" "$PR" "$HEAD_SHA"
   cat "$items"
-  printf '\nThe merge gate holds the pull request until a complete read, or until a person other than its author resolves the hold thread. Run: %s\n' "$RUN_URL"
+  printf '\nThe merge gate holds the pull request until a complete read, or until the agent or person driving it replies to the hold thread with a verdict and resolves it. Run: %s\n' "$RUN_URL"
 } >"$body"
 
 issue="${REVIEWER_DEFECT_ISSUE:-}"
