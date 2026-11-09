@@ -57,11 +57,9 @@ FIX_SUBJECT = re.compile(r"\w+ fix[(!:]")
 DEFINED = re.compile(
     r"(?:def|class|function)\s+(?P<keyword>\w+)|^\s*(?P<shell>\w+)\s*\(\)"
 )
-# Tests, docs and changelog fragments: a fix to one of these is not a product defect.
-NOT_PRODUCT = re.compile(
-    r"(?:^|/)(?:tests?|__tests__|docs?|changelog\.d)/|\.md$"
-    r"|(?:^|/)test_[^/]*$|_test\.[^/]+$|\.(?:test|spec)\.[^/]+$"
-)
+# Docs and changelog fragments hold no code, so a fix to one names no defect.
+# Tests stay in: a third fix to one flaky test is a repeat like any other.
+NOT_CODE = re.compile(r"(?:^|/)(?:docs?|changelog\.d)/|\.md$")
 # INVARIANT: no git call starts a program the repository or its config names: no
 # pager, no fsmonitor, and every call that prints a patch passes --no-ext-diff
 # and --no-textconv.
@@ -105,8 +103,8 @@ def safe(text: str, limit: int = 120) -> str:
     return re.sub(r"[^\x20-\x7e]|`", "?", text)[:limit]
 
 
-def is_product(path: str) -> bool:
-    return not NOT_PRODUCT.search(path)
+def is_code(path: str) -> bool:
+    return not NOT_CODE.search(path)
 
 
 def days_before_head(days: int) -> int:
@@ -136,7 +134,7 @@ def deepen(head: str) -> None:
 
 
 def touched_definitions(base: str, head: str) -> list[tuple[str, str]]:
-    """Each product (path, name) the PR changes, keyed by its path in the base.
+    """Each code (path, name) the PR changes, keyed by its path in the base.
 
     A renamed file is looked up under its old path and a new file is skipped:
     `git log -L` resolves the path at HEAD, which holds neither.
@@ -146,7 +144,7 @@ def touched_definitions(base: str, head: str) -> list[tuple[str, str]]:
     for line in git("diff", *PATCH, base, head).splitlines():
         if line.startswith("--- "):
             path = line.removeprefix("--- a/") if line != "--- /dev/null" else ""
-        elif line.startswith("@@") and path and is_product(path):
+        elif line.startswith("@@") and path and is_code(path):
             match = DEFINED.search(line.split("@@")[-1])
             name = match and (match["keyword"] or match["shell"])
             if name and (path, name) not in found:
@@ -178,7 +176,7 @@ def earlier_fixes(base: str, head: str) -> list[str]:
         for fix in filter(FIX_SUBJECT.match, log.splitlines()):
             named.add(fix.split()[0])
             lines.append(f"- {path} `{name}`: {safe(fix)}")
-    for path in sorted(filter(is_product, changed_paths(base, head))):
+    for path in sorted(filter(is_code, changed_paths(base, head))):
         log = git("log", since, "--format=%h %s", "--", path).splitlines()
         hits = [f for f in log if FIX_SUBJECT.match(f) and f.split()[0] not in named]
         lines.extend(f"- {path} (file): {safe(fix)}" for fix in hits[:3])
@@ -196,7 +194,7 @@ class ChangedLine:
 
 
 def changed_lines(base: str, head: str) -> list[ChangedLine]:
-    """Each distinctive changed product line, in diff order, at most MAX_COPY_LINES."""
+    """Each distinctive changed code line, in diff order, at most MAX_COPY_LINES."""
     found: list[ChangedLine] = []
     seen: set[str] = set()
     path, span = "", range(0)
@@ -209,7 +207,7 @@ def changed_lines(base: str, head: str) -> list[ChangedLine]:
         elif line[:1] in "+-" and not line.startswith(("+++", "---")):
             text = line[1:].strip()
             words = re.findall(r"\w{3,}", text)
-            distinct = len(words) >= 2 and text not in seen and is_product(path)
+            distinct = len(words) >= 2 and text not in seen and is_code(path)
             if MIN_COPY_CHARS <= len(text) <= 300 and distinct:
                 seen.add(text)
                 found.append(

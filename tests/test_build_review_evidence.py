@@ -69,6 +69,7 @@ def _pr(tmp_path: Path) -> tuple[Path, str, str]:
     )
     test_fix = "def test_fetch():\n    assert fetch\n"
     commit_files(work, {"tests/test_m.py": test_fix}, "fix(test): name fetch")
+    commit_files(work, {"docs/m.md": "# fetch\n\nretry once\n"}, "fix(docs): say retry")
     earlier = commit_files(work, {"m.py": _module(COPY)}, "fix(fetch): retry once")
     git_out(work, "checkout", "-qb", "pr")
     head = commit_files(work, {"m.py": _module("return 2")}, "fix(fetch): retry twice")
@@ -160,21 +161,43 @@ def test_a_head_that_is_not_a_sha_never_reaches_git(pr, head: str) -> None:
     assert not out.exists()
 
 
-def test_a_test_file_change_names_no_fix(pr) -> None:
-    """A test that `main` fixed before is not a product definition, so a PR that
-    edits it again leaves section (a) empty."""
-    checkout, _, _ = pr
+def _pr_on(checkout: Path, branch: str, files: dict[str, str]) -> str:
+    """Push a one-commit PR BRANCH off main that writes FILES; return its head."""
     work = checkout.parent / "work"
     git_out(work, "checkout", "-q", "main")
-    git_out(work, "checkout", "-qb", "tests-only")
-    head = commit_files(
-        work, {"tests/test_m.py": "def test_fetch():\n    assert 1\n"}, "fix(test): x"
+    git_out(work, "checkout", "-qb", branch)
+    head = commit_files(work, files, "fix: again")
+    git_out(work, "push", "-q", str(checkout.parent / "remote.git"), branch)
+    return head
+
+
+def _fixes(text: str) -> str:
+    return text.split("## (a)")[1].split("## (b)")[0]
+
+
+def test_a_test_that_main_fixed_before_is_named_again(pr) -> None:
+    """A second fix to one flaky test is a repeat like any other, so section (a)
+    names the earlier `fix(test)` commit on that test function."""
+    checkout, _, _ = pr
+    work = checkout.parent / "work"
+    earlier = git_out(work, "log", "-1", "--format=%h", "--grep=name fetch", "main")
+    head = _pr_on(
+        checkout, "tests-only", {"tests/test_m.py": "def test_fetch():\n    assert 1\n"}
     )
-    git_out(work, "push", "-q", str(checkout.parent / "remote.git"), "tests-only")
     _, out = _build(checkout, head)
-    text = out.read_text("utf-8")
-    fixes = text.split("## (a)")[1].split("## (b)")[0]
-    assert fixes.strip().endswith("- none found")
+    fixes = _fixes(out.read_text("utf-8"))
+    assert (
+        f"- tests/test_m.py `test_fetch`: {earlier.strip()} fix(test): name fetch"
+        in fixes
+    )
+
+
+def test_a_doc_that_main_fixed_before_names_no_fix(pr) -> None:
+    """A doc holds no code, so an earlier `fix` to it is no lead."""
+    checkout, _, _ = pr
+    head = _pr_on(checkout, "docs-only", {"docs/m.md": "# fetch\n\nretry twice\n"})
+    _, out = _build(checkout, head)
+    assert _fixes(out.read_text("utf-8")).strip().endswith("- none found")
 
 
 def test_the_report_stops_at_the_size_cap(pr, monkeypatch) -> None:
