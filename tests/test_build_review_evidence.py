@@ -9,6 +9,7 @@ comes from the GitHub API, which a test cannot reach.
 
 # covers: .github/reviewer/build-review-evidence.py
 
+import json
 import os
 import time
 from pathlib import Path
@@ -29,18 +30,34 @@ SCRIPT = REPO_ROOT / ".github" / "reviewer" / "build-review-evidence.py"
 COPY = "x = 'the runtime download failed; retry it after the mirror recovers'"
 # A doc line long enough to name a copy, in two non-code files and one code file.
 DOC = "retry the runtime download once the mirror recovers"
-PULLS = "repos/{owner}/{repo}/pulls"
+
+
+def _open_pr(number: int, created: str, files: list[str], title: str = "") -> dict:
+    """One `pullRequests` node of the open-PR GraphQL page."""
+    paths = {"nodes": [{"path": path} for path in files]}
+    return {"number": number, "title": title, "createdAt": created, "files": paths}
+
+
+# PR 9 is the PR under review, so it never names itself; PR 8 shares no file.
 OPEN_PRS = [
-    (f"{PULLS}/7/files", [{"filename": "m.py"}]),
-    (f"{PULLS}/8/files", [{"filename": "z.py"}]),
-    (f"{PULLS}/9/files", [{"filename": "m.py"}]),
     (
-        f"{PULLS}?",
-        [
-            {"number": 9, "created_at": "2026-01-01T00:00:00Z"},
-            {"number": 8, "created_at": "2026-01-03T00:00:00Z"},
-            {"number": 7, "created_at": "2026-01-02T00:00:00Z"},
-        ],
+        "graphql",
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [
+                            _open_pr(9, "2026-01-01T00:00:00Z", ["m.py"]),
+                            _open_pr(8, "2026-01-03T00:00:00Z", ["z.py"]),
+                            _open_pr(
+                                7, "2026-01-02T00:00:00Z", ["m.py"], "fix: retry `x`"
+                            ),
+                        ],
+                    }
+                }
+            }
+        },
     ),
 ]
 
@@ -123,7 +140,7 @@ def test_the_evidence_names_the_earlier_fix_the_copy_and_the_open_pr(pr) -> None
     text = out.read_text("utf-8")
     assert f"- m.py `fetch`: {earlier} fix(fetch): retry once" in text
     assert f"- removed `{COPY}` also at copy.sh:1" in text
-    assert "- #7 (opened 2026-01-02) also changes m.py" in text
+    assert '- #7 (opened 2026-01-02, "fix: retry ?x?") also changes m.py' in text
     assert "#8" not in text and "#9 " not in text
     assert not marker.exists()
     assert _build(checkout, head)[1].read_text("utf-8") == text
@@ -145,7 +162,7 @@ def test_a_failed_open_pr_list_is_not_known_and_the_git_sections_still_ship(pr) 
     proc, out = _build(checkout, head, [])
     assert proc.returncode == 0, proc.stderr
     text = out.read_text("utf-8")
-    assert f"- not known: gh api {PULLS}: gh: Not Found (HTTP 404)" in text
+    assert "- not known: gh api graphql: gh: Not Found (HTTP 404)" in text
     assert f"{earlier} fix(fetch): retry once" in text
     assert "::warning::review evidence: (c) Open PRs" in proc.stdout
 
@@ -228,3 +245,23 @@ def test_a_spent_budget_writes_a_file_that_says_so(pr, monkeypatch) -> None:
     monkeypatch.chdir(checkout)
     monkeypatch.setattr(module, "deadline", time.monotonic() - 1)
     assert "evidence budget is spent" in module.report(9, head)
+
+
+def test_the_open_pr_list_follows_every_page(monkeypatch) -> None:
+    """A repository with more open PRs than one page holds still has them all read."""
+    module = load_script(".github/reviewer/build-review-evidence.py")
+    pages = iter([("c1", True, 1), (None, False, 2)])
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], _label: str, **_kw) -> str:
+        calls.append(argv)
+        cursor, more, number = next(pages)
+        info = {"hasNextPage": more, "endCursor": cursor}
+        node = _open_pr(number, "2026-01-01T00:00:00Z", ["m.py"])
+        body = {"pageInfo": info, "nodes": [node]}
+        return json.dumps({"data": {"repository": {"pullRequests": body}}})
+
+    monkeypatch.setattr(module, "run", fake_run)
+    assert [pr["number"] for pr in module.open_prs()] == [1, 2]
+    assert calls[1][-2:] == ["-f", "cursor=c1"]
+    assert len(calls[0]) == len(calls[1]) - 2

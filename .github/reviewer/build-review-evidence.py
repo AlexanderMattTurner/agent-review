@@ -46,7 +46,7 @@ DEFINITIONS_MAX = 20
 # A changed line shorter than this is too common to name a copy.
 MIN_COPY_CHARS = 30
 MAX_COPY_LINES = 40
-MAX_OPEN_PRS = 30
+MAX_OPEN_PRS = 400
 SHELL_GLOBS = ("*.sh", "*.bash", "*.zsh")
 # The whole run's wall clock. The prepare job that runs this has its own timeout,
 # and a slow `git log -L` must cost the review its evidence, never its read.
@@ -259,33 +259,53 @@ def copies(base: str, head: str) -> list[str]:
     return lines
 
 
-def gh_json(path: str) -> list:
-    """One `gh api` GET that must answer a JSON list."""
-    label = f"gh api {path.split('?')[0]}"
-    body = json.loads(run(["gh", "api", path], label))
-    if not isinstance(body, list):
-        raise EvidenceError(f"{label}: the answer is not a JSON list")
-    return body
+# Every open PR with its files, a page per call: a per-PR files call costs one request
+# each, so it could only cover the most recently updated few.
+OPEN_PRS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 50, after: $cursor,
+                 orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number title createdAt files(first: 100) { nodes { path } } }
+    }
+  }
+}
+"""
+
+
+def open_prs() -> list[dict]:
+    """Each open PR, at most MAX_OPEN_PRS, with its title and up to 100 file paths."""
+    found: list[dict] = []
+    cursor: list[str] = []
+    while len(found) < MAX_OPEN_PRS:
+        argv = ["gh", "api", "graphql", "-f", f"query={OPEN_PRS_QUERY}"]
+        argv += ["-F", "owner={owner}", "-F", "name={repo}", *cursor]
+        page = json.loads(run(argv, "gh api graphql"))["data"]["repository"]
+        page = page["pullRequests"]
+        found += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = ["-f", f"cursor={page['pageInfo']['endCursor']}"]
+    return found[:MAX_OPEN_PRS]
 
 
 def open_pr_overlap(base: str, head: str, pr: int) -> list[str]:
-    """Section (c): the recently updated open PRs that change a path this PR changes."""
+    """Section (c): the open PRs that change a path this PR changes."""
     paths = changed_paths(base, head)
-    listed = gh_json(
-        "repos/{owner}/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=100"
-    )
-    hits: list[tuple[int, str, list[str]]] = []
-    for item in [p for p in listed if int(p["number"]) != pr][:MAX_OPEN_PRS]:
-        number = int(item["number"])
-        files = gh_json(f"repos/{{owner}}/{{repo}}/pulls/{number}/files?per_page=100")
-        shared = sorted(paths.intersection(str(f["filename"]) for f in files))
-        if shared:
-            hits.append((number, str(item["created_at"])[:10], shared))
-    hits.sort(key=lambda hit: (-len(hit[2]), hit[0]))
+    hits: list[tuple[int, str, str, list[str]]] = []
+    for item in open_prs():
+        files = (node["path"] for node in item["files"]["nodes"])
+        shared = sorted(paths.intersection(files))
+        if shared and int(item["number"]) != pr:
+            created = str(item["createdAt"])[:10]
+            hits.append((int(item["number"]), created, str(item["title"]), shared))
+    hits.sort(key=lambda hit: (-len(hit[3]), hit[0]))
+    # The title is how the read tells a duplicate fix from a PR that only shares a file.
     return [
-        f"- #{number} (opened {safe(created, 10)}) also changes "
+        f'- #{number} (opened {safe(created, 10)}, "{safe(title, 100)}") also changes '
         f"{', '.join(safe(f, 80) for f in shared[:4])}"
-        for number, created, shared in hits
+        for number, created, title, shared in hits
     ]
 
 
