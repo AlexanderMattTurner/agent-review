@@ -57,7 +57,7 @@ FIX_SUBJECT = re.compile(r"\w+ fix[(!:]")
 DEFINED = re.compile(
     r"(?:def|class|function)\s+(?P<keyword>\w+)|^\s*(?P<shell>\w+)\s*\(\)"
 )
-# Docs and changelog fragments hold no code, so a fix to one names no defect.
+# Docs, changelog fragments and Markdown files hold no code, so a fix to one is no lead.
 # Tests stay in: a third fix to one flaky test is a repeat like any other.
 NOT_CODE = re.compile(r"(?:^|/)(?:docs?|changelog\.d)/|\.md$")
 # INVARIANT: no git call starts a program the repository or its config names: no

@@ -27,6 +27,8 @@ from tests._helpers import (
 
 SCRIPT = REPO_ROOT / ".github" / "reviewer" / "build-review-evidence.py"
 COPY = "x = 'the runtime download failed; retry it after the mirror recovers'"
+# A doc line long enough to name a copy, in two non-code files and one code file.
+DOC = "retry the runtime download once the mirror recovers"
 PULLS = "repos/{owner}/{repo}/pulls"
 OPEN_PRS = [
     (f"{PULLS}/7/files", [{"filename": "m.py"}]),
@@ -69,7 +71,12 @@ def _pr(tmp_path: Path) -> tuple[Path, str, str]:
     )
     test_fix = "def test_fetch():\n    assert fetch\n"
     commit_files(work, {"tests/test_m.py": test_fix}, "fix(test): name fetch")
-    commit_files(work, {"docs/m.md": "# fetch\n\nretry once\n"}, "fix(docs): say retry")
+    docs = {
+        "docs/conf.py": f"{DOC}\n",
+        "NOTES.md": f"{DOC}\n",
+        "copy.sh": f"{COPY}\n{DOC}\n",
+    }
+    commit_files(work, docs, "fix(docs): say retry")
     earlier = commit_files(work, {"m.py": _module(COPY)}, "fix(fetch): retry once")
     git_out(work, "checkout", "-qb", "pr")
     head = commit_files(work, {"m.py": _module("return 2")}, "fix(fetch): retry twice")
@@ -177,27 +184,28 @@ def _fixes(text: str) -> str:
 
 def test_a_test_that_main_fixed_before_is_named_again(pr) -> None:
     """A second fix to one flaky test is a repeat like any other, so section (a)
-    names the earlier `fix(test)` commit on that test function."""
+    names the earlier `fix(test)` commit on that test, and (b) a copied test line."""
     checkout, _, _ = pr
     work = checkout.parent / "work"
     earlier = git_out(work, "log", "-1", "--format=%h", "--grep=name fetch", "main")
-    head = _pr_on(
-        checkout, "tests-only", {"tests/test_m.py": "def test_fetch():\n    assert 1\n"}
-    )
+    test = f"def test_fetch():\n    {COPY}\n"
+    head = _pr_on(checkout, "tests-only", {"tests/test_m.py": test})
     _, out = _build(checkout, head)
-    fixes = _fixes(out.read_text("utf-8"))
-    assert (
-        f"- tests/test_m.py `test_fetch`: {earlier.strip()} fix(test): name fetch"
-        in fixes
-    )
+    text = out.read_text("utf-8")
+    fixed = f"- tests/test_m.py `test_fetch`: {earlier.strip()} fix(test): name fetch"
+    assert fixed in _fixes(text)
+    assert f"- added `{COPY}` also at copy.sh:1, m.py:3" in text
 
 
-def test_a_doc_that_main_fixed_before_names_no_fix(pr) -> None:
-    """A doc holds no code, so an earlier `fix` to it is no lead."""
+@pytest.mark.parametrize("doc", ["docs/conf.py", "NOTES.md"])
+def test_a_doc_that_main_fixed_before_names_no_fix_and_no_copy(pr, doc: str) -> None:
+    """A doc holds no code, so its earlier `fix` and its copied line are no leads."""
     checkout, _, _ = pr
-    head = _pr_on(checkout, "docs-only", {"docs/m.md": "# fetch\n\nretry twice\n"})
+    head = _pr_on(checkout, "docs-only", {doc: "\n"})
     _, out = _build(checkout, head)
-    assert _fixes(out.read_text("utf-8")).strip().endswith("- none found")
+    text = out.read_text("utf-8")
+    assert _fixes(text).strip().endswith("- none found")
+    assert text.split("## (b)")[1].split("## (c)")[0].strip().endswith("- none found")
 
 
 def test_the_report_stops_at_the_size_cap(pr, monkeypatch) -> None:
