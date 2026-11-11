@@ -54,8 +54,9 @@ To do this, follow these steps precisely:
      - **Copies.** The diff makes the same change in two or more places, or the base checkout holds another copy of the changed logic, list, flag set, message or parser. A copy the diff edits by hand counts: the next change must find every copy again.
      - **Per-case closure.** The fix teaches a matcher, scanner, heuristic, counter or refusal list one more input shape: a table row, a regex arm, an `elif`, a string match, one more known state or signal.
      - **Compensator.** A wait, poll window, timeout, retry, self-heal, reap, cleanup, signal trap, exemption or per-site guard that repairs or hides a state another component left wrong.
+     - **Duplicate.** Section (c) of the evidence, or the PR body, names an open PR that changes the same file and whose title names the same defect. Title the finding with the one PR that should own the fix.
    - The body cites each earlier fix by SHA, each copy or earlier case as `path:line`, and the owner that should hold the behaviour once, with the copies deleted. Confirm each cited copy with Grep or Read before you keep the finding. A validator scores it 100 when the cited commits, copies or cases exist in the base checkout or the diff, even when the diff edits each of them.
-   - Do not file it when the PR deletes the copies or routes every caller through one owner, or when the defect has one site, no enumerated cases and no earlier fix of the same mechanism.
+   - Do not file it when the PR deletes the copies or routes every caller through one owner, or when the defect has one site, no enumerated cases, no earlier fix of the same mechanism and no duplicate open PR.
    - Example: the evidence lists `a1b2c3d fix(sbx): retry the runtime download` on `_fetch_runtime`, and this PR adds a second retry arm there. Title: `Root cause: one download helper owns the retry policy`. The body cites `a1b2c3d` and the copied retry loop in `fetch_image`, by path and line.
 
    Anchor each property finding on the changed line that implements the fix it faults. Its `body` names any site outside the diff as `path:line` in the base checkout.
