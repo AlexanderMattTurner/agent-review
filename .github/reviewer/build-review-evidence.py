@@ -295,7 +295,8 @@ def open_pr_overlap(base: str, head: str, pr: int) -> list[str]:
     paths = changed_paths(base, head)
     hits: list[tuple[int, str, str, list[str]]] = []
     for item in open_prs():
-        files = (node["path"] for node in item["files"]["nodes"])
+        # GitHub answers `files: null` for a PR too large to list; that PR alone is lost.
+        files = (node["path"] for node in (item["files"] or {"nodes": []})["nodes"])
         shared = sorted(paths.intersection(files))
         if shared and int(item["number"]) != pr:
             created = str(item["createdAt"])[:10]

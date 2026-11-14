@@ -167,6 +167,21 @@ def test_a_failed_open_pr_list_is_not_known_and_the_git_sections_still_ship(pr) 
     assert "::warning::review evidence: (c) Open PRs" in proc.stdout
 
 
+def test_a_pr_too_large_to_list_costs_only_its_own_line(pr) -> None:
+    """GitHub answers `files: null` for a PR too large to list; the others still show."""
+    checkout, head, _ = pr
+    nodes = OPEN_PRS[0][1]["data"]["repository"]["pullRequests"]["nodes"]
+    huge = {**_open_pr(6, "2026-01-04T00:00:00Z", []), "files": None}
+    page = {"pageInfo": {"hasNextPage": False, "endCursor": None}}
+    page["nodes"] = [huge, *nodes]
+    routes = [("graphql", {"data": {"repository": {"pullRequests": page}}})]
+    proc, out = _build(checkout, head, routes)
+    assert proc.returncode == 0, proc.stderr
+    text = out.read_text("utf-8")
+    assert '- #7 (opened 2026-01-02, "fix: retry ?x?") also changes m.py' in text
+    assert "#6" not in text
+
+
 def test_a_head_the_remote_lacks_writes_a_file_that_says_so(pr) -> None:
     """A failed fetch leaves no merge base; the run still ends 0 with a file."""
     checkout, _, _ = pr
