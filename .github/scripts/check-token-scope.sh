@@ -13,18 +13,28 @@ set -euo pipefail
 : "${TOKEN:?TOKEN must be set}"
 : "${TOKEN_SECRET_NAME:?TOKEN_SECRET_NAME must be set}"
 
-# Capture stderr so a network error gets surfaced instead of silently producing
-# an empty $HEADERS (which would misclassify a classic PAT as fine-grained).
-if ! HEADERS=$(curl --proto '=https' -sSf -I -H "Authorization: token $TOKEN" \
+# No -f: with -f curl discards the headers of an HTTP error, so the rate-limit
+# branch below could never see x-ratelimit-remaining. The status line is checked
+# instead. Stderr is captured so a network error is surfaced rather than
+# silently producing an empty $HEADERS (which would misclassify a classic PAT as
+# fine-grained).
+if ! HEADERS=$(curl --proto '=https' -sS -I -H "Authorization: token $TOKEN" \
   https://api.github.com/user 2>&1); then
-  # A shared token that has spent its hourly quota fails here too. Name that
+  echo "::error::Could not query GitHub to validate ${TOKEN_SECRET_NAME} scopes:" >&2
+  echo "$HEADERS" >&2
+  exit 1
+fi
+
+status=$(head -n 1 <<<"$HEADERS" | tr -d '\r' | awk '{print $2}')
+if ! [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+  # A shared token that has spent its hourly quota gets a 403 here. Name that
   # cause: "could not validate scopes" sends the reader to the token's scopes.
   if grep -qiE '^x-ratelimit-remaining: 0[[:space:]]*$' <<<"$HEADERS"; then
     reset=$(grep -i '^x-ratelimit-reset:' <<<"$HEADERS" | sed 's/^[^:]*: //' | tr -d '\r')
     echo "::error::${TOKEN_SECRET_NAME} has used its whole GitHub API rate limit until $(date -u -d "@${reset}" '+%H:%M UTC'). Another workflow spends the same token's quota; give this one its own token or move its schedule." >&2
     exit 1
   fi
-  echo "::error::Could not query GitHub to validate ${TOKEN_SECRET_NAME} scopes:" >&2
+  echo "::error::Could not query GitHub to validate ${TOKEN_SECRET_NAME} scopes (HTTP status '${status}'):" >&2
   echo "$HEADERS" >&2
   exit 1
 fi

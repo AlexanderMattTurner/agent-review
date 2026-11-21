@@ -17,11 +17,27 @@ SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-token-scope.sh"
 def run_scope_check(
     tmp_path: Path, headers: list[str], curl_exit: int = 0
 ) -> subprocess.CompletedProcess:
-    """Run check-token-scope.sh with a fake curl that emits the given headers."""
+    """Run check-token-scope.sh with a fake curl that emits the given headers.
+
+    Like real curl, the fake drops the headers of an HTTP error status and exits
+    22 when invoked with --fail / -f (including bundled flags such as -sSf).
+    """
     echo_lines = "\n".join(f"echo {h!r}" for h in headers)
     fake_curl = tmp_path / "curl"
     fake_curl.write_text(
-        f"#!/usr/bin/env bash\n{echo_lines}\nexit {curl_exit}\n", encoding="utf-8"
+        "#!/usr/bin/env bash\n"
+        'status=$(cat <<\'EOF\'\n'
+        f"{headers[0]}\nEOF\n)\n"
+        'status=${status#* }; status=${status%% *}\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in --fail|-[a-zA-Z]*f*)\n'
+        '    if [[ "$status" =~ ^[45] ]]; then\n'
+        '      echo "curl: (22) The requested URL returned error: $status" >&2; exit 22\n'
+        "    fi;;\n"
+        "  esac\n"
+        "done\n"
+        f"{echo_lines}\nexit {curl_exit}\n",
+        encoding="utf-8",
     )
     fake_curl.chmod(0o755)
     env = {
@@ -85,3 +101,26 @@ def test_the_error_names_the_secret_the_workflow_reads(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "SYNC_PAT_UNDER_TEST" in result.stdout + result.stderr
     assert "TEMPLATE_SYNC_TOKEN " not in result.stdout + result.stderr
+
+
+def test_rate_limited_token_gets_a_rate_limit_message(tmp_path: Path) -> None:
+    """A 403 with x-ratelimit-remaining: 0 must name the rate limit, not scopes."""
+    result = run_scope_check(
+        tmp_path,
+        [
+            "HTTP/2 403",
+            "x-ratelimit-remaining: 0",
+            "x-ratelimit-reset: 1700000000",
+        ],
+    )
+    assert result.returncode != 0
+    assert "rate limit" in result.stderr
+    assert "SYNC_PAT_UNDER_TEST" in result.stderr
+
+
+def test_other_http_errors_still_fail_loudly(tmp_path: Path) -> None:
+    """A 401 (bad token) is not a rate limit and must not pass as fine-grained."""
+    result = run_scope_check(tmp_path, ["HTTP/2 401", "x-ratelimit-remaining: 4999"])
+    assert result.returncode != 0
+    assert "rate limit" not in result.stderr
+    assert "401" in result.stderr
