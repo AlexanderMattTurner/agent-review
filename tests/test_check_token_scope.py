@@ -26,9 +26,9 @@ def run_scope_check(
     fake_curl = tmp_path / "curl"
     fake_curl.write_text(
         "#!/usr/bin/env bash\n"
-        'status=$(cat <<\'EOF\'\n'
+        "status=$(cat <<'EOF'\n"
         f"{headers[0]}\nEOF\n)\n"
-        'status=${status#* }; status=${status%% *}\n'
+        "status=${status#* }; status=${status%% *}\n"
         'for a in "$@"; do\n'
         '  case "$a" in --fail|-[a-zA-Z]*f*)\n'
         '    if [[ "$status" =~ ^[45] ]]; then\n'
