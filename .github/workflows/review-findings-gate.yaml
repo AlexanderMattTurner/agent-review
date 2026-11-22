@@ -76,6 +76,13 @@
 # `contents: read`, `statuses: write` and `pull-requests: write`. Omit
 # `statuses: write` and the verdict POST 403s: the run reds, and the head keeps
 # "Expected — Waiting for status to be reported" until something else pushes.
+#
+# The caller also needs a WORKFLOW-level `concurrency:` block keyed per pull
+# request and head sha, with `cancel-in-progress: false`, as review-gate.yaml
+# has. One review fires one event per finding. Without that block, the job-level
+# group below cancels a queued JOB, which posts a CANCELLED check run on the head.
+# Name the caller's group differently from `review-findings-gate-<pr>-<sha>`: a
+# job whose group equals its enclosing run's fails at once, with no steps.
 name: Review-findings gate (reusable)
 
 on:
