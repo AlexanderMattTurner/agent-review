@@ -461,48 +461,23 @@ def test_pre_push_check_runs_ruff_when_available(
     assert marker.read_text(encoding="utf-8").splitlines() == ["check", "."]
 
 
-RUFF_PIN_CONFIG = (
-    "repos:\n"
-    "  - repo: https://github.com/pre-commit/pre-commit-hooks\n"
-    "    rev: v6.0.0\n"
-    "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
-    '    rev: "v0.14.5"\n'
-    "  - repo: https://github.com/example/after\n"
-    "    rev: v9.9.9\n"
-)
-NO_RUFF_CONFIG = "repos:\n  - repo: https://github.com/example/other\n    rev: v1.0.0\n"
-
-
 @pytest.mark.parametrize(
-    ("config", "lockfile", "tools", "expected"),
-    [
-        (RUFF_PIN_CONFIG, False, ("uvx", "uv", "ruff"), ("uvx", "ruff@0.14.5 check .")),
-        (RUFF_PIN_CONFIG, True, ("uv", "ruff"), ("uv", "run ruff check .")),
-        (NO_RUFF_CONFIG, True, ("uvx", "uv", "ruff"), ("uv", "run ruff check .")),
-        (None, False, ("uvx", "uv", "ruff"), ("ruff", "check .")),
-    ],
-    ids=["pinned", "pinned-no-uvx", "no-ruff-entry-locked", "no-config"],
+    ("lockfile", "expected"),
+    [(True, ("uv", "run ruff check .")), (False, ("ruff", "check ."))],
+    ids=["locked", "path-ruff"],
 )
-def test_pre_push_check_picks_the_pinned_ruff_first(
-    pre_push_sandbox: Path,
-    config: str | None,
-    lockfile: bool,
-    tools: tuple[str, ...],
-    expected: tuple[str, str],
+def test_pre_push_check_falls_back_without_a_pin(
+    pre_push_sandbox: Path, lockfile: bool, expected: tuple[str, str]
 ) -> None:
-    """A PATH ruff of another version enables other default rules, so it reds a
-    tree CI passes. The pre-commit pin wins (read from the ruff entry, never a
-    neighbour's rev), then the locked `uv run ruff`, then the PATH ruff."""
+    """The sandbox has no PyYAML runner, so no pin is found: the locked
+    `uv run ruff` wins over the PATH ruff. The pinned path (`uvx ruff@X`) is
+    covered end to end by tests/test_ruff_pin.py."""
     (pre_push_sandbox / "pyproject.toml").write_text("", encoding="utf-8")
-    if config is not None:
-        (pre_push_sandbox / ".pre-commit-config.yaml").write_text(
-            config, encoding="utf-8"
-        )
     if lockfile:
         (pre_push_sandbox / "uv.lock").write_text("", encoding="utf-8")
     path = _minimal_path(pre_push_sandbox)
     log = pre_push_sandbox / "tool-calls.txt"
-    for tool in tools:
+    for tool in ("uv", "ruff"):
         script = Path(path) / tool
         script.write_text(
             f'#!/bin/bash\necho "{tool} $*" >> "{log}"\n', encoding="utf-8"
