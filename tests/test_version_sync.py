@@ -30,6 +30,7 @@ independently so a failure names the exact file pair that drifted.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,14 +81,29 @@ def _session_setup_pin(tool: str) -> str:
     )
 
 
+def _precommit_ruff_pin() -> str:
+    scripts = REPO_ROOT / ".github" / "scripts"
+    run = subprocess.run(
+        [
+            "bash",
+            scripts / "run-with-pyyaml.sh",
+            scripts / "ruff_pin.py",
+            PRE_COMMIT_CFG,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert run.stdout.strip(), f"ruff_pin.py found no ruff pin in {PRE_COMMIT_CFG}"
+    return run.stdout.strip()
+
+
 def _ruff_pins() -> dict[str, str]:
     # rev: sits on the line directly under the repo:, so no DOTALL — keeping the
     # match line-local prevents .* from skipping across to another repo's rev:.
     return {
         "session-setup.sh": _session_setup_pin("ruff"),
-        ".pre-commit-config.yaml": _search(
-            r"astral-sh/ruff-pre-commit\s+rev:\s+v?(\S+)", PRE_COMMIT_CFG
-        ),
+        ".pre-commit-config.yaml": _precommit_ruff_pin(),
     }
 
 

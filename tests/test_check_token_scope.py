@@ -19,24 +19,24 @@ def run_scope_check(
 ) -> subprocess.CompletedProcess:
     """Run check-token-scope.sh with a fake curl that emits the given headers.
 
-    Like real curl, the fake drops the headers of an HTTP error status and exits
-    22 when invoked with --fail / -f (including bundled flags such as -sSf).
+    The fake honours the flags the script uses: `-D FILE` receives the headers
+    (stdout when absent) and `-w '%{http_code}'` prints the code of the last HTTP status line. A failing
+    curl writes the lines to stderr, like the real one.
     """
+    status = [h.split()[1] for h in headers if h.startswith("HTTP/")][-1:] or ["000"]
     echo_lines = "\n".join(f"echo {h!r}" for h in headers)
     fake_curl = tmp_path / "curl"
     fake_curl.write_text(
-        "#!/usr/bin/env bash\n"
-        "status=$(cat <<'EOF'\n"
-        f"{headers[0]}\nEOF\n)\n"
-        "status=${status#* }; status=${status%% *}\n"
-        'for a in "$@"; do\n'
-        '  case "$a" in --fail|-[a-zA-Z]*f*)\n'
-        '    if [[ "$status" =~ ^[45] ]]; then\n'
-        '      echo "curl: (22) The requested URL returned error: $status" >&2; exit 22\n'
-        "    fi;;\n"
-        "  esac\n"
-        "done\n"
-        f"{echo_lines}\nexit {curl_exit}\n",
+        f"""#!/usr/bin/env bash
+dump=/dev/stdout write_out=
+while [[ $# -gt 0 ]]; do
+  case "$1" in -D) dump=$2; shift;; -w) write_out=$2; shift;; esac
+  shift
+done
+if [[ {curl_exit} -ne 0 ]]; then ( {echo_lines} ) >&2; exit {curl_exit}; fi
+( {echo_lines} ) >"$dump"
+[[ -z $write_out ]] || printf %s {status[0]}
+""",
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
@@ -52,6 +52,22 @@ def run_scope_check(
         capture_output=True,
         text=True,
     )
+
+
+def test_the_status_is_the_apis_not_the_proxys_connect_reply(tmp_path: Path) -> None:
+    """Behind an HTTPS proxy the header dump opens with the CONNECT reply, so a
+    real 403 read as 200 and the check passed."""
+    result = run_scope_check(
+        tmp_path,
+        [
+            "HTTP/1.1 200 Connection Established",
+            "",
+            "HTTP/2 403",
+            "x-ratelimit-remaining: 5",
+        ],
+    )
+    assert result.returncode == 1
+    assert "HTTP status '403'" in result.stderr
 
 
 def test_passes_for_fine_grained_pat(tmp_path: Path) -> None:

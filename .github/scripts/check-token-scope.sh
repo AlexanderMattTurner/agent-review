@@ -14,18 +14,23 @@ set -euo pipefail
 : "${TOKEN_SECRET_NAME:?TOKEN_SECRET_NAME must be set}"
 
 # No -f: with -f curl discards the headers of an HTTP error, so the rate-limit
-# branch below could never see x-ratelimit-remaining. The status line is checked
-# instead. Stderr is captured so a network error is surfaced rather than
-# silently producing an empty $HEADERS (which would misclassify a classic PAT as
-# fine-grained).
-if ! HEADERS=$(curl --proto '=https' -sS -I -H "Authorization: token $TOKEN" \
-  https://api.github.com/user 2>&1); then
+# branch below could never see x-ratelimit-remaining. curl reports the status
+# itself (-w): behind an HTTPS proxy the first header line is the CONNECT reply,
+# "200 Connection Established", not the API's. Stderr is captured so a network
+# error is surfaced rather than yielding empty headers (which would misclassify
+# a classic PAT as fine-grained).
+hdrfile=$(mktemp)
+errfile=$(mktemp)
+trap 'rm -f "$hdrfile" "$errfile"' EXIT
+if ! status=$(curl --proto '=https' -sS -I --suppress-connect-headers -o /dev/null \
+  -D "$hdrfile" -w '%{http_code}' -H "Authorization: token $TOKEN" \
+  https://api.github.com/user 2>"$errfile"); then
   echo "::error::Could not query GitHub to validate ${TOKEN_SECRET_NAME} scopes:" >&2
-  echo "$HEADERS" >&2
+  cat "$errfile" >&2
   exit 1
 fi
+HEADERS=$(<"$hdrfile")
 
-status=$(head -n 1 <<<"$HEADERS" | tr -d '\r' | awk '{print $2}')
 if ! [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
   # A shared token that has spent its hourly quota gets a 403 here. Name that
   # cause: "could not validate scopes" sends the reader to the token's scopes.
