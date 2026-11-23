@@ -11,7 +11,8 @@ shallow checkout to the review window, fetches the PR head's objects as data (ne
 checked out), and writes three sections:
 
   (a) the `fix` commits of the window that changed a definition or file the PR changes;
-  (b) copies of the PR's changed lines, and same-named definitions, elsewhere in the tree;
+  (b) copies of the PR's changed lines, other definitions of each name it changes or
+      adds, and rare text it adds that a few production files already hold;
   (c) open PRs that change the same files.
 
 Every line holds a path:line, a SHA or a PR number, and the file stops at MAX_BYTES.
@@ -47,6 +48,17 @@ DEFINITIONS_MAX = 20
 MIN_COPY_CHARS = 30
 MAX_COPY_LINES = 40
 MAX_OPEN_PRS = 400
+# A name defined in more places than this is a convention, not one job's owner.
+MAX_OTHER_DEFINITIONS = 5
+# A token in more files than this is a convention; one in fewer is a lead.
+MAX_RARE_FILES = 5
+MAX_RARE_TOKENS = 300
+# A token with no space that names a flag, path, file, unit key or address.
+RARE = re.compile(r"(?<![\w-])(?:[-./][\w.-]{3,}[\w=]|[\w.-]*[\w][-.:/=@][\w.:/=@-]*)")
+# Tests repeat product text on purpose, so a test file is no copy.
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?/|test_[^/]*$|conftest\.py$)|\.test\.\w+$")
+# `self.name` or `module.func`: attribute access repeats by design.
+ATTRIBUTE = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
 SHELL_GLOBS = ("*.sh", "*.bash", "*.zsh")
 # The whole run's wall clock. The prepare job that runs this has its own timeout,
 # and a slow `git log -L` must cost the review its evidence, never its read.
@@ -152,6 +164,53 @@ def touched_definitions(base: str, head: str) -> list[tuple[str, str]]:
     return found[:DEFINITIONS_MAX]
 
 
+def added_definitions(base: str, head: str) -> list[tuple[str, str]]:
+    """Each code (path, name) a `+` line of the PR defines, keyed by its new path.
+
+    touched_definitions reads hunk headers, which name the definition AROUND a
+    change, so a definition the PR adds is in neither list without this.
+    """
+    found: list[tuple[str, str]] = []
+    path = ""
+    for line in git("diff", *PATCH, base, head).splitlines():
+        if line.startswith("+++ "):
+            path = line.removeprefix("+++ b/") if line != "+++ /dev/null" else ""
+        elif (
+            line.startswith("+")
+            and not line.startswith("+++")
+            and path
+            and is_code(path)
+        ):
+            if TEST_PATH.search(path):
+                continue
+            match = DEFINED.search(line[1:])
+            name = match and (match["keyword"] or match["shell"])
+            if name and len(name) > 3 and (path, name) not in found:
+                found.append((path, name))
+    return found[:DEFINITIONS_MAX]
+
+
+def rare_tokens(base: str, head: str) -> list[tuple[str, str]]:
+    """Each distinctive token a `+` line of production code adds, with its path."""
+    found: dict[str, str] = {}
+    path = ""
+    for line in git("diff", *PATCH, base, head).splitlines():
+        if line.startswith("+++ "):
+            path = line.removeprefix("+++ b/")
+        elif line.startswith("+") and not line.startswith("+++") and is_code(path):
+            if TEST_PATH.search(path):
+                continue
+            for token in RARE.findall(line[1:]):
+                token = token.rstrip(".:")
+                if (
+                    len(token) >= 8
+                    and not ATTRIBUTE.fullmatch(token)
+                    and token not in found
+                ):
+                    found[token] = path
+    return list(found.items())[:MAX_RARE_TOKENS]
+
+
 def changed_paths(base: str, head: str) -> set[str]:
     """Every path the PR changes, under its old and its new name."""
     out = git("diff", "--name-status", "-M", base, head)
@@ -219,7 +278,8 @@ def changed_lines(base: str, head: str) -> list[ChangedLine]:
 def copies(base: str, head: str) -> list[str]:
     """Section (b): other definitions of a changed name, and changed lines found elsewhere."""
     lines: list[str] = []
-    for path, name in touched_definitions(base, head):
+    definitions = touched_definitions(base, head) + added_definitions(base, head)
+    for path, name in dict.fromkeys(definitions):
         keyword = rf"(def|class|function)[[:space:]]+{name}\b"
         hits = git("grep", "-n", "-I", "-E", "-e", keyword, ok=(0, 1)).splitlines()
         # `name()` alone is a call in most languages, so it names a definition only in shell.
@@ -235,9 +295,25 @@ def copies(base: str, head: str) -> list[str]:
                 if not h.startswith(f"{path}:")
             }
         )
-        if others:
+        if others and len(others) <= MAX_OTHER_DEFINITIONS:
             lines.append(
                 f"- `{name}` ({path}) is also defined at {', '.join(others[:5])}"
+            )
+    pr_paths = changed_paths(base, head)
+    tokens = rare_tokens(base, head)
+    # One `git grep -o` for every token: one call per token would spend the budget.
+    patterns = [arg for token, _ in tokens for arg in ("-e", token)]
+    holders: dict[str, set[str]] = {}
+    out = git("grep", "-o", "-I", "-F", *patterns, ok=(0, 1)) if tokens else ""
+    for hit in out.splitlines():
+        where, _, token = hit.partition(":")
+        if where not in pr_paths and not TEST_PATH.search(where):
+            holders.setdefault(token, set()).add(where)
+    for token, path in tokens:
+        others = sorted(holders.get(token, ()))
+        if 0 < len(others) <= MAX_RARE_FILES:
+            lines.append(
+                f"- added `{safe(token, 80)}` ({path}) is already in {', '.join(others)}"
             )
     for changed in changed_lines(base, head):
         hits = []
@@ -310,18 +386,43 @@ def open_pr_overlap(base: str, head: str, pr: int) -> list[str]:
     ]
 
 
-def section(title: str, build: Callable[[], list[str]]) -> str:
-    """One section's markdown; a section that fails says why it is not known."""
+def section(title: str, build: Callable[[], list[str]]) -> tuple[str, list[str]]:
+    """One section's lines; a section that fails says why it is not known."""
     try:
         lines = build()
     # The evidence is advisory: one failed section must not cost the read the others.
     except (EvidenceError, OSError, ValueError, KeyError, TypeError) as err:
         print(f"::warning::review evidence: {title}: {safe(str(err), 300)}")
         lines = [f"- not known: {safe(str(err), 200)}"]
-    body = lines[:SECTION_LINES] or ["- none found"]
-    if len(lines) > SECTION_LINES:
-        body.append(f"- ... {len(lines) - SECTION_LINES} more cut")
-    return f"\n## {title}\n\n" + "\n".join(body) + "\n"
+    return title, lines
+
+
+def render(sections: list[tuple[str, list[str]]], budget: int) -> str:
+    """Each section's markdown inside BUDGET bytes. The smallest section is cut
+    last, and the bytes it leaves go to the larger ones, so no section is lost."""
+    kept: dict[int, list[str]] = {}
+    order = sorted(
+        range(len(sections)),
+        key=lambda i: sum(map(len, sections[i][1][:SECTION_LINES])),
+    )
+    for rank, i in enumerate(order):
+        share = budget // (len(sections) - rank)
+        title, lines = sections[i]
+        body: list[str] = []
+        used = len(title) + 40
+        for line in lines[:SECTION_LINES]:
+            if used + len(line) + 1 > share:
+                break
+            body.append(line)
+            used += len(line) + 1
+        if len(lines) > len(body):
+            body.append(f"- ... {len(lines) - len(body)} more cut")
+        kept[i] = body or ["- none found"]
+        budget -= used
+    return "".join(
+        f"\n## {title}\n\n" + "\n".join(kept[i]) + "\n"
+        for i, (title, _) in enumerate(sections)
+    )
 
 
 def report(pr: int, head: str) -> str:
@@ -335,15 +436,18 @@ def report(pr: int, head: str) -> str:
         base = git("merge-base", "HEAD", head).strip()
     except EvidenceError as err:
         return text + f"\nNo merge base ({safe(str(err))}), so no evidence.\n"
-    text += section(
-        f"(a) Fix commits of the {WINDOW_DAYS} days before the base that changed what this PR changes",
-        lambda: earlier_fixes(base, head),
-    )
-    text += section("(b) Copies elsewhere in the base tree", lambda: copies(base, head))
-    text += section(
-        "(c) Open PRs that change the same files",
-        lambda: open_pr_overlap(base, head, pr),
-    )
+    sections = [
+        section(
+            f"(a) Fix commits of the {WINDOW_DAYS} days before the base that changed what this PR changes",
+            lambda: earlier_fixes(base, head),
+        ),
+        section("(b) Copies elsewhere in the base tree", lambda: copies(base, head)),
+        section(
+            "(c) Open PRs that change the same files",
+            lambda: open_pr_overlap(base, head, pr),
+        ),
+    ]
+    text += render(sections, MAX_BYTES - len(text.encode()) - 40)
     if len(text.encode()) > MAX_BYTES:
         text = text.encode()[:MAX_BYTES].decode(errors="ignore").rsplit("\n", 1)[0]
         text += "\n... cut at the size cap\n"

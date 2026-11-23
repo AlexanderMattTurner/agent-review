@@ -149,7 +149,7 @@ on:
         default: 1500
         type: number
       root-cause-evidence:
-        description: "Give the read a file of at most 8000 bytes, built before it starts: the `fix` commits of the last 30 days that changed what the PR changes, copies of its changed lines in the base tree, and open pull requests on the same files. The prompt's root-cause finding cites it. false builds none, and the read then judges a root cause from the diff and the checkout alone."
+        description: "Give the read a file of at most 8000 bytes, built before it starts: the `fix` commits of the last 30 days that changed what the PR changes, copies of its changed lines, definitions and rare text in the base tree, and open pull requests on the same files. The prompt's root-cause finding cites it. false builds none, and the read then judges a root cause from the diff and the checkout alone."
         required: false
         default: true
         type: boolean

@@ -86,7 +86,7 @@ Two secrets are what the reviewer costs. Everything else is a knob:
 | `max-untrusted-read-legs`  | `4`                   | The most read parts an author outside your repository may start, from 0 to 999. A larger diff from such an author gets no read until somebody adds the `review-label` label, and the merge gate holds it meanwhile.                                                             |
 | `reviewer-defect-issue`    | none                  | An issue number in YOUR repository. When the reviewer falls short on a pull request, it comments there once with the pull request, the head, what fell short and the run. Empty writes the job summary and a warning instead. The merge gate holds the pull request either way. |
 | `review-timeout-seconds`   | `1500`                | The wall clock one credential attempt may spend on the read, rounded up to whole minutes.                                                                                                                                                                                       |
-| `root-cause-evidence`      | `true`                | Build the evidence file the `Root cause:` finding cites: earlier `fix` commits, copies of the changed lines, and overlapping open pull requests, at most 8000 bytes. `false` builds none.                                                                                       |
+| `root-cause-evidence`      | `true`                | Build the evidence file the `Root cause:` finding cites: earlier `fix` commits, copies of the changed lines, definitions and rare text, and overlapping open pull requests, at most 8000 bytes. `false` builds none.                                                            |
 
 ## The read
 
