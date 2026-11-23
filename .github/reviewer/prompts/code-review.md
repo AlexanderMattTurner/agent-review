@@ -27,7 +27,7 @@ To do this, follow these steps precisely:
 
 2. Launch a helper-model agent to read the metadata file and the diff file and return a summary of the changes.
 
-3. Launch Agents 1-4 and Agent 6 in parallel, plus Agent 5 when it applies, to independently review the changes. Each agent should return the list of issues, where each issue includes a description, the file and line, and the reason it was flagged (e.g. "CLAUDE.md adherence", "bug", "security"). The agents should do the following:
+3. Launch Agents 1-4, 6a and 6b in parallel, plus Agent 5 when it applies, to independently review the changes. Each agent should return the list of issues, where each issue includes a description, the file and line, and the reason it was flagged (e.g. "CLAUDE.md adherence", "bug", "security"). The agents should do the following:
 
    Agents 1 + 2: CLAUDE.md compliance helper-model agents. Audit changes for CLAUDE.md compliance in parallel. Note: When evaluating CLAUDE.md compliance for a file, you should only consider CLAUDE.md files that share a file path with the file or parents. A `.claude/rules/*.md` file governs exactly the files its `paths:` globs match, or every file when it has no `paths:` front matter; treat its rules as CLAUDE.md rules for those files.
 
@@ -47,11 +47,12 @@ To do this, follow these steps precisely:
    - **Already closed.** The base checkout already closes the cause, so the PR is redundant or fights the existing fix. Say where the base closes it. Skip this shape when the metadata's `baseRefName` is not the default branch the starting message names, because the checkout is then not the PR's base.
    - **Per-case closure.** The PR closes the property one case at a time, for example a refusal that lists only the cases it has met. The next case of the same property stays open.
 
-   Agent 6: top-model copy agent. Launch it on every PR. It finds a job the PR writes a second time:
+   Agents 6a and 6b: top-model copy agents. Launch both on every PR. Agent 6a reads only the diff's production files; Agent 6b reads only its test files and test helpers. Each finds a job the PR writes a second time:
    1. List each function, list, table, CLI verb, platform branch, parser, rendered config text and test helper the diff adds. Include each loop or check inside a function.
    2. For each, write its job in at most eight words, for example "read the mount table" or "pick the scratch folder on a Mac".
-   3. Grep the base checkout for that job by the words the job needs, not by the new name: the file it reads, the flag it passes, the format it parses, the predicate it branches on. Also compare it with the rest of the diff.
-   4. Read each lead in section (b) of the evidence file, when the starting message names one.
+   3. Grep the base checkout for that job by the words the job needs, not by the new name: the file it reads, the flag it passes, the format it parses, the predicate it branches on. Search the other test files for each test helper, fixture, stub and wait loop.
+   4. Compare each new function with the other new functions and with the function it sits in: a value computed twice, a store walked twice, two functions that differ by one step, a rule or message written in two places (code, docs or skill text).
+   5. Read each lead in section (b) of the evidence file, when the starting message names one.
       Shapes that count: a parser for a format a base function already parses; a check written twice; a CLI verb that prints what an existing table or verb prints; config lines (unit properties, flags) that a base module already renders; a literal path, name or number a base function derives; two test helpers or stubs that do one job.
       File one `Root cause: <the existing owner>` finding for each job that the base checkout or another part of the diff already does. The body cites both sites as `path:line` and names the fix: call the owner, or move both into it. A copy is a finding even when both copies are correct today.
 
@@ -76,7 +77,7 @@ To do this, follow these steps precisely:
    - The code will definitely produce wrong results regardless of inputs (clear logic errors)
    - Clear, unambiguous CLAUDE.md violations where you can quote the exact rule being broken
    - An Agent 5 finding of one of its five shapes, or its `Root cause:` finding, at a site you can cite
-   - An Agent 6 copy finding that cites both sites
+   - An Agent 6a or 6b copy finding that cites both sites
 
    Do NOT flag:
    - Code style or quality concerns
@@ -99,7 +100,7 @@ To do this, follow these steps precisely:
 6. Return the structured output. Its schema is enforced, so fill each field as follows:
    - `summary`: at most 120 words. State the verdict in the first line. If the sanitizer report lists neutralized content, say so, because a human should know the diff carried it. If the report is empty, do not mention the sanitizer. If no issues survived step 5, write "No issues found. Checked for bugs and CLAUDE.md compliance." When Agent 5 ran, write "No issues found. Checked for bugs, CLAUDE.md compliance and the property the PR claims to close." instead.
    - `findings`: ONE entry per unique issue that survived step 5. Never add an issue that did not survive it.
-   - `category`: `bug` for a logic or compile error and for every Agent 5 property finding or Agent 6 copy finding, `security` for a security issue, `claude-md` for a CLAUDE.md violation.
+   - `category`: `bug` for a logic or compile error and for every Agent 5 property finding or Agent 6a or 6b copy finding, `security` for a security issue, `claude-md` for a CLAUDE.md violation.
    - `confidence`: the validator's score from step 4.
    - `title`: one line. `body`: a brief description of the issue. For a CLAUDE.md issue, quote the rule and name the CLAUDE.md file that holds it.
    - `suggestion`: for a small, self-contained fix, the exact replacement text for the anchored lines. Leave it out for a larger fix (6+ lines, structural changes, or changes spanning multiple locations), and describe the fix in `body` instead. Never give a suggestion UNLESS committing it fixes the issue entirely.
