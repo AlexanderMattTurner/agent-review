@@ -56,6 +56,8 @@ MAX_RARE_FILES = 5
 MAX_RARE_TOKENS = 300
 # A longer added line is generated or minified text, and a regex scan of it costs O(n^2).
 MAX_SCAN_CHARS = 300
+# An added line this long, added twice, is one job written twice.
+MIN_REPEAT_CHARS = 25
 # A token longer than this is no name, and 300 of them must fit one git argv.
 MAX_TOKEN_CHARS = 100
 # A token with no space that names a flag, path, file, unit key or address.
@@ -282,9 +284,51 @@ def changed_lines(base: str, head: str) -> list[ChangedLine]:
     return found[:MAX_COPY_LINES]
 
 
+def repeats_in_diff(base: str, head: str) -> list[str]:
+    """Two sites the PR itself adds for one job: a name it defines twice, and a
+    production line of MIN_REPEAT_CHARS or more it adds in two places."""
+    defined: dict[str, list[str]] = {}
+    added: dict[str, list[tuple[str, int]]] = {}
+    path, number = "", 0
+    for line in git("diff", *PATCH, base, head).splitlines():
+        if line.startswith("+++ "):
+            path = line.removeprefix("+++ b/") if line != "+++ /dev/null" else ""
+        elif line.startswith("@@"):
+            number = int(line.split()[2].lstrip("+").partition(",")[0])
+        elif line.startswith("+") and path and is_code(path):
+            text = " ".join(line[1:].split())
+            if len(text) <= MAX_SCAN_CHARS:
+                match = DEFINED.search(line[1:])
+                shell = any(fnmatch.fnmatch(path, glob) for glob in SHELL_GLOBS)
+                name = match and (match["keyword"] or (shell and match["shell"]))
+                if name and len(name) > 3:
+                    defined.setdefault(name, []).append(f"{path}:{number}")
+                if len(text) >= MIN_REPEAT_CHARS and not TEST_PATH.search(path):
+                    added.setdefault(text, []).append((path, number))
+            number += 1
+    lines = [
+        f"- `{name}` is defined {len(sites)} times in this PR: {', '.join(safe(s, 80) for s in sites)}"
+        for name, sites in defined.items()
+        if len(sites) > 1
+    ]
+    for text, sites in added.items():
+        # Two lines of one block (a list's items) are one site, not a copy.
+        apart = {
+            (p, n)
+            for p, n in sites
+            if not any(q == p and 0 < n - m < 4 for q, m in sites)
+        }
+        if len(apart) > 1:
+            where = ", ".join(safe(f"{p}:{n}", 80) for p, n in sorted(apart))
+            lines.append(
+                f"- added `{safe(text, 90)}` at {len(apart)} sites in this PR: {where}"
+            )
+    return lines
+
+
 def copies(base: str, head: str) -> list[str]:
     """Section (b): other definitions of a changed name, and changed lines found elsewhere."""
-    lines: list[str] = []
+    lines = repeats_in_diff(base, head)
     definitions = touched_definitions(base, head) + added_definitions(base, head)
     for path, name in dict.fromkeys(definitions):
         keyword = rf"(def|class|function)[[:space:]]+{name}\b"

@@ -188,6 +188,30 @@ def test_a_definition_and_a_rare_token_the_pr_adds_are_named(pr) -> None:
     assert "(pkg/call.py)" not in text
 
 
+def test_a_job_the_pr_writes_twice_is_named_with_both_sites(pr) -> None:
+    """A name the PR defines in two files, and a production line it adds in two
+    places, are copies inside the diff. Adjacent lines and test lines are not."""
+    checkout, _, _ = pr
+    loop = "    for store in (objects, *alternates):\n"
+    pair = "x = 'one long line of setup text'\n" * 2
+    files = {
+        "pkg/a.py": f"def helper_one():\n{loop}",
+        "pkg/b.sh": "helper_one() {\n  :\n}\n",
+        "pkg/c.py": f"def other_two():\n{loop}{pair}",
+        "tests/test_d.py": pair + pair,
+    }
+    _, out = _build(checkout, _pr_on(checkout, "twice", files))
+    text = out.read_text("utf-8")
+    assert (
+        "- `helper_one` is defined 2 times in this PR: pkg/a.py:1, pkg/b.sh:1\n" in text
+    )
+    assert (
+        "- added `for store in (objects, *alternates):` at 2 sites in this PR: "
+        "pkg/a.py:2, pkg/c.py:2\n"
+    ) in text
+    assert "one long line" not in text
+
+
 def test_a_long_section_cannot_cut_a_short_one() -> None:
     """The open-PR line survives two sections that each fill the budget alone."""
     module = load_script(".github/reviewer/build-review-evidence.py")
