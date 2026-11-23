@@ -82,7 +82,8 @@ def _pr(tmp_path: Path) -> tuple[Path, str, str]:
             "lib.py": "def fetch():\n    return `x`\n",
             "run.py": "def go():\n    fetch()\n",
             "util.sh": "fetch() {\n  :\n}\n",
-            "unit.conf": "RuntimeDirectory=gate\n",
+            "unit.conf": "RuntimeDirectory=gate\nself.runtime_dir\nOther=value-x\n",
+            "tests/units.txt": "RuntimeDirectory=gate\n",
             "tests/test_m.py": "def test_fetch():\n    assert True\n",
         },
         "feat: add fetch",
@@ -158,11 +159,17 @@ def test_another_definition_is_named_by_path_and_line_and_a_call_is_not(pr) -> N
 
 
 def test_a_definition_and_a_rare_token_the_pr_adds_are_named(pr) -> None:
-    """A new file's `fetch` has three owners in the base; its unit key has one. A
-    test file's copy and an attribute name are no leads."""
+    """A new file's `fetch` has three owners in the base; its unit key has one
+    production holder, since a test file is no holder. A test file's copy, an
+    attribute name, a Python call and a minified line are no leads."""
     checkout, _, _ = pr
     added = "def fetch():\n    self.runtime_dir = 'RuntimeDirectory=gate'\n"
-    files = {"pkg/new.py": added, "tests/test_new.py": "K = 'Other=value-x'\n"}
+    files = {
+        "pkg/new.py": added,
+        "pkg/call.py": "fetch()\n",
+        "pkg/min.py": f"z = '{'a' * 300} Other=value-x'\n",
+        "tests/test_new.py": "K = 'Other=value-x'\n",
+    }
     head = _pr_on(
         checkout,
         "adds",
@@ -178,6 +185,7 @@ def test_a_definition_and_a_rare_token_the_pr_adds_are_named(pr) -> None:
         "- added `RuntimeDirectory=gate` (pkg/new.py) is already in unit.conf\n" in text
     )
     assert "self.runtime_dir" not in text and "Other=value-x" not in text
+    assert "(pkg/call.py)" not in text
 
 
 def test_a_long_section_cannot_cut_a_short_one() -> None:
@@ -187,6 +195,14 @@ def test_a_long_section_cannot_cut_a_short_one() -> None:
     text = module.render([("(a)", long), ("(b)", long), ("(c)", ["- #7 also"])], 1200)
     assert "- #7 also\n" in text
     assert text.count("more cut") == 2 and len(text.encode()) <= 1200
+
+
+def test_a_short_section_leaves_its_bytes_to_a_long_one() -> None:
+    """Section (a) keeps more than a third of the budget when (b) and (c) are short."""
+    module = load_script(".github/reviewer/build-review-evidence.py")
+    long = [f"- lead {i} " + "x" * 80 for i in range(25)]
+    text = module.render([("(a)", long), ("(b)", ["- one"]), ("(c)", ["- two"])], 1200)
+    assert text.count("- lead ") * 90 > 1200 // 3 * 2
 
 
 def test_a_failed_open_pr_list_is_not_known_and_the_git_sections_still_ship(pr) -> None:

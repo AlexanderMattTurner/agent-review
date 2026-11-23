@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the root-cause evidence the reviewer's Agent 5 reads beside the diff.
+"""Write the root-cause evidence the reviewer's Agents 4 and 5 read beside the diff.
 
 PROBLEM CLASS — a fix PR that patches one more instance of a defect instead of
 fixing the definition that owns it. The reviewer reads one diff and a one-commit
@@ -26,6 +26,7 @@ the repository for `gh`.
 
 import argparse
 import base64
+import fnmatch
 import json
 import math
 import os
@@ -53,6 +54,10 @@ MAX_OTHER_DEFINITIONS = 5
 # A token in more files than this is a convention; one in fewer is a lead.
 MAX_RARE_FILES = 5
 MAX_RARE_TOKENS = 300
+# A longer added line is generated or minified text, and a regex scan of it costs O(n^2).
+MAX_SCAN_CHARS = 300
+# A token longer than this is no name, and 300 of them must fit one git argv.
+MAX_TOKEN_CHARS = 100
 # A token with no space that names a flag, path, file, unit key or address.
 RARE = re.compile(r"(?<![\w-])(?:[-./][\w.-]{3,}[\w=]|[\w.-]*[\w][-.:/=@][\w.:/=@-]*)")
 # Tests repeat product text on purpose, so a test file is no copy.
@@ -181,10 +186,12 @@ def added_definitions(base: str, head: str) -> list[tuple[str, str]]:
             and path
             and is_code(path)
         ):
-            if TEST_PATH.search(path):
+            if TEST_PATH.search(path) or len(line) > MAX_SCAN_CHARS:
                 continue
             match = DEFINED.search(line[1:])
-            name = match and (match["keyword"] or match["shell"])
+            # `name()` alone is a call outside shell, as copies() says.
+            shell = any(fnmatch.fnmatch(path, glob) for glob in SHELL_GLOBS)
+            name = match and (match["keyword"] or (shell and match["shell"]))
             if name and len(name) > 3 and (path, name) not in found:
                 found.append((path, name))
     return found[:DEFINITIONS_MAX]
@@ -198,12 +205,12 @@ def rare_tokens(base: str, head: str) -> list[tuple[str, str]]:
         if line.startswith("+++ "):
             path = line.removeprefix("+++ b/")
         elif line.startswith("+") and not line.startswith("+++") and is_code(path):
-            if TEST_PATH.search(path):
+            if TEST_PATH.search(path) or len(line) > MAX_SCAN_CHARS:
                 continue
             for token in RARE.findall(line[1:]):
                 token = token.rstrip(".:")
                 if (
-                    len(token) >= 8
+                    8 <= len(token) <= MAX_TOKEN_CHARS
                     and not ATTRIBUTE.fullmatch(token)
                     and token not in found
                 ):
@@ -297,23 +304,24 @@ def copies(base: str, head: str) -> list[str]:
         )
         if others and len(others) <= MAX_OTHER_DEFINITIONS:
             lines.append(
-                f"- `{name}` ({path}) is also defined at {', '.join(others[:5])}"
+                f"- `{name}` ({safe(path, 80)}) is also defined at {', '.join(others)}"
             )
     pr_paths = changed_paths(base, head)
     tokens = rare_tokens(base, head)
     # One `git grep -o` for every token: one call per token would spend the budget.
     patterns = [arg for token, _ in tokens for arg in ("-e", token)]
     holders: dict[str, set[str]] = {}
-    out = git("grep", "-o", "-I", "-F", *patterns, ok=(0, 1)) if tokens else ""
+    out = git("grep", "-z", "-o", "-I", "-F", *patterns, ok=(0, 1)) if tokens else ""
     for hit in out.splitlines():
-        where, _, token = hit.partition(":")
+        # -z ends the path with NUL, so a ':' in a path cannot split it.
+        where, _, token = hit.partition("\0")
         if where not in pr_paths and not TEST_PATH.search(where):
             holders.setdefault(token, set()).add(where)
     for token, path in tokens:
         others = sorted(holders.get(token, ()))
         if 0 < len(others) <= MAX_RARE_FILES:
             lines.append(
-                f"- added `{safe(token, 80)}` ({path}) is already in {', '.join(others)}"
+                f"- added `{safe(token, 80)}` ({safe(path, 80)}) is already in {', '.join(others)}"
             )
     for changed in changed_lines(base, head):
         hits = []
@@ -398,8 +406,8 @@ def section(title: str, build: Callable[[], list[str]]) -> tuple[str, list[str]]
 
 
 def render(sections: list[tuple[str, list[str]]], budget: int) -> str:
-    """Each section's markdown inside BUDGET bytes. The smallest section is cut
-    last, and the bytes it leaves go to the larger ones, so no section is lost."""
+    """Each section's markdown inside BUDGET bytes. The smallest section takes its
+    share first, and the bytes it leaves go to the larger ones, so none is lost."""
     kept: dict[int, list[str]] = {}
     order = sorted(
         range(len(sections)),
